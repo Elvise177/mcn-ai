@@ -1,6 +1,6 @@
 'use client';
 
-import { Loader2 } from 'lucide-react';
+import { Loader2, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import useSWR from 'swr';
@@ -36,6 +36,13 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { adminFetcher } from '@/lib/admin/client';
 
+const MODEL_OPTIONS = [
+  'claude-sonnet-4-6',
+  'claude-haiku-4-5',
+  'gpt-4o',
+  'gpt-4o-mini',
+];
+
 type AdminRole = {
   id: string;
   name: string;
@@ -47,7 +54,7 @@ type AdminRole = {
 };
 
 type RoleDetail = {
-  role: AdminRole;
+  role: AdminRole & { description: string | null };
   currentPrompt: { system_prompt: string; version_number: number } | null;
   versions: {
     id: string;
@@ -64,10 +71,66 @@ export default function AdminRolesPage() {
     adminFetcher,
   );
   const [editId, setEditId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  async function toggleActive(role: AdminRole, next: boolean) {
+    setTogglingId(role.id);
+    try {
+      const res = await fetch(`/api/v1/admin/roles/${role.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: next }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error);
+      toast.success(next ? '已启用角色' : '已禁用角色');
+      mutate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '更新失败');
+    } finally {
+      setTogglingId(null);
+    }
+  }
+
+  async function deleteRole(role: AdminRole) {
+    if (
+      !window.confirm(
+        `确定删除角色「${role.name}」？此操作不可恢复。若该角色已有对话记录将无法删除。`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(role.id);
+    try {
+      const res = await fetch(`/api/v1/admin/roles/${role.id}`, {
+        method: 'DELETE',
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error);
+      toast.success('角色已删除');
+      mutate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '删除失败');
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">角色管理</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold">角色管理</h1>
+        <Button
+          className="text-white hover:opacity-90"
+          style={{ backgroundColor: '#FF3366' }}
+          onClick={() => setCreateOpen(true)}
+        >
+          <Plus className="mr-2 h-4 w-4" />
+          新建角色
+        </Button>
+      </div>
 
       {isLoading ? (
         <Loader2 className="h-6 w-6 animate-spin" />
@@ -80,24 +143,29 @@ export default function AdminRolesPage() {
               <TableHead>模型</TableHead>
               <TableHead>温度</TableHead>
               <TableHead>Prompt 版本</TableHead>
-              <TableHead>状态</TableHead>
+              <TableHead>启用</TableHead>
               <TableHead>操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {(data ?? []).map((role) => (
-              <TableRow key={role.id}>
+              <TableRow
+                key={role.id}
+                className={!role.is_active ? 'opacity-60' : undefined}
+              >
                 <TableCell>{role.icon ?? '🤖'}</TableCell>
                 <TableCell>{role.name}</TableCell>
                 <TableCell className="font-mono text-xs">{role.model}</TableCell>
                 <TableCell>{role.temperature}</TableCell>
                 <TableCell>v{role.currentPromptVersion ?? '-'}</TableCell>
                 <TableCell>
-                  <Badge variant={role.is_active ? 'default' : 'secondary'}>
-                    {role.is_active ? '激活' : '禁用'}
-                  </Badge>
+                  <Switch
+                    checked={role.is_active}
+                    disabled={togglingId === role.id}
+                    onCheckedChange={(checked) => toggleActive(role, checked)}
+                  />
                 </TableCell>
-                <TableCell>
+                <TableCell className="space-x-2">
                   <Button
                     variant="outline"
                     size="sm"
@@ -105,11 +173,34 @@ export default function AdminRolesPage() {
                   >
                     编辑
                   </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    disabled={deletingId === role.id}
+                    onClick={() => deleteRole(role)}
+                  >
+                    {deletingId === role.id ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4" />
+                    )}
+                  </Button>
                 </TableCell>
               </TableRow>
             ))}
           </TableBody>
         </Table>
+      )}
+
+      {createOpen && (
+        <CreateRoleDialog
+          onClose={() => setCreateOpen(false)}
+          onCreated={() => {
+            setCreateOpen(false);
+            mutate();
+          }}
+        />
       )}
 
       {editId && (
@@ -123,6 +214,127 @@ export default function AdminRolesPage() {
         />
       )}
     </div>
+  );
+}
+
+function CreateRoleDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [icon, setIcon] = useState('🤖');
+  const [model, setModel] = useState('claude-sonnet-4-6');
+  const [temperature, setTemperature] = useState(0.7);
+  const [prompt, setPrompt] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    if (!name.trim()) {
+      toast.error('请填写角色名称');
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch('/api/v1/admin/roles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          icon: icon.trim() || '🤖',
+          model,
+          temperature,
+          prompt: prompt.trim() || undefined,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error);
+      toast.success('角色已创建');
+      onCreated();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '创建失败');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>新建角色</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label>名称</Label>
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例如：脚本策划"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>图标（emoji）</Label>
+              <Input
+                value={icon}
+                onChange={(e) => setIcon(e.target.value)}
+                placeholder="🤖"
+              />
+            </div>
+          </div>
+          <div className="space-y-2">
+            <Label>模型</Label>
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {MODEL_OPTIONS.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label>温度 {temperature.toFixed(1)}</Label>
+            <Slider
+              min={0}
+              max={1}
+              step={0.1}
+              value={[temperature]}
+              onValueChange={([v]) => setTemperature(v ?? 0.7)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>初始 System Prompt（可选）</Label>
+            <Textarea
+              className="min-h-[120px] font-mono text-sm"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="留空将使用默认模板"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            取消
+          </Button>
+          <Button
+            className="text-white"
+            style={{ backgroundColor: '#FF3366' }}
+            onClick={submit}
+            disabled={saving}
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : '创建'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -140,6 +352,9 @@ function RoleEditDialog({
     adminFetcher,
   );
 
+  const [name, setName] = useState('');
+  const [icon, setIcon] = useState('🤖');
+  const [model, setModel] = useState('claude-sonnet-4-6');
   const [prompt, setPrompt] = useState('');
   const [changeNote, setChangeNote] = useState('');
   const [temperature, setTemperature] = useState(0.7);
@@ -150,6 +365,9 @@ function RoleEditDialog({
 
   useEffect(() => {
     if (data && !initialized) {
+      setName(data.role.name);
+      setIcon(data.role.icon ?? '🤖');
+      setModel(data.role.model);
       setPrompt(data.currentPrompt?.system_prompt ?? '');
       setTemperature(data.role.temperature);
       setIsActive(data.role.is_active);
@@ -169,12 +387,19 @@ function RoleEditDialog({
       const res = await fetch(`/api/v1/admin/roles/${roleId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ temperature, isActive }),
+        body: JSON.stringify({
+          name: name.trim(),
+          icon: icon.trim(),
+          model,
+          temperature,
+          isActive,
+        }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error);
       toast.success('角色设置已保存');
       mutate();
+      onSaved();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '保存失败');
     } finally {
@@ -225,9 +450,7 @@ function RoleEditDialog({
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>
-            编辑角色：{data?.role.name ?? ''}
-          </DialogTitle>
+          <DialogTitle>编辑角色</DialogTitle>
         </DialogHeader>
 
         {isLoading || !data ? (
@@ -235,6 +458,34 @@ function RoleEditDialog({
         ) : (
           <div className="space-y-6">
             <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>名称</Label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>图标</Label>
+                <Input value={icon} onChange={(e) => setIcon(e.target.value)} />
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>模型</Label>
+                <Select value={model} onValueChange={setModel}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MODEL_OPTIONS.includes(model) ? null : (
+                      <SelectItem value={model}>{model}</SelectItem>
+                    )}
+                    {MODEL_OPTIONS.map((m) => (
+                      <SelectItem key={m} value={m}>
+                        {m}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
               <div className="space-y-2">
                 <Label>温度 {temperature.toFixed(1)}</Label>
                 <Slider
@@ -245,13 +496,22 @@ function RoleEditDialog({
                   onValueChange={([v]) => setTemperature(v ?? 0.7)}
                 />
               </div>
-              <div className="flex items-center justify-between rounded-lg border p-3">
-                <Label>激活状态</Label>
-                <Switch checked={isActive} onCheckedChange={setIsActive} />
-              </div>
             </div>
-            <Button variant="outline" onClick={saveMeta} disabled={saving}>
-              保存温度/状态
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div className="space-y-1">
+                <Label>启用状态</Label>
+                <p className="text-xs text-muted-foreground">
+                  禁用后用户端聊天将不再显示该角色
+                </p>
+              </div>
+              <Switch checked={isActive} onCheckedChange={setIsActive} />
+            </div>
+            <Button
+              variant="outline"
+              onClick={saveMeta}
+              disabled={saving || !name.trim()}
+            >
+              保存基本信息
             </Button>
 
             <div className="space-y-2">
@@ -281,7 +541,7 @@ function RoleEditDialog({
                 </Select>
               </div>
               <Textarea
-                className="min-h-[420px] font-mono text-sm"
+                className="min-h-[320px] font-mono text-sm"
                 value={displayPrompt ?? ''}
                 onChange={(e) => {
                   setViewVersion(null);
