@@ -395,7 +395,7 @@ export default function VideoImportPage() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
-        <aside className="rounded-xl border border-gray-100 bg-white p-3 shadow-sm lg:max-h-[calc(100vh-8rem)] lg:overflow-y-auto">
+        <aside className="max-h-[min(320px,50vh)] overflow-y-auto rounded-xl border border-gray-100 bg-white p-3 shadow-sm lg:max-h-[calc(100vh-8rem)]">
           <h2 className="mb-2 px-1 text-sm font-semibold text-gray-800">
             导入历史
           </h2>
