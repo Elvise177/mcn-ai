@@ -14,6 +14,10 @@ import { createScriptAdminClient } from './lib/supabase-admin';
 const BASE = process.env.BASE_URL ?? 'http://localhost:3000';
 const EMAIL = process.env.STRESS_EMAIL ?? 'tan779520069@gmail.com';
 const PASSWORD = process.env.STRESS_PASSWORD ?? '123456';
+/** 可选：抖音分享文案/链接，用于压测 POST 解析（依赖 TikHub 外网） */
+const STRESS_SHARE_URL = process.env.STRESS_SHARE_URL?.trim() ?? '';
+const IMPORT_TIMEOUT_MS = 90_000;
+const TRANSCRIBE_TIMEOUT_MS = 300_000;
 
 type Result = { name: string; ok: boolean; ms: number; detail?: string };
 
@@ -29,6 +33,7 @@ async function withAuthFetch(
   cookieHeader: string,
   path: string,
   init: RequestInit = {},
+  timeoutMs?: number,
 ) {
   const headers = new Headers(init.headers);
   headers.set('Cookie', cookieHeader);
@@ -36,9 +41,22 @@ async function withAuthFetch(
     headers.set('Content-Type', 'application/json');
   }
   const start = Date.now();
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers,
+    signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined,
+  });
   const text = await res.text();
   return { status: res.status, text, ms: Date.now() - start };
+}
+
+function parseApiError(text: string): string {
+  try {
+    const body = JSON.parse(text) as { error?: string };
+    return body.error?.slice(0, 120) ?? text.slice(0, 120);
+  } catch {
+    return text.slice(0, 120);
+  }
 }
 
 async function loginAndGetCookies(): Promise<string> {
@@ -209,6 +227,150 @@ async function testChatStream(cookie: string, conversationId: string, roleId: st
   }
 }
 
+async function testImportApis(cookie: string): Promise<string> {
+  const history = await withAuthFetch(cookie, '/api/v1/videos/import?limit=30');
+  record(
+    'GET /api/v1/videos/import',
+    history.status === 200,
+    history.ms,
+    `status=${history.status}`,
+  );
+
+  const start = Date.now();
+  const tasks = Array.from({ length: 15 }, () =>
+    withAuthFetch(cookie, '/api/v1/videos/import?limit=10'),
+  );
+  const settled = await Promise.allSettled(tasks);
+  const ok = settled.filter(
+    (r) => r.status === 'fulfilled' && r.value.status === 200,
+  ).length;
+  record(
+    'concurrent-import-history x15',
+    ok === 15,
+    Date.now() - start,
+    `${ok}/15 ok`,
+  );
+
+  let awemeId = '';
+  try {
+    const list = JSON.parse(history.text) as Array<{ aweme_id?: string }>;
+    awemeId = list[0]?.aweme_id ?? '';
+  } catch {
+    // ignore
+  }
+
+  if (awemeId) {
+    const detail = await withAuthFetch(cookie, `/api/v1/videos/${awemeId}`);
+    record(
+      `GET /api/v1/videos/${awemeId.slice(0, 8)}…`,
+      detail.status === 200,
+      detail.ms,
+      `status=${detail.status}`,
+    );
+  } else {
+    record('GET /api/v1/videos/[aweme_id]', true, 0, 'skip — no import history');
+  }
+
+  return awemeId;
+}
+
+/** TikHub 解析 + AssemblyAI 转写（外网依赖，失败不中断其余用例） */
+async function testImportPipeline(cookie: string, historyAwemeId: string) {
+  console.log('\n--- Import pipeline (TikHub + AssemblyAI) ---\n');
+
+  let awemeId = historyAwemeId;
+
+  if (STRESS_SHARE_URL) {
+    console.log('POST import (TikHub parse)...');
+    const importRes = await withAuthFetch(
+      cookie,
+      '/api/v1/videos/import',
+      {
+        method: 'POST',
+        body: JSON.stringify({ share_url: STRESS_SHARE_URL }),
+      },
+      IMPORT_TIMEOUT_MS,
+    );
+    const importOk = importRes.status === 200;
+    record(
+      'POST /api/v1/videos/import',
+      importOk,
+      importRes.ms,
+      importOk
+        ? 'parsed'
+        : `status=${importRes.status} ${parseApiError(importRes.text)}`,
+    );
+    if (importOk) {
+      try {
+        const body = JSON.parse(importRes.text) as {
+          video?: { aweme_id?: string };
+        };
+        awemeId = body.video?.aweme_id ?? awemeId;
+      } catch {
+        // ignore
+      }
+    }
+  } else {
+    record(
+      'POST /api/v1/videos/import',
+      true,
+      0,
+      'skip — set STRESS_SHARE_URL in .env.local to test TikHub',
+    );
+  }
+
+  if (!awemeId) {
+    record(
+      'POST /api/v1/videos/[aweme_id]/transcribe',
+      false,
+      0,
+      'skip — no aweme_id (parse a video first)',
+    );
+    return;
+  }
+
+  if (!process.env.ASSEMBLYAI_API_KEY?.trim()) {
+    record(
+      'POST /api/v1/videos/[aweme_id]/transcribe',
+      false,
+      0,
+      'skip — ASSEMBLYAI_API_KEY not set',
+    );
+    return;
+  }
+
+  console.log(`POST transcribe (AssemblyAI) aweme_id=${awemeId}...`);
+  const transcribeRes = await withAuthFetch(
+    cookie,
+    `/api/v1/videos/${awemeId}/transcribe`,
+    { method: 'POST' },
+    TRANSCRIBE_TIMEOUT_MS,
+  );
+  const transcribeOk = transcribeRes.status === 200;
+  let detail = `status=${transcribeRes.status}`;
+  if (transcribeOk) {
+    try {
+      const body = JSON.parse(transcribeRes.text) as {
+        cached?: boolean;
+        transcript?: string;
+      };
+      const len = body.transcript?.length ?? 0;
+      detail = `${body.cached ? 'cached' : 'fresh'}, ${len} chars`;
+    } catch {
+      detail = 'ok';
+    }
+  } else {
+    detail += ` ${parseApiError(transcribeRes.text)}`;
+  }
+
+  record(
+    'POST /api/v1/videos/[aweme_id]/transcribe',
+    transcribeOk,
+    transcribeRes.ms,
+    detail,
+  );
+}
+
 async function testBootstrapIdempotent(cookie: string) {
   const start = Date.now();
   const before = await withAuthFetch(cookie, '/api/v1/profile');
@@ -267,6 +429,8 @@ async function main() {
 
   await testAuthenticatedApis(cookie);
   await testConcurrentReads(cookie, 30);
+  const historyAwemeId = await testImportApis(cookie);
+  await testImportPipeline(cookie, historyAwemeId);
   await testBootstrapIdempotent(cookie);
 
   const rolesRes = await withAuthFetch(cookie, '/api/v1/roles');

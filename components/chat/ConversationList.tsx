@@ -4,7 +4,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
 import { LayoutDashboard, LogOut, Plus, Settings, Trash2 } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -33,6 +33,7 @@ export function ConversationList({
   onDelete,
 }: ConversationListProps) {
   const router = useRouter();
+  const pathname = usePathname();
   const [signingOut, setSigningOut] = useState(false);
 
   async function handleSignOut() {
@@ -55,6 +56,18 @@ export function ConversationList({
           <Plus className="h-4 w-4" />
           新对话
         </Button>
+        <Link
+          href="/import"
+          className={cn(
+            'mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors',
+            pathname === '/import'
+              ? 'bg-rose-50 font-medium text-rose-600'
+              : 'text-gray-600 hover:bg-gray-100',
+          )}
+        >
+          <span>📥</span>
+          <span>视频快速导入</span>
+        </Link>
       </div>
 
       <ScrollArea className="flex-1 px-2">

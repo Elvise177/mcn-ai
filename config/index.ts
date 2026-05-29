@@ -14,6 +14,11 @@ export const config = {
     serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY,
   },
 
+  tikhub: {
+    baseURL: 'https://api.tikhub.io',
+    apiKey: env.TIKHUB_API_KEY,
+  },
+
   ai: {
     defaultProvider: 'aihubmix' as const,
     providers: {

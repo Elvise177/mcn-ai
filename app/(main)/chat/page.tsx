@@ -14,6 +14,7 @@ import {
   fetchMessages,
   streamChat,
 } from '@/lib/chat/client';
+import { buildImportChatMessage } from '@/lib/import/chat-messages';
 import type { ChatMessage, ChatRole, Conversation } from '@/types/chat';
 
 function createId(prefix: string) {
@@ -43,6 +44,11 @@ export default function ChatPage() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const loadSeqRef = useRef(0);
+  const pendingImportActionRef = useRef<{
+    action: 'analyze' | 'script';
+    aweme_id: string;
+  } | null>(null);
+  const importActionHandledRef = useRef(false);
 
   const loadMessages = useCallback(async (conversationId: string) => {
     const seq = ++loadSeqRef.current;
@@ -224,97 +230,170 @@ export default function ChatPage() {
     [conversations, messagesByConversation, loadMessages],
   );
 
-  const handleSend = useCallback(async () => {
-    const text = inputValue.trim();
-    if (!text || sending || !roleForActive) return;
+  const sendMessageDirect = useCallback(
+    async (text: string, targetRole: ChatRole) => {
+      const trimmed = text.trim();
+      if (!trimmed || sending) return;
 
-    let conversationId = activeConversationId;
-    const userMessageId = createId('msg');
-    const assistantMessageId = createId('msg');
-
-    setSending(true);
-    setInputValue('');
-
-    try {
-      if (!conversationId) {
-        const conversation = await createConversation(roleForActive.id);
-        conversationId = conversation.id;
-        setActiveConversationId(conversation.id);
-        setConversations((prev) =>
-          sortConversations([conversation, ...prev]),
-        );
-        setMessagesByConversation((prev) => ({
-          ...prev,
-          [conversation.id]: [],
-        }));
+      let conversationId: string | null = null;
+      const existing = conversations.find((c) => c.roleId === targetRole.id);
+      if (existing) {
+        conversationId = existing.id;
+        setActiveConversationId(existing.id);
+        setSelectedRole(targetRole);
+        if (messagesByConversation[existing.id] === undefined) {
+          await loadMessages(existing.id);
+        }
       }
 
-      const convId = conversationId;
+      const userMessageId = createId('msg');
+      const assistantMessageId = createId('msg');
 
-      setMessagesByConversation((prev) => ({
-        ...prev,
-        [convId]: [
-          ...(prev[convId] ?? []),
-          { id: userMessageId, role: 'user', content: text },
-          {
-            id: assistantMessageId,
-            role: 'assistant',
-            content: '',
-            streaming: true,
-            thinking: true,
-          },
-        ],
-      }));
+      setSending(true);
+      setInputValue('');
 
-      await streamChat(convId, text, roleForActive.id, (assistantContent) => {
+      try {
+        if (!conversationId) {
+          const conversation = await createConversation(targetRole.id);
+          conversationId = conversation.id;
+          setActiveConversationId(conversation.id);
+          setSelectedRole(targetRole);
+          setConversations((prev) =>
+            sortConversations([conversation, ...prev]),
+          );
+          setMessagesByConversation((prev) => ({
+            ...prev,
+            [conversation.id]: [],
+          }));
+        }
+
+        const convId = conversationId;
+
+        setMessagesByConversation((prev) => ({
+          ...prev,
+          [convId]: [
+            ...(prev[convId] ?? []),
+            { id: userMessageId, role: 'user', content: trimmed },
+            {
+              id: assistantMessageId,
+              role: 'assistant',
+              content: '',
+              streaming: true,
+              thinking: true,
+            },
+          ],
+        }));
+
+        await streamChat(convId, trimmed, targetRole.id, (assistantContent) => {
+          setMessagesByConversation((prev) => ({
+            ...prev,
+            [convId]: (prev[convId] ?? []).map((m) =>
+              m.id === assistantMessageId
+                ? {
+                    ...m,
+                    content: assistantContent,
+                    thinking: false,
+                    streaming: true,
+                  }
+                : m,
+            ),
+          }));
+        });
+
         setMessagesByConversation((prev) => ({
           ...prev,
           [convId]: (prev[convId] ?? []).map((m) =>
             m.id === assistantMessageId
-              ? {
-                  ...m,
-                  content: assistantContent,
-                  thinking: false,
-                  streaming: true,
-                }
+              ? { ...m, streaming: false, thinking: false }
               : m,
           ),
         }));
-      });
 
-      setMessagesByConversation((prev) => ({
-        ...prev,
-        [convId]: (prev[convId] ?? []).map((m) =>
-          m.id === assistantMessageId
-            ? { ...m, streaming: false, thinking: false }
-            : m,
-        ),
-      }));
-
-      await refreshConversations();
-    } catch (error) {
-      setInputValue(text);
-      if (conversationId) {
-        setMessagesByConversation((prev) => ({
-          ...prev,
-          [conversationId!]: (prev[conversationId!] ?? []).filter(
-            (m) => m.id !== userMessageId && m.id !== assistantMessageId,
-          ),
-        }));
+        await refreshConversations();
+      } catch (error) {
+        if (conversationId) {
+          setMessagesByConversation((prev) => ({
+            ...prev,
+            [conversationId!]: (prev[conversationId!] ?? []).filter(
+              (m) => m.id !== userMessageId && m.id !== assistantMessageId,
+            ),
+          }));
+        }
+        toast.error(
+          error instanceof Error ? error.message : '发送失败，请重试',
+        );
+      } finally {
+        setSending(false);
       }
-      toast.error(
-        error instanceof Error ? error.message : '发送失败，请重试',
-      );
-    } finally {
-      setSending(false);
+    },
+    [
+      conversations,
+      loadMessages,
+      messagesByConversation,
+      refreshConversations,
+      sending,
+    ],
+  );
+
+  const handleSend = useCallback(async () => {
+    const text = inputValue.trim();
+    if (!text || sending || !roleForActive) return;
+    await sendMessageDirect(text, roleForActive);
+  }, [inputValue, roleForActive, sendMessageDirect, sending]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const action = searchParams.get('action');
+    const aweme_id = searchParams.get('aweme_id');
+    if (
+      !action ||
+      !aweme_id ||
+      (action !== 'analyze' && action !== 'script')
+    ) {
+      return;
     }
-  }, [
-    activeConversationId,
-    inputValue,
-    refreshConversations,
-    roleForActive,
-    sending,
-  ]);
+
+    pendingImportActionRef.current = {
+      action,
+      aweme_id,
+    };
+    importActionHandledRef.current = false;
+    window.history.replaceState({}, '', '/chat');
+  }, []);
+
+  useEffect(() => {
+    if (pageLoading || importActionHandledRef.current) return;
+    const pending = pendingImportActionRef.current;
+    if (!pending || roles.length === 0) return;
+
+    importActionHandledRef.current = true;
+    pendingImportActionRef.current = null;
+
+    void (async () => {
+      try {
+        const res = await fetch(`/api/v1/videos/${pending.aweme_id}`);
+        if (!res.ok) {
+          toast.error('查询导入视频失败，请先在导入页解析视频');
+          return;
+        }
+        const video = await res.json();
+
+        const built = buildImportChatMessage(pending.action, video);
+        if (!built) return;
+
+        const targetRole = roles.find((r) => r.name === built.roleName);
+        if (!targetRole) {
+          toast.error(`未找到角色：${built.roleName}`);
+          return;
+        }
+
+        await sendMessageDirect(built.message, targetRole);
+      } catch (e) {
+        console.error('自动触发对话失败', e);
+        toast.error('自动发送失败，请重试');
+      }
+    })();
+  }, [pageLoading, roles, sendMessageDirect]);
 
   if (pageLoading) {
     return (

@@ -298,6 +298,178 @@ export type Database = {
           },
         ];
       };
+      imported_videos: {
+        Row: {
+          id: string;
+          user_id: string;
+          organization_id: string | null;
+          aweme_id: string;
+          video_desc: string | null;
+          duration_seconds: number | null;
+          cover_url: string | null;
+          play_url: string | null;
+          create_time: number | null;
+          author_nickname: string | null;
+          author_sec_uid: string | null;
+          author_aweme_count: number | null;
+          author_total_favorited: number | null;
+          like_count: number | null;
+          comment_count: number | null;
+          share_count: number | null;
+          collect_count: number | null;
+          collect_rate: number | null;
+          share_rate: number | null;
+          category_tags: string[] | null;
+          is_beauty_content: boolean;
+          hashtags: string[] | null;
+          is_shopping: boolean;
+          product_title: string | null;
+          product_image: string | null;
+          product_category_l1: string | null;
+          product_category_l2: string | null;
+          product_category_l3: string | null;
+          product_sales_total: number | null;
+          product_review_count: number | null;
+          raw_data: Json | null;
+          latest_transcript_id: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          organization_id?: string | null;
+          aweme_id: string;
+          video_desc?: string | null;
+          duration_seconds?: number | null;
+          cover_url?: string | null;
+          play_url?: string | null;
+          create_time?: number | null;
+          author_nickname?: string | null;
+          author_sec_uid?: string | null;
+          author_aweme_count?: number | null;
+          author_total_favorited?: number | null;
+          like_count?: number | null;
+          comment_count?: number | null;
+          share_count?: number | null;
+          collect_count?: number | null;
+          collect_rate?: number | null;
+          share_rate?: number | null;
+          category_tags?: string[] | null;
+          is_beauty_content?: boolean;
+          hashtags?: string[] | null;
+          is_shopping?: boolean;
+          product_title?: string | null;
+          product_image?: string | null;
+          product_category_l1?: string | null;
+          product_category_l2?: string | null;
+          product_category_l3?: string | null;
+          product_sales_total?: number | null;
+          product_review_count?: number | null;
+          raw_data?: Json | null;
+          latest_transcript_id?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          organization_id?: string | null;
+          aweme_id?: string;
+          video_desc?: string | null;
+          duration_seconds?: number | null;
+          cover_url?: string | null;
+          play_url?: string | null;
+          create_time?: number | null;
+          author_nickname?: string | null;
+          author_sec_uid?: string | null;
+          author_aweme_count?: number | null;
+          author_total_favorited?: number | null;
+          like_count?: number | null;
+          comment_count?: number | null;
+          share_count?: number | null;
+          collect_count?: number | null;
+          collect_rate?: number | null;
+          share_rate?: number | null;
+          category_tags?: string[] | null;
+          is_beauty_content?: boolean;
+          hashtags?: string[] | null;
+          is_shopping?: boolean;
+          product_title?: string | null;
+          product_image?: string | null;
+          product_category_l1?: string | null;
+          product_category_l2?: string | null;
+          product_category_l3?: string | null;
+          product_sales_total?: number | null;
+          product_review_count?: number | null;
+          raw_data?: Json | null;
+          latest_transcript_id?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'imported_videos_latest_transcript_id_fkey';
+            columns: ['latest_transcript_id'];
+            isOneToOne: false;
+            referencedRelation: 'video_transcripts';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
+      video_transcripts: {
+        Row: {
+          id: string;
+          imported_video_id: string;
+          user_id: string;
+          aweme_id: string;
+          transcript: string | null;
+          status: string;
+          error_message: string | null;
+          play_url: string | null;
+          provider: string | null;
+          model: string | null;
+          language: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          imported_video_id: string;
+          user_id: string;
+          aweme_id: string;
+          transcript?: string | null;
+          status?: string;
+          error_message?: string | null;
+          play_url?: string | null;
+          provider?: string | null;
+          model?: string | null;
+          language?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          imported_video_id?: string;
+          user_id?: string;
+          aweme_id?: string;
+          transcript?: string | null;
+          status?: string;
+          error_message?: string | null;
+          play_url?: string | null;
+          provider?: string | null;
+          model?: string | null;
+          language?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'video_transcripts_imported_video_id_fkey';
+            columns: ['imported_video_id'];
+            isOneToOne: true;
+            referencedRelation: 'imported_videos';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       messages: {
         Row: {
           id: string;
