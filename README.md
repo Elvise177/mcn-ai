@@ -37,7 +37,11 @@ cp .env.local.example .env.local
 
 1. `supabase/migrations/001_initial_schema.sql`（或 `supabase/RUN_THIS_IN_SUPABASE.sql`）
 2. `supabase/migrations/002_system_settings.sql`
-3. 若注册报错，执行 `supabase/FIX_HANDLE_NEW_USER_NOW.sql`
+3. `003` ~ `006`（视频导入与转写）
+4. `007_phase0_fixes.sql`（索引 / RLS 收紧 / 原子用量统计，**已有部署也必须执行**）
+5. `008_knowledge_vectors.sql`（pgvector 知识库，RAG 必需）
+6. `009_auto_editing.sql`（剪辑任务队列，自动剪辑必需）
+7. 若注册报错，执行 `supabase/FIX_HANDLE_NEW_USER_NOW.sql`
 
 ### 4. 种子数据（可选）
 
@@ -158,6 +162,7 @@ git push -u origin main
 | `npm run check-costs` | 统计本月消息 Token 与成本 |
 | `npm run seed-roles` | 初始化 5 个默认 AI 角色 |
 | `npm run verify-models` | 验证 AIHubMix 模型可用性 |
+| `npm run backfill-knowledge` | 把已完成的口播转写回填进向量知识库 |
 
 脚本依赖 `.env.local` 中的 Supabase 与 AI 密钥。
 

@@ -1,8 +1,9 @@
 'use client';
 
-import { Loader2 } from 'lucide-react';
+import { Loader2, Menu } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 
+import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { ChatMessage, ChatRole } from '@/types/chat';
 
@@ -21,6 +22,8 @@ type ChatMainProps = {
   onRoleChange: (role: ChatRole) => void;
   onInputChange: (value: string) => void;
   onSend: () => void;
+  onStop?: () => void;
+  onOpenSidebar?: () => void;
 };
 
 export function ChatMain({
@@ -34,6 +37,8 @@ export function ChatMain({
   onRoleChange,
   onInputChange,
   onSend,
+  onStop,
+  onOpenSidebar,
 }: ChatMainProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -43,7 +48,17 @@ export function ChatMain({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background">
-      <header className="flex h-14 shrink-0 items-center border-b px-4">
+      <header className="flex h-14 shrink-0 items-center gap-1 border-b px-3 sm:px-4">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-9 w-9 shrink-0 md:hidden"
+          onClick={onOpenSidebar}
+          title="对话列表"
+        >
+          <Menu className="h-5 w-5" />
+        </Button>
         <RoleSelector
           roles={roles}
           selectedRole={selectedRole}
@@ -87,6 +102,7 @@ export function ChatMain({
         value={inputValue}
         onChange={onInputChange}
         onSend={onSend}
+        onStop={onStop}
         loading={sending}
         disabled={pageLoading}
       />

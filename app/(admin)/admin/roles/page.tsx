@@ -50,11 +50,12 @@ type AdminRole = {
   model: string;
   temperature: number;
   is_active: boolean;
+  enable_rag: boolean;
   currentPromptVersion: number | null;
 };
 
 type RoleDetail = {
-  role: AdminRole & { description: string | null };
+  role: AdminRole & { description: string | null; enable_rag: boolean };
   currentPrompt: { system_prompt: string; version_number: number } | null;
   versions: {
     id: string;
@@ -73,6 +74,7 @@ export default function AdminRolesPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [ragTogglingId, setRagTogglingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   async function toggleActive(role: AdminRole, next: boolean) {
@@ -91,6 +93,25 @@ export default function AdminRolesPage() {
       toast.error(e instanceof Error ? e.message : '更新失败');
     } finally {
       setTogglingId(null);
+    }
+  }
+
+  async function toggleRag(role: AdminRole, next: boolean) {
+    setRagTogglingId(role.id);
+    try {
+      const res = await fetch(`/api/v1/admin/roles/${role.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enableRag: next }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error);
+      toast.success(next ? '已开启知识库检索' : '已关闭知识库检索');
+      mutate();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '更新失败');
+    } finally {
+      setRagTogglingId(null);
     }
   }
 
@@ -124,7 +145,6 @@ export default function AdminRolesPage() {
         <h1 className="text-2xl font-semibold">角色管理</h1>
         <Button
           className="text-white hover:opacity-90"
-          style={{ backgroundColor: '#FF3366' }}
           onClick={() => setCreateOpen(true)}
         >
           <Plus className="mr-2 h-4 w-4" />
@@ -144,6 +164,7 @@ export default function AdminRolesPage() {
               <TableHead>温度</TableHead>
               <TableHead>Prompt 版本</TableHead>
               <TableHead>启用</TableHead>
+              <TableHead>知识库(RAG)</TableHead>
               <TableHead>操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -163,6 +184,13 @@ export default function AdminRolesPage() {
                     checked={role.is_active}
                     disabled={togglingId === role.id}
                     onCheckedChange={(checked) => toggleActive(role, checked)}
+                  />
+                </TableCell>
+                <TableCell>
+                  <Switch
+                    checked={role.enable_rag}
+                    disabled={ragTogglingId === role.id}
+                    onCheckedChange={(checked) => toggleRag(role, checked)}
                   />
                 </TableCell>
                 <TableCell className="space-x-2">
@@ -326,7 +354,6 @@ function CreateRoleDialog({
           </Button>
           <Button
             className="text-white"
-            style={{ backgroundColor: '#FF3366' }}
             onClick={submit}
             disabled={saving}
           >
@@ -359,6 +386,7 @@ function RoleEditDialog({
   const [changeNote, setChangeNote] = useState('');
   const [temperature, setTemperature] = useState(0.7);
   const [isActive, setIsActive] = useState(true);
+  const [enableRag, setEnableRag] = useState(false);
   const [viewVersion, setViewVersion] = useState<number | null>(null);
   const [initialized, setInitialized] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -371,6 +399,7 @@ function RoleEditDialog({
       setPrompt(data.currentPrompt?.system_prompt ?? '');
       setTemperature(data.role.temperature);
       setIsActive(data.role.is_active);
+      setEnableRag(data.role.enable_rag ?? false);
       setInitialized(true);
     }
   }, [data, initialized]);
@@ -393,6 +422,7 @@ function RoleEditDialog({
           model,
           temperature,
           isActive,
+          enableRag,
         }),
       });
       const body = await res.json();
@@ -506,6 +536,15 @@ function RoleEditDialog({
               </div>
               <Switch checked={isActive} onCheckedChange={setIsActive} />
             </div>
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div className="space-y-1">
+                <Label>知识库检索（RAG）</Label>
+                <p className="text-xs text-muted-foreground">
+                  开启后，该角色生成前会自动检索同组织的爆款脚本/口播转写并作为参考注入。适合脚本生成、钩子生成类角色。
+                </p>
+              </div>
+              <Switch checked={enableRag} onCheckedChange={setEnableRag} />
+            </div>
             <Button
               variant="outline"
               onClick={saveMeta}
@@ -575,7 +614,6 @@ function RoleEditDialog({
             关闭
           </Button>
           <Button
-            style={{ backgroundColor: '#FF3366' }}
             className="text-white"
             onClick={savePrompt}
             disabled={saving || viewVersion !== null}

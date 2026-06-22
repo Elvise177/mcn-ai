@@ -855,9 +855,183 @@ export type Database = {
         };
         Relationships: [];
       };
+      knowledge_chunks: {
+        Row: {
+          id: string;
+          knowledge_item_id: string | null;
+          organization_id: string;
+          source_type: string;
+          content: string;
+          embedding: string | null;
+          metadata: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          knowledge_item_id?: string | null;
+          organization_id: string;
+          source_type: string;
+          content: string;
+          embedding?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          knowledge_item_id?: string | null;
+          organization_id?: string;
+          source_type?: string;
+          content?: string;
+          embedding?: string | null;
+          metadata?: Json;
+          created_at?: string;
+        };
+        Relationships: [];
+      };
+      editing_templates: {
+        Row: {
+          id: string;
+          organization_id: string | null;
+          name: string;
+          description: string | null;
+          category: string | null;
+          template: Json;
+          is_active: boolean;
+          created_by: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          organization_id?: string | null;
+          name: string;
+          description?: string | null;
+          category?: string | null;
+          template?: Json;
+          is_active?: boolean;
+          created_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          organization_id?: string | null;
+          name?: string;
+          description?: string | null;
+          category?: string | null;
+          template?: Json;
+          is_active?: boolean;
+          created_by?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      edit_jobs: {
+        Row: {
+          id: string;
+          user_id: string;
+          organization_id: string | null;
+          imported_video_id: string | null;
+          transcript_id: string | null;
+          template_id: string | null;
+          status: string;
+          instruction: string | null;
+          cut_plan: Json | null;
+          draft_url: string | null;
+          error_message: string | null;
+          worker_id: string | null;
+          claimed_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          organization_id?: string | null;
+          imported_video_id?: string | null;
+          transcript_id?: string | null;
+          template_id?: string | null;
+          status?: string;
+          instruction?: string | null;
+          cut_plan?: Json | null;
+          draft_url?: string | null;
+          error_message?: string | null;
+          worker_id?: string | null;
+          claimed_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          organization_id?: string | null;
+          imported_video_id?: string | null;
+          transcript_id?: string | null;
+          template_id?: string | null;
+          status?: string;
+          instruction?: string | null;
+          cut_plan?: Json | null;
+          draft_url?: string | null;
+          error_message?: string | null;
+          worker_id?: string | null;
+          claimed_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      increment_usage_stats: {
+        Args: {
+          p_user_id: string;
+          p_organization_id: string;
+          p_date: string;
+          p_tokens: number;
+          p_cost: number;
+          p_model: string;
+          p_role_id: string;
+        };
+        Returns: undefined;
+      };
+      match_knowledge_chunks: {
+        Args: {
+          query_embedding: string;
+          p_organization_id: string;
+          p_source_types: string[];
+          match_count: number;
+        };
+        Returns: {
+          id: string;
+          content: string;
+          source_type: string;
+          metadata: Json;
+          similarity: number;
+        }[];
+      };
+      claim_next_edit_job: {
+        Args: { p_worker_id: string };
+        Returns: {
+          id: string;
+          user_id: string;
+          organization_id: string | null;
+          imported_video_id: string | null;
+          transcript_id: string | null;
+          template_id: string | null;
+          status: string;
+          instruction: string | null;
+          cut_plan: Json | null;
+          draft_url: string | null;
+          error_message: string | null;
+          worker_id: string | null;
+          claimed_at: string | null;
+          created_at: string;
+          updated_at: string;
+        }[];
+      };
+    };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
   };

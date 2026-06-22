@@ -69,7 +69,7 @@ export async function POST(req: Request) {
 
   if (error) return Response.json({ error: error.message }, { status: 500 });
 
-  eventBus.emit(Events.CONVERSATION_CREATED, {
+  await eventBus.emitAsync(Events.CONVERSATION_CREATED, {
     userId: user.id,
     organizationId: profile?.organization_id,
     resourceType: 'conversation',

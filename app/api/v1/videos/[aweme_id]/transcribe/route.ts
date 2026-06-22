@@ -1,4 +1,5 @@
 import { transcribeFromVideoUrl } from '@/lib/import/transcribe-assembly';
+import { ingestKnowledge } from '@/lib/knowledge';
 import { createAdminClient } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
 import type { TablesInsert } from '@/types/database';
@@ -26,7 +27,9 @@ export async function POST(
   const admin = createAdminClient();
   const { data: row, error: fetchError } = await admin
     .from('imported_videos')
-    .select('id, aweme_id, play_url, video_desc, product_title, latest_transcript_id')
+    .select(
+      'id, aweme_id, play_url, video_desc, product_title, latest_transcript_id, organization_id, author_nickname, like_count, collect_rate, product_category_l2',
+    )
     .eq('user_id', user.id)
     .eq('aweme_id', params.aweme_id)
     .maybeSingle<{
@@ -36,6 +39,11 @@ export async function POST(
       video_desc: string | null;
       product_title: string | null;
       latest_transcript_id: string | null;
+      organization_id: string | null;
+      author_nickname: string | null;
+      like_count: number | null;
+      collect_rate: number | null;
+      product_category_l2: string | null;
     }>();
 
   if (fetchError || !row) {
@@ -110,6 +118,28 @@ export async function POST(
       .eq('id', transcriptRow.id);
 
     if (updateError) throw updateError;
+
+    // 转写成功后自动入向量知识库（失败不影响转写结果）
+    if (row.organization_id) {
+      try {
+        await ingestKnowledge({
+          organizationId: row.organization_id,
+          sourceType: 'transcript',
+          content: transcript,
+          metadata: {
+            aweme_id: row.aweme_id,
+            video_desc: row.video_desc,
+            product_title: row.product_title,
+            author_nickname: row.author_nickname,
+            like_count: row.like_count,
+            collect_rate: row.collect_rate,
+            product_category_l2: row.product_category_l2,
+          },
+        });
+      } catch (ingestError) {
+        console.error('[Transcribe] 向量入库失败:', ingestError);
+      }
+    }
 
     return Response.json({
       success: true,

@@ -2,6 +2,7 @@
 
 import {
   BarChart3,
+  BookOpen,
   FileText,
   LayoutDashboard,
   LogOut,
@@ -32,6 +33,7 @@ const NAV = [
   { href: '/admin', label: '总览 Dashboard', icon: LayoutDashboard },
   { href: '/admin/users', label: '用户管理', icon: Users },
   { href: '/admin/roles', label: '角色管理', icon: Shield },
+  { href: '/admin/knowledge', label: '知识库', icon: BookOpen },
   { href: '/admin/conversations', label: '对话监控', icon: MessageSquare },
   { href: '/admin/stats', label: '使用统计', icon: BarChart3 },
   { href: '/admin/logs', label: '审计日志', icon: FileText },
@@ -61,7 +63,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background">
       <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
-        <Link href="/admin" className="text-lg font-bold text-[#FF3366]">
+        <Link href="/admin" className="text-lg font-bold text-primary">
           OMG AI Admin
         </Link>
         <div className="flex items-center gap-3">
@@ -95,7 +97,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
                   className={cn(
                     'flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors',
                     active
-                      ? 'bg-background font-medium text-[#FF3366] shadow-sm'
+                      ? 'bg-background font-medium text-primary shadow-sm'
                       : 'text-muted-foreground hover:bg-background/70 hover:text-foreground',
                   )}
                 >

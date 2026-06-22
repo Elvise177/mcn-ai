@@ -154,7 +154,7 @@ export async function POST(req: Request) {
     })
     .eq('id', role.id);
 
-  eventBus.emit(Events.ADMIN_ROLE_CREATED, {
+  await eventBus.emitAsync(Events.ADMIN_ROLE_CREATED, {
     userId: ctx.userId,
     organizationId,
     resourceType: 'ai_role',

@@ -15,6 +15,8 @@ export interface ChatParams {
   stream?: boolean;
   tools?: Tool[];
   tool_choice?: 'auto' | 'none' | 'required';
+  /** 客户端断开时取消上游请求，避免浪费 token */
+  signal?: AbortSignal;
 }
 
 export interface TokenUsage {

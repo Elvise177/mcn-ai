@@ -65,7 +65,6 @@ export default function AdminUsersPage() {
         <h1 className="text-2xl font-semibold">用户管理</h1>
         <Button
           className="text-white hover:opacity-90"
-          style={{ backgroundColor: '#FF3366' }}
           onClick={() => setCreateOpen(true)}
         >
           <Plus className="mr-2 h-4 w-4" />

@@ -35,7 +35,7 @@ export async function POST(
     ctx.userId,
   );
 
-  eventBus.emit(Events.ADMIN_PROMPT_UPDATED, {
+  await eventBus.emitAsync(Events.ADMIN_PROMPT_UPDATED, {
     userId: ctx.userId,
     organizationId: ctx.organizationId,
     resourceType: 'ai_role',

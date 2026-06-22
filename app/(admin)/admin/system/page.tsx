@@ -62,7 +62,6 @@ export default function AdminSystemPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">系统配置</h1>
         <Button
-          style={{ backgroundColor: '#FF3366' }}
           className="text-white"
           onClick={handleSave}
           disabled={saving}

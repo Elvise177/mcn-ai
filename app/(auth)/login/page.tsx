@@ -17,10 +17,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { createClient } from '@/lib/supabase/client';
 
-const BRAND = '#FF3366';
-
 const inputClassName =
-  'focus-visible:ring-[#FF3366] focus-visible:border-[#FF3366]';
+  'focus-visible:ring-primary focus-visible:border-primary';
 
 function LoginPageContent() {
   const router = useRouter();
@@ -75,10 +73,7 @@ function LoginPageContent() {
     <Card className="w-[400px] border-0 shadow-lg">
       <CardHeader className="space-y-4 pb-2 text-center">
         <div className="space-y-1">
-          <p
-            className="text-2xl font-bold tracking-tight"
-            style={{ color: BRAND }}
-          >
+          <p className="text-brand-gradient text-2xl font-bold tracking-tight">
             MCN AI
           </p>
           <CardTitle className="text-lg font-semibold text-foreground">
@@ -129,8 +124,7 @@ function LoginPageContent() {
 
           <Button
             type="submit"
-            className="w-full text-white hover:opacity-90"
-            style={{ backgroundColor: BRAND }}
+            className="bg-brand-gradient w-full font-medium"
             disabled={loading}
           >
             {loading ? '登录中…' : '登录'}
@@ -147,7 +141,7 @@ export default function LoginPage() {
       fallback={
         <Card className="w-[400px] border-0 shadow-lg">
           <CardHeader className="text-center">
-            <CardTitle style={{ color: BRAND }}>美妆带货AI操作台</CardTitle>
+            <CardTitle className="text-brand-gradient">美妆带货AI操作台</CardTitle>
             <CardDescription>加载中…</CardDescription>
           </CardHeader>
         </Card>

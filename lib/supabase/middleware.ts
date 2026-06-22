@@ -76,6 +76,7 @@ export async function updateSession(request: NextRequest) {
     !user &&
     (path.startsWith('/chat') ||
       path.startsWith('/import') ||
+      path.startsWith('/edit-jobs') ||
       path.startsWith('/admin') ||
       path.startsWith('/settings'))
   ) {

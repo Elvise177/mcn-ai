@@ -1,6 +1,6 @@
 'use client';
 
-import { Check, Copy } from 'lucide-react';
+import { Copy, Sparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { toast } from 'sonner';
@@ -20,7 +20,7 @@ export function MessageBubble({ message, role }: MessageBubbleProps) {
   if (isUser) {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl bg-muted px-4 py-3 text-sm leading-relaxed">
+        <div className="bg-brand-gradient max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-relaxed text-primary-foreground shadow-soft">
           {message.content}
         </div>
       </div>
@@ -33,15 +33,28 @@ export function MessageBubble({ message, role }: MessageBubbleProps) {
   return (
     <div className="flex gap-3">
       <Avatar className="h-8 w-8 shrink-0">
-        <AvatarFallback className="bg-white text-sm">
+        <AvatarFallback className="border bg-card text-sm">
           {role?.icon ?? '🤖'}
         </AvatarFallback>
       </Avatar>
 
       <div className="min-w-0 flex-1 space-y-2">
-        <div className="max-w-[85%] rounded-2xl border bg-white px-4 py-3 text-sm leading-relaxed shadow-sm">
+        {!isThinking && message.knowledgeCount ? (
+          <div className="inline-flex items-center gap-1 rounded-full bg-accent px-2.5 py-1 text-xs font-medium text-accent-foreground">
+            <Sparkles className="h-3 w-3" />
+            参考了 {message.knowledgeCount} 条爆款资料
+          </div>
+        ) : null}
+        <div className="rounded-2xl border bg-card px-4 py-3 text-sm leading-relaxed shadow-soft">
           {isThinking ? (
-            <p className="text-muted-foreground">思考中...</p>
+            <p className="flex items-center gap-2 text-muted-foreground">
+              <span className="inline-flex gap-1">
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
+              </span>
+              思考中
+            </p>
           ) : (
             <>
               <ReactMarkdown

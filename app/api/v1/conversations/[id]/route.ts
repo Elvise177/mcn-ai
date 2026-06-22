@@ -52,8 +52,9 @@ export async function DELETE(
   if ('error' in auth) return auth.error;
   const { user, profile } = auth;
 
-  const supabase = await createClient();
-  const { error } = await supabase
+  // 走 service role + 显式 user_id 校验，绕过可能缺失的 RLS 删除策略
+  const admin = createAdminClient();
+  const { error } = await admin
     .from('conversations')
     .delete()
     .eq('id', id)
@@ -63,7 +64,7 @@ export async function DELETE(
     return Response.json({ error: error.message }, { status: 500 });
   }
 
-  eventBus.emit(Events.CONVERSATION_DELETED, {
+  await eventBus.emitAsync(Events.CONVERSATION_DELETED, {
     userId: user.id,
     organizationId: profile?.organization_id,
     resourceType: 'conversation',

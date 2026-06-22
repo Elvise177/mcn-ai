@@ -20,6 +20,7 @@ type ApiMessage = {
   id: string;
   role: string;
   content: string;
+  knowledge_refs?: unknown;
 };
 
 async function readError(res: Response): Promise<string> {
@@ -53,10 +54,12 @@ export function mapConversation(conv: ApiConversation): Conversation {
 }
 
 export function mapMessage(msg: ApiMessage): ChatMessage {
+  const refs = Array.isArray(msg.knowledge_refs) ? msg.knowledge_refs : [];
   return {
     id: msg.id,
     role: msg.role as 'user' | 'assistant',
     content: msg.content,
+    knowledgeCount: refs.length > 0 ? refs.length : undefined,
   };
 }
 
@@ -126,16 +129,36 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   if (!res.ok) throw new Error(await readError(res));
 }
 
+export async function renameConversation(
+  conversationId: string,
+  title: string,
+): Promise<void> {
+  const res = await fetch(`/api/v1/conversations/${conversationId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export type StreamCallbacks = {
+  onContent: (content: string) => void;
+  onMeta?: (meta: { knowledgeCount: number }) => void;
+  signal?: AbortSignal;
+};
+
 export async function streamChat(
   conversationId: string,
   message: string,
   roleId: string,
-  onContent: (content: string) => void,
+  callbacks: StreamCallbacks,
 ): Promise<void> {
+  const { onContent, onMeta, signal } = callbacks;
   const response = await fetch('/api/v1/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ conversationId, message, roleId }),
+    signal,
   });
 
   if (!response.ok) {
@@ -163,7 +186,13 @@ export async function streamChat(
       if (data === '[DONE]') continue;
 
       try {
-        const parsed = JSON.parse(data) as { content?: string };
+        const parsed = JSON.parse(data) as {
+          content?: string;
+          knowledgeCount?: number;
+        };
+        if (typeof parsed.knowledgeCount === 'number') {
+          onMeta?.({ knowledgeCount: parsed.knowledgeCount });
+        }
         if (parsed.content) {
           assistantContent += parsed.content;
           onContent(assistantContent);

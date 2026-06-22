@@ -25,6 +25,7 @@ export async function PATCH(
     modelProvider?: string;
     temperature?: number;
     isActive?: boolean;
+    enableRag?: boolean;
     sortOrder?: number;
   };
 
@@ -57,6 +58,7 @@ export async function PATCH(
   }
   if (body.temperature !== undefined) patch.temperature = body.temperature;
   if (body.isActive !== undefined) patch.is_active = body.isActive;
+  if (body.enableRag !== undefined) patch.enable_rag = body.enableRag;
   if (body.sortOrder !== undefined) patch.sort_order = body.sortOrder;
 
   const admin = createAdminClient();

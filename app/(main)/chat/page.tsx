@@ -12,6 +12,7 @@ import {
   fetchChatInit,
   fetchConversations,
   fetchMessages,
+  renameConversation,
   streamChat,
 } from '@/lib/chat/client';
 import { buildImportChatMessage } from '@/lib/import/chat-messages';
@@ -43,6 +44,8 @@ export default function ChatPage() {
   const [pageLoading, setPageLoading] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const loadSeqRef = useRef(0);
   const pendingImportActionRef = useRef<{
     action: 'analyze' | 'script';
@@ -284,20 +287,34 @@ export default function ChatPage() {
           ],
         }));
 
-        await streamChat(convId, trimmed, targetRole.id, (assistantContent) => {
-          setMessagesByConversation((prev) => ({
-            ...prev,
-            [convId]: (prev[convId] ?? []).map((m) =>
-              m.id === assistantMessageId
-                ? {
-                    ...m,
-                    content: assistantContent,
-                    thinking: false,
-                    streaming: true,
-                  }
-                : m,
-            ),
-          }));
+        const controller = new AbortController();
+        abortRef.current = controller;
+
+        await streamChat(convId, trimmed, targetRole.id, {
+          onContent: (assistantContent) => {
+            setMessagesByConversation((prev) => ({
+              ...prev,
+              [convId]: (prev[convId] ?? []).map((m) =>
+                m.id === assistantMessageId
+                  ? {
+                      ...m,
+                      content: assistantContent,
+                      thinking: false,
+                      streaming: true,
+                    }
+                  : m,
+              ),
+            }));
+          },
+          onMeta: ({ knowledgeCount }) => {
+            setMessagesByConversation((prev) => ({
+              ...prev,
+              [convId]: (prev[convId] ?? []).map((m) =>
+                m.id === assistantMessageId ? { ...m, knowledgeCount } : m,
+              ),
+            }));
+          },
+          signal: controller.signal,
         });
 
         setMessagesByConversation((prev) => ({
@@ -311,18 +328,32 @@ export default function ChatPage() {
 
         await refreshConversations();
       } catch (error) {
-        if (conversationId) {
+        // 用户主动点"停止"：保留已生成内容，不算错误
+        if (error instanceof DOMException && error.name === 'AbortError') {
           setMessagesByConversation((prev) => ({
             ...prev,
-            [conversationId!]: (prev[conversationId!] ?? []).filter(
-              (m) => m.id !== userMessageId && m.id !== assistantMessageId,
+            [conversationId!]: (prev[conversationId!] ?? []).map((m) =>
+              m.id === assistantMessageId
+                ? { ...m, streaming: false, thinking: false }
+                : m,
             ),
           }));
+          await refreshConversations();
+        } else {
+          if (conversationId) {
+            setMessagesByConversation((prev) => ({
+              ...prev,
+              [conversationId!]: (prev[conversationId!] ?? []).filter(
+                (m) => m.id !== userMessageId && m.id !== assistantMessageId,
+              ),
+            }));
+          }
+          toast.error(
+            error instanceof Error ? error.message : '发送失败，请重试',
+          );
         }
-        toast.error(
-          error instanceof Error ? error.message : '发送失败，请重试',
-        );
       } finally {
+        abortRef.current = null;
         setSending(false);
       }
     },
@@ -340,6 +371,30 @@ export default function ChatPage() {
     if (!text || sending || !roleForActive) return;
     await sendMessageDirect(text, roleForActive);
   }, [inputValue, roleForActive, sendMessageDirect, sending]);
+
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const handleRenameConversation = useCallback(
+    async (id: string, title: string) => {
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      // 乐观更新
+      setConversations((prev) =>
+        sortConversations(
+          prev.map((c) => (c.id === id ? { ...c, title: trimmed } : c)),
+        ),
+      );
+      try {
+        await renameConversation(id, trimmed);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : '重命名失败');
+        await refreshConversations();
+      }
+    },
+    [refreshConversations],
+  );
 
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
@@ -421,6 +476,9 @@ export default function ChatPage() {
         onSelect={handleSelectConversation}
         onNew={handleNewConversation}
         onDelete={handleDeleteConversation}
+        onRename={handleRenameConversation}
+        mobileOpen={mobileSidebarOpen}
+        onMobileOpenChange={setMobileSidebarOpen}
       />
       <ChatMain
         roles={roles}
@@ -432,6 +490,8 @@ export default function ChatPage() {
         onRoleChange={handleRoleChange}
         onInputChange={setInputValue}
         onSend={handleSend}
+        onStop={handleStop}
+        onOpenSidebar={() => setMobileSidebarOpen(true)}
       />
     </div>
   );

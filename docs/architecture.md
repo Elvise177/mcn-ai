@@ -73,13 +73,29 @@ sequenceDiagram
 | `roles/` | 角色/Prompt 配置 |
 | `auth/` | 认证相关桥接 |
 
+### `lib/knowledge/`（V1.1 已落地）
+
+pgvector 知识库（迁移 `008_knowledge_vectors.sql`）：
+
+- `embeddings.ts`：AIHubMix `text-embedding-3-small`（1536 维），换模型需同步改迁移中的维度并重刷
+- `ingest.ts`：切片（段落优先、600 字窗口）+ embedding + 写入 `knowledge_chunks`
+- `search.ts`：`match_knowledge_chunks` RPC，余弦相似度 × log(点赞) 加权
+- 入库管道：①转写完成自动入库；②`POST /api/v1/admin/knowledge` 手动上传爆款拆解；③`npm run backfill-knowledge` 回填存量
+- 消费侧：`ai_roles.enable_rag = true` 的角色在 `/api/v1/chat` 中检索 top-6 注入 system prompt，引用写入 `messages.knowledge_refs`
+
+### 自动剪辑（V1.1 脚手架）
+
+剪映草稿路线：Vercel 创建任务（`/api/v1/edit-jobs`）→ Supabase `edit_jobs` 队列 →
+国内服务器 worker（`worker/`，轮询 + `claim_next_edit_job` 原子认领）→
+LLM 剪辑决策 JSON → VectCutAPI 生成剪映草稿 → 剪辑师在剪映中精修。
+详见 [worker/README.md](../worker/README.md)。
+
 ## 扩展路线图
 
 | 阶段 | 模块 | 建议落点 |
 |------|------|----------|
-| 知识库 | 文档上传、向量检索 | `lib/knowledge/` + Supabase pgvector |
 | 爬虫 | 数据采集任务 | `lib/crawler/` + 后台 Job 队列 |
-| 自动剪辑 | 视频流水线 | `lib/media/` + 外部 FFmpeg 服务 |
+| 素材转存 | 抖音 play_url 时效问题 | worker 下载素材转存对象存储 |
 
 新增一级目录时，同步更新本文件与对应 `README.md`。
 

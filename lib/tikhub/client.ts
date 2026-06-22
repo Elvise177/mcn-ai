@@ -1,6 +1,7 @@
 import { config } from '@/config';
 
-const TIKHUB_TIMEOUT_MS = 60_000;
+// 路由 maxDuration=30s，单次 12s + 一次重试必须在函数被杀前完成
+const TIKHUB_TIMEOUT_MS = 12_000;
 
 function formatTikhubFetchError(error: unknown): Error {
   if (error instanceof Error) {

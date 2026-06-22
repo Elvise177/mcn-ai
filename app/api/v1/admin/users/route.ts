@@ -127,7 +127,7 @@ export async function POST(req: Request) {
     return Response.json({ error: profileError.message }, { status: 500 });
   }
 
-  eventBus.emit(Events.ADMIN_USER_CREATED, {
+  await eventBus.emitAsync(Events.ADMIN_USER_CREATED, {
     userId: ctx.userId,
     organizationId: ctx.organizationId,
     resourceType: 'user',

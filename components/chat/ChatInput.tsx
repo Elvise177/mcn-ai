@@ -1,6 +1,6 @@
 'use client';
 
-import { Loader2, SendHorizontal } from 'lucide-react';
+import { SendHorizontal, Square } from 'lucide-react';
 import { useCallback, useRef } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,7 @@ type ChatInputProps = {
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
+  onStop?: () => void;
   loading?: boolean;
   disabled?: boolean;
 };
@@ -24,6 +25,7 @@ export function ChatInput({
   value,
   onChange,
   onSend,
+  onStop,
   loading = false,
   disabled = false,
 }: ChatInputProps) {
@@ -52,35 +54,44 @@ export function ChatInput({
   }
 
   return (
-    <div className="border-t bg-background px-4 py-4">
-      <p className="mb-2 text-xs text-muted-foreground">
+    <div className="border-t bg-background px-3 py-3 sm:px-4 sm:py-4">
+      <p className="mb-2 px-1 text-xs text-muted-foreground">
         当前角色：{role.icon} {role.name}
       </p>
-      <div className="flex items-end gap-2">
+      <div className="flex items-end gap-2 rounded-2xl border bg-card p-2 shadow-soft focus-within:border-primary/60 focus-within:ring-1 focus-within:ring-primary/30">
         <Textarea
           ref={textareaRef}
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-          disabled={disabled || loading}
+          disabled={disabled}
           rows={1}
-          className="min-h-[44px] max-h-[136px] resize-none focus-visible:ring-[#FF3366] focus-visible:border-[#FF3366]"
+          className="min-h-[40px] max-h-[136px] resize-none border-0 bg-transparent px-2 shadow-none focus-visible:ring-0"
         />
-        <Button
-          type="button"
-          size="icon"
-          className="h-11 w-11 shrink-0 text-white hover:opacity-90"
-          style={{ backgroundColor: '#FF3366' }}
-          disabled={disabled || loading || !value.trim()}
-          onClick={onSend}
-        >
-          {loading ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
+        {loading ? (
+          <Button
+            type="button"
+            size="icon"
+            variant="secondary"
+            className="h-10 w-10 shrink-0"
+            onClick={onStop}
+            title="停止生成"
+          >
+            <Square className="h-3.5 w-3.5 fill-current" />
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="icon"
+            className="bg-brand-gradient h-10 w-10 shrink-0"
+            disabled={disabled || !value.trim()}
+            onClick={onSend}
+            title="发送"
+          >
             <SendHorizontal className="h-4 w-4" />
-          )}
-        </Button>
+          </Button>
+        )}
       </div>
     </div>
   );

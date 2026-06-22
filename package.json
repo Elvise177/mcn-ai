@@ -12,6 +12,7 @@
     "promote-user": "tsx scripts/promote-user.ts",
     "check-costs": "tsx scripts/check-costs.ts",
     "seed-roles": "tsx scripts/seed-roles.ts",
+    "backfill-knowledge": "tsx scripts/backfill-knowledge.ts",
     "stress-test": "tsx scripts/stress-test.ts"
   },
   "dependencies": {

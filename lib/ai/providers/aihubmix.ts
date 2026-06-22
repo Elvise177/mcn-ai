@@ -36,14 +36,17 @@ export class AIHubMixProvider extends AIProvider {
   }
 
   async chatStream(params: ChatParams) {
-    const stream = await this.client.chat.completions.create({
-      model: params.model,
-      messages: params.messages as OpenAI.ChatCompletionMessageParam[],
-      temperature: params.temperature ?? 0.7,
-      max_tokens: params.max_tokens ?? 4000,
-      stream: true,
-      stream_options: { include_usage: true },
-    });
+    const stream = await this.client.chat.completions.create(
+      {
+        model: params.model,
+        messages: params.messages as OpenAI.ChatCompletionMessageParam[],
+        temperature: params.temperature ?? 0.7,
+        max_tokens: params.max_tokens ?? 4000,
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+      { signal: params.signal },
+    );
 
     return new ReadableStream({
       async start(controller) {

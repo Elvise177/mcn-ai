@@ -1,0 +1,14 @@
+{
+  "name": "mcn-ai-edit-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.8",
+    "dotenv": "^16.5.0",
+    "openai": "^4.104.0"
+  }
+}

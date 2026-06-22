@@ -19,9 +19,14 @@ class EventBus {
   }
 
   emit<T>(event: string, payload: T) {
+    // fire-and-forget；serverless 环境下请改用 emitAsync 并 await，
+    // 否则响应结束后函数冻结，未完成的写库会丢失
+    void this.emitAsync(event, payload);
+  }
+
+  emitAsync<T>(event: string, payload: T): Promise<void> {
     const handlers = this.handlers.get(event) || [];
-    // 异步执行，不阻塞调用方
-    Promise.allSettled(
+    return Promise.allSettled(
       handlers.map(async (h) => {
         try {
           await h(payload);
@@ -29,7 +34,7 @@ class EventBus {
           console.error(`[EventBus] Handler error for ${event}:`, e);
         }
       }),
-    );
+    ).then(() => undefined);
   }
 }
 
