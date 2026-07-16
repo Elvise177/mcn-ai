@@ -22,7 +22,7 @@ export const store = new Store<StoreSchema>({
     relayBaseUrl: 'https://api.inferera.com',
     llmBaseUrl: 'https://api.deepseek.com',
     llmModel: 'deepseek-v4-flash',
-    apiBaseUrl: 'http://localhost:3000',
+    apiBaseUrl: 'https://www.makeupai.top',
   },
 })
 
