@@ -1,5 +1,6 @@
 import '../env-hooks'
 import { createClient, type SupabaseClient, type Session } from '@supabase/supabase-js'
+import WebSocket from 'ws'
 import { safeStorage } from 'electron'
 import Store from 'electron-store'
 
@@ -24,6 +25,8 @@ export function getSupabase(): SupabaseClient | null {
   const anon = getAnonKey()
   if (!anon) return null
   client = createClient(SUPABASE_URL, anon, {
+    // Electron 主进程是 Node 20（无原生 WebSocket），realtime 组件需注入 ws 实现
+    realtime: { transport: WebSocket as never },
     auth: {
       persistSession: true,
       autoRefreshToken: true,
