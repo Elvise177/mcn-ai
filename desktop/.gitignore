@@ -1,0 +1,7 @@
+node_modules/
+out/
+release/
+.env
+
+# 冻结版 pipeline 二进制不进仓库（96MB）：在 pkb-pipeline 仓库 pyinstaller 后 cp -R dist/mcn-ingest resources/pipeline
+resources/pipeline/

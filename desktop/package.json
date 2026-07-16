@@ -1,0 +1,48 @@
+{
+  "name": "mcn-ai-desktop",
+  "version": "0.1.0",
+  "description": "mcn-ai 桌面版：MCN 公司与达人的 AI 工作操作系统",
+  "main": "./out/main/index.js",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "dist": "electron-vite build && electron-builder --mac",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "smoke:agent": "electron-vite build && ELECTRON_RUN_AS_NODE=1 electron out/main/smoke-agent.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.211",
+    "@supabase/supabase-js": "^2.45.0",
+    "chokidar": "^3.6.0",
+    "dompurify": "^3.4.12",
+    "electron-store": "^8.2.0",
+    "fast-glob": "^3.3.2",
+    "gray-matter": "^4.0.3",
+    "marked": "^18.0.6",
+    "minisearch": "^7.1.0",
+    "p-queue": "^8.0.1",
+    "react-force-graph-2d": "^1.29.1",
+    "remark-wiki-link": "^2.0.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.19",
+    "electron": "^31.3.0",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "playwright-core": "^1.61.1",
+    "postcss": "^8.4.39",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.0",
+    "tailwindcss": "^3.4.6",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.4"
+  }
+}

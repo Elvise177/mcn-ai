@@ -1,0 +1,22 @@
+appId: com.mcnai.desktop
+productName: mcn-ai
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+extraResources:
+  - from: resources/
+    to: resources/
+asarUnpack:
+  - "node_modules/@anthropic-ai/claude-agent-sdk/**"
+  - "node_modules/minisearch/**"
+  - "out/main/search-worker.js"
+mac:
+  target:
+    - target: dmg
+      arch: [arm64]
+    - target: zip
+      arch: [arm64]
+  identity: null
+  category: public.app-category.productivity

@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Claude Desktop 式暖色系 + 品牌玫瑰粉点缀 */
+  --bg: #faf9f5;
+  --sidebar: #f0eee6;
+  --border: #e4e0d4;
+  --card: #ffffff;
+  --ink: #3d392f;
+  --muted: #8c8678;
+  --rose: #e25484;
+  --rose-soft: #fbecf3;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'PingFang SC', -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.titlebar-drag button,
+.titlebar-drag input {
+  -webkit-app-region: no-drag;
+}
+
+/* ===== markdown 渲染排版（Tailwind preflight 清零了默认样式，这里补全） ===== */
+.md-article {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--ink);
+  word-wrap: break-word;
+}
+.md-article h1 { font-size: 1.5em; font-weight: 600; margin: 1.2em 0 0.6em; }
+.md-article h2 { font-size: 1.3em; font-weight: 600; margin: 1.4em 0 0.6em; padding-bottom: 0.25em; border-bottom: 1px solid var(--border); }
+.md-article h3 { font-size: 1.15em; font-weight: 600; margin: 1.2em 0 0.5em; }
+.md-article h4, .md-article h5, .md-article h6 { font-weight: 600; margin: 1em 0 0.4em; }
+.md-article p { margin: 0.6em 0; }
+.md-article ul { list-style: disc; padding-left: 1.5em; margin: 0.5em 0; }
+.md-article ol { list-style: decimal; padding-left: 1.5em; margin: 0.5em 0; }
+.md-article li { margin: 0.25em 0; }
+.md-article li > ul, .md-article li > ol { margin: 0.15em 0; }
+.md-article a { color: var(--rose); text-decoration: none; }
+.md-article a:hover { text-decoration: underline; }
+.md-article blockquote {
+  margin: 0.8em 0; padding: 0.3em 1em; color: var(--muted);
+  border-left: 3px solid var(--rose); background: var(--rose-soft); border-radius: 0 8px 8px 0;
+}
+.md-article code {
+  font-family: 'SF Mono', Menlo, monospace; font-size: 0.86em;
+  background: rgba(0, 0, 0, 0.05); padding: 0.1em 0.35em; border-radius: 4px;
+}
+.md-article pre {
+  background: #f3f1ea; border: 1px solid var(--border); border-radius: 10px;
+  padding: 0.9em 1.1em; overflow-x: auto; margin: 0.8em 0;
+}
+.md-article pre code { background: none; padding: 0; font-size: 12.5px; line-height: 1.6; }
+.md-article hr { border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }
+.md-article img { max-width: 100%; border-radius: 8px; }
+
+/* 表格：横向可滚、表头着色、斑马纹 */
+.md-article table {
+  display: block; max-width: 100%; overflow-x: auto;
+  border-collapse: collapse; margin: 0.8em 0; font-size: 13px;
+  white-space: nowrap;
+}
+.md-article th {
+  background: var(--sidebar); font-weight: 600; text-align: left;
+  border: 1px solid var(--border); padding: 6px 12px;
+}
+.md-article td { border: 1px solid var(--border); padding: 6px 12px; }
+.md-article tr:nth-child(even) td { background: rgba(0, 0, 0, 0.015); }
+.md-article input[type='checkbox'] { accent-color: var(--rose); margin-right: 0.4em; }
