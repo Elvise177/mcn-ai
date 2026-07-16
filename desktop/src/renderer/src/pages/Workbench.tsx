@@ -17,31 +17,31 @@ const TOOL_ZH: Record<string, string> = {
 
 export default function Workbench({
   conv,
-  onConvUpdate,
+  onSend,
   onOpenNote,
   userName,
 }: {
   conv: Conversation
-  onConvUpdate: (c: Conversation) => void
+  onSend: (text: string) => void
   onOpenNote: (wikiTarget: string) => void
   userName?: string
 }) {
-  const [messages, setMessages] = useState<ChatMessage[]>(conv.messages)
+  // 消息以 conv prop 为准（App 统一持久化）；这里只管流式草稿/工具行/输入框
+  const messages = conv.messages
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [draft, setDraft] = useState('')
   const [toolLine, setToolLine] = useState<string | null>(null)
-  const sdkSession = useRef<string | undefined>(conv.sdkSessionId)
   const scrollRef = useRef<HTMLDivElement>(null)
   const convRef = useRef(conv)
   convRef.current = conv
 
   useEffect(() => {
-    setMessages(conv.messages)
-    sdkSession.current = conv.sdkSessionId
+    setInput('')
     setDraft('')
+    setToolLine(null)
     setStreaming(false)
-  }, [conv.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [conv.id])
 
   useEffect(() => {
     return window.api.chat.onStream((p) => {
@@ -52,34 +52,15 @@ export default function Workbench({
       } else if (p.kind === 'tool' && p.tool) {
         const short = p.tool.replace(/^mcp__\w+__/, '')
         setToolLine(TOOL_ZH[short] ?? short)
-      } else if (p.kind === 'assistant' && p.text != null) {
-        if (p.sdkSessionId) sdkSession.current = p.sdkSessionId
-        setMessages((ms) => {
-          const next: ChatMessage[] = [...ms, { role: 'assistant' as const, text: p.text! }]
-          const updated: Conversation = {
-            ...convRef.current,
-            messages: next,
-            sdkSessionId: sdkSession.current,
-            title: convRef.current.title === '新对话' && next[0] ? next[0].text.slice(0, 18) : convRef.current.title,
-            updatedAt: Date.now(),
-          }
-          window.api.chat.save(updated)
-          onConvUpdate(updated)
-          return next
-        })
+      } else if (p.kind === 'assistant') {
         setDraft('')
-      } else if (p.kind === 'done') {
-        if (p.sdkSessionId) sdkSession.current = p.sdkSessionId
-        setStreaming(false)
-        setToolLine(null)
-      } else if (p.kind === 'error') {
-        setMessages((ms) => [...ms, { role: 'assistant', text: `⚠️ ${p.text}` }])
+      } else if (p.kind === 'done' || p.kind === 'error') {
         setDraft('')
         setStreaming(false)
         setToolLine(null)
       }
     })
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -89,13 +70,12 @@ export default function Workbench({
     (text: string) => {
       const t = text.trim()
       if (!t || streaming) return
-      setMessages((ms) => [...ms, { role: 'user', text: t }])
       setInput('')
       setStreaming(true)
       setDraft('')
-      window.api.chat.send(convRef.current.id, t, sdkSession.current)
+      onSend(t)
     },
-    [streaming]
+    [streaming, onSend]
   )
 
   const handleLink = useCallback(

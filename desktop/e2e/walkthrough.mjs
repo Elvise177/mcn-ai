@@ -66,7 +66,13 @@ try {
       await win.locator('text=停止').waitFor({ state: 'hidden', timeout: 180000 }).catch(() => {})
       await snap('01e-工作台-回答完成', 800)
     } else {
-      await chatInput.fill('')
+      // ＋新对话必须复位：空态问候可见 + 输入框清空（回归 2026-07-16 用户报障）
+      await win.click('text=＋ 新对话')
+      await win.waitForTimeout(500)
+      const emptyOk = await win.locator('text=问你的库，或直接说要做什么').count()
+      const inputVal = await win.locator('textarea').first().inputValue()
+      if (!emptyOk || inputVal !== '') throw new Error(`＋新对话未复位：空态=${emptyOk} 输入残留="${inputVal}"`)
+      await snap('01d-新对话复位', 300)
     }
   }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
 import LoginGate from './pages/LoginGate'
@@ -22,16 +22,62 @@ export default function App() {
   const [account, setAccount] = useState<{ loggedIn: boolean; email?: string } | null>(null)
   const [localMode, setLocalMode] = useState(() => localStorage.getItem('localMode') === '1')
 
+  // 会话状态统一在这里维护：convsRef 同步镜像，流式事件按 sessionId 找到归属对话，
+  // 即使用户已切到新对话，旧对话的回复也照常入库（否则切走=丢消息）
+  const convsRef = useRef<Conversation[]>([])
+  const activeRef = useRef(active)
+  activeRef.current = active
+
+  const upsert = useCallback((c: Conversation) => {
+    window.api.chat.save(c)
+    convsRef.current = [c, ...convsRef.current.filter((x) => x.id !== c.id)]
+    setConvs(convsRef.current)
+    if (activeRef.current.id === c.id) setActive(c)
+  }, [])
+
+  const appendMessage = useCallback(
+    (sessionId: string, msg: ChatMessage, sdkSessionId?: string) => {
+      const base =
+        activeRef.current.id === sessionId
+          ? activeRef.current
+          : convsRef.current.find((x) => x.id === sessionId)
+      if (!base) return
+      const messages = [...base.messages, msg]
+      upsert({
+        ...base,
+        messages,
+        sdkSessionId: sdkSessionId ?? base.sdkSessionId,
+        title: base.title === '新对话' && messages[0] ? messages[0].text.slice(0, 18) : base.title,
+        updatedAt: Date.now(),
+      })
+    },
+    [upsert]
+  )
+
   useEffect(() => {
-    window.api.chat.list().then(setConvs)
+    window.api.chat.list().then((list) => {
+      convsRef.current = list
+      setConvs(list)
+    })
     window.api.auth.state().then(setAccount)
-    return window.api.shortcut.on((name) => {
+    const offShortcut = window.api.shortcut.on((name) => {
       if (name === 'new-chat') {
         setActive(newConv())
         setPage('workbench')
       }
     })
-  }, [])
+    const offStream = window.api.chat.onStream((p) => {
+      if (p.kind === 'assistant' && p.text != null) {
+        appendMessage(p.sessionId, { role: 'assistant', text: p.text }, p.sdkSessionId)
+      } else if (p.kind === 'error') {
+        appendMessage(p.sessionId, { role: 'assistant', text: `⚠️ ${p.text}` })
+      }
+    })
+    return () => {
+      offShortcut()
+      offStream()
+    }
+  }, [appendMessage])
 
   const handleLogout = useCallback(async () => {
     await window.api.auth.logout()
@@ -40,10 +86,20 @@ export default function App() {
     setAccount({ loggedIn: false })
   }, [])
 
-  const onConvUpdate = useCallback((c: Conversation) => {
-    setActive(c)
-    setConvs((old) => [c, ...old.filter((x) => x.id !== c.id)])
-  }, [])
+  const handleSend = useCallback(
+    (text: string) => {
+      const base = activeRef.current
+      const updated: Conversation = {
+        ...base,
+        messages: [...base.messages, { role: 'user', text }],
+        title: base.title === '新对话' ? text.slice(0, 18) : base.title,
+        updatedAt: Date.now(),
+      }
+      upsert(updated)
+      window.api.chat.send(updated.id, text, updated.sdkSessionId)
+    },
+    [upsert]
+  )
 
   const openNoteFromChat = useCallback(async (wikiTarget: string) => {
     const resolved = await window.api.vault.resolveLink(wikiTarget)
@@ -91,42 +147,7 @@ export default function App() {
           ＋ 新对话
         </button>
 
-        {convs.length > 0 && (
-          <>
-            <div className="mb-1 px-5 text-[11px] text-muted">对话历史</div>
-            <div className="max-h-[38%] overflow-auto px-3">
-              {convs.slice(0, 20).map((c) => (
-                <div key={c.id} className="group relative">
-                  <button
-                    onClick={() => {
-                      setActive(c)
-                      setPage('workbench')
-                    }}
-                    className={`w-full truncate rounded-lg px-3 py-1.5 pr-7 text-left text-[13px] ${
-                      page === 'workbench' && active.id === c.id ? 'bg-card font-medium' : 'text-ink/70 hover:bg-black/[0.03]'
-                    }`}
-                  >
-                    {c.title}
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await window.api.chat.delete(c.id)
-                      setConvs((old) => old.filter((x) => x.id !== c.id))
-                      if (active.id === c.id) setActive(newConv())
-                    }}
-                    className="absolute right-1.5 top-1 hidden rounded px-1 text-[12px] text-muted hover:text-rose group-hover:block"
-                    title="删除对话"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-
-        <div className="mb-2 mt-4 px-5 text-[11px] text-muted">模块</div>
-        <nav className="flex-1 space-y-1 px-3">
+        <nav className="space-y-1 px-3">
           {(
             [
               ['workbench', '对话工作台'],
@@ -145,6 +166,43 @@ export default function App() {
             </button>
           ))}
         </nav>
+
+        <div className="mt-5 flex min-h-0 flex-1 flex-col">
+          {convs.length > 0 && (
+            <>
+              <div className="mb-1 px-5 text-[11px] text-muted">最近对话</div>
+              <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
+                {convs.map((c) => (
+                  <div key={c.id} className="group relative">
+                    <button
+                      onClick={() => {
+                        setActive(c)
+                        setPage('workbench')
+                      }}
+                      className={`w-full truncate rounded-lg px-3 py-1.5 pr-7 text-left text-[13px] ${
+                        page === 'workbench' && active.id === c.id ? 'bg-card font-medium' : 'text-ink/70 hover:bg-black/[0.03]'
+                      }`}
+                    >
+                      {c.title}
+                    </button>
+                    <button
+                      onClick={async () => {
+                        await window.api.chat.delete(c.id)
+                        convsRef.current = convsRef.current.filter((x) => x.id !== c.id)
+                        setConvs(convsRef.current)
+                        if (active.id === c.id) setActive(newConv())
+                      }}
+                      className="absolute right-1.5 top-1 hidden rounded px-1 text-[12px] text-muted hover:text-rose group-hover:block"
+                      title="删除对话"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
         <div className="border-t border-line px-5 py-4 text-[11px] text-muted">
           {account.email ? account.email.split('@')[0] + ' · ' : ''}v0.1.0
         </div>
@@ -152,7 +210,7 @@ export default function App() {
 
       <main className="flex-1 overflow-hidden">
         {page === 'workbench' && (
-          <Workbench conv={active} onConvUpdate={onConvUpdate} onOpenNote={openNoteFromChat} userName={account.email?.split('@')[0]} />
+          <Workbench conv={active} onSend={handleSend} onOpenNote={openNoteFromChat} userName={account.email?.split('@')[0]} />
         )}
         {page === 'vault' && <VaultPage />}
         {page === 'settings' && <SettingsPage account={account} onLogout={handleLogout} />}
