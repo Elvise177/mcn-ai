@@ -117,6 +117,10 @@ interface Window {
       logout: () => Promise<void>
       state: () => Promise<{ loggedIn: boolean; email?: string }>
     }
+    diag: {
+      export: () => Promise<string>
+      log: (level: 'info' | 'warn' | 'error', msg: string) => Promise<void>
+    }
     artifacts: {
       list: () => Promise<ArtifactInfo[]>
       open: (relPath: string) => Promise<void>

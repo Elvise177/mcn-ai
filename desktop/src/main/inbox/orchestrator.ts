@@ -7,6 +7,7 @@ import { store, getLlmKey } from '../store'
 import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
 import { pipelineBin } from '../lib/pipeline'
+import { log } from '../lib/logger'
 
 export interface InboxEvent {
   type: 'file-added' | 'run-start' | 'stage' | 'run-end'
@@ -36,7 +37,10 @@ export class InboxOrchestrator {
 
   private send(ev: InboxEvent): void {
     if (ev.type === 'run-start') this.lastRun = []
-    if (ev.type === 'stage') this.lastRun.push(ev)
+    if (ev.type === 'stage') {
+      this.lastRun.push(ev)
+      if (ev.status === 'error') log('error', 'inbox', `${ev.stage}: ${ev.message}`)
+    }
     this.win?.webContents.send('inbox:event', ev)
   }
 

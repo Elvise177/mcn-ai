@@ -67,7 +67,11 @@ const artifacts = {
     return () => ipcRenderer.removeListener('artifact:created', listener)
   },
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth }
+const diag = {
+  export: () => ipcRenderer.invoke('diag:export'),
+  log: (level: 'info' | 'warn' | 'error', msg: string) => ipcRenderer.invoke('log:renderer', level, msg),
+}
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi

@@ -7,6 +7,8 @@ import { artifactsWatcher } from './agent/artifacts'
 import { listConversations, saveConversation, deleteConversation, type Conversation } from './agent/conversations'
 import { syncConversation } from './knowledge/client'
 import { vaultManager } from './vault'
+import { log } from './lib/logger'
+import { exportDiagnostics } from './lib/diagnostics'
 import { createVault } from './vault/wizard'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
@@ -89,6 +91,10 @@ export function registerIpc(): void {
   ipcMain.handle('artifacts:list', () => artifactsWatcher.list())
   ipcMain.handle('artifacts:open', (_e, relPath: string) => artifactsWatcher.open(relPath))
   ipcMain.handle('artifacts:readText', (_e, relPath: string) => artifactsWatcher.readText(relPath))
+
+  // ---- 诊断与日志 ----
+  ipcMain.handle('diag:export', () => exportDiagnostics())
+  ipcMain.handle('log:renderer', (_e, level: 'info' | 'warn' | 'error', msg: string) => log(level, 'renderer', msg))
 
   // ---- inbox ----
   ipcMain.handle('inbox:enqueue', (_e, paths: string[]) => inboxOrchestrator.enqueue(paths))

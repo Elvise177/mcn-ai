@@ -8,6 +8,7 @@ import { store, getApiKey } from '../store'
 import { vaultManager } from '../vault'
 import { searchCloud } from '../knowledge/client'
 import { pipelineBin } from '../lib/pipeline'
+import { log } from '../lib/logger'
 
 export interface AgentStreamPayload {
   sessionId: string
@@ -264,6 +265,7 @@ export class AgentManager {
       this.emit({ sessionId, kind: 'done' })
     } catch (err) {
       if (!abort.signal.aborted) {
+        log('error', 'agent', err instanceof Error ? err : String(err))
         this.emit({ sessionId, kind: 'error', text: String(err) })
       } else {
         this.emit({ sessionId, kind: 'done' })

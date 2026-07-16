@@ -220,6 +220,19 @@ function SettingsPage({
         </div>
       </div>
 
+      <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
+        <div className="text-sm font-medium">遇到问题？</div>
+        <div className="text-[12px] text-muted">导出诊断报告（环境信息 + 最近日志，已自动去除密钥），发给管理员即可远程排查。</div>
+        <button
+          onClick={async () => {
+            await window.api.diag.export()
+          }}
+          className="rounded-full border border-line px-4 py-1.5 text-[13px] hover:bg-rose-soft"
+        >
+          导出诊断报告到桌面
+        </button>
+      </div>
+
       <button
         onClick={() => setShowAdvanced((v) => !v)}
         className="mb-4 text-[13px] text-muted hover:text-rose"
