@@ -133,6 +133,15 @@ function SettingsPage() {
   const [loginPwd, setLoginPwd] = useState('')
   const [loginErr, setLoginErr] = useState('')
   const [loggingIn, setLoggingIn] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
+  const refreshSettings = () =>
+    window.api.settings.get().then((s) => {
+      setHasKey(s.hasApiKey)
+      setHasLlmKey(s.hasLlmKey)
+      setBaseUrl(s.relayBaseUrl)
+      setLlmBaseUrl(s.llmBaseUrl)
+    })
 
   useEffect(() => {
     window.api.settings.get().then((s) => {
@@ -193,6 +202,7 @@ function SettingsPage() {
                   if (r.ok) {
                     setAccount(await window.api.auth.state())
                     setLoginPwd('')
+                    setTimeout(refreshSettings, 1500) // 等服务端下发 key 落库
                   } else {
                     setLoginErr(r.error ?? '登录失败')
                   }
@@ -206,6 +216,14 @@ function SettingsPage() {
             <div className="text-[12px] text-muted">与网页版同一账号。不登录也能用（仅本地，无云端检索与同步）。</div>
           </>
         )}
+        <div className="text-sm">
+          AI 服务：
+          {hasKey ? (
+            <span className="text-rose">已就绪 ✓（随账号自动配置）</span>
+          ) : (
+            <span className="text-muted">登录后自动配置</span>
+          )}
+        </div>
         <div className="flex items-center gap-2 text-sm">
           <span className="shrink-0 text-muted">服务器</span>
           <input
@@ -217,6 +235,15 @@ function SettingsPage() {
         </div>
       </div>
 
+      <button
+        onClick={() => setShowAdvanced((v) => !v)}
+        className="mb-4 text-[13px] text-muted hover:text-rose"
+      >
+        {showAdvanced ? '▾' : '▸'} 高级设置（自备 API key 的用户可在此覆盖，默认无需配置）
+      </button>
+
+      {showAdvanced && (
+      <>
       <div className="max-w-xl space-y-4 rounded-2xl border border-line bg-card p-6">
         <div className="text-sm font-medium">对话模型（Claude 中转站）</div>
         <div className="text-sm">
@@ -277,6 +304,8 @@ function SettingsPage() {
           </button>
         </div>
       </div>
+      </>
+      )}
     </div>
   )
 }

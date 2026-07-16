@@ -56,7 +56,40 @@ export async function login(email: string, password: string): Promise<{ ok: bool
   const sb = getSupabase()
   if (!sb) return { ok: false, error: '未配置 Supabase anon key（设置页填写）' }
   const { error } = await sb.auth.signInWithPassword({ email, password })
-  return error ? { ok: false, error: error.message } : { ok: true }
+  if (error) return { ok: false, error: error.message }
+  void provisionKeys() // 登录即用：服务端下发 AI key（不阻塞登录返回）
+  return { ok: true }
+}
+
+/** 从服务端拉取 AI 配置；用户手动填过的 key 不覆盖 */
+export async function provisionKeys(): Promise<void> {
+  try {
+    const { store, setApiKey, setLlmKey, getApiKey, getLlmKey } = await import('../store')
+    const token = await getAccessToken()
+    if (!token) return
+    const res = await fetch(`${store.get('apiBaseUrl')}/api/v1/client-config`, {
+      headers: { authorization: `Bearer ${token}` },
+    })
+    if (!res.ok) return
+    const cfg = (await res.json()) as {
+      relayBaseUrl?: string
+      relayApiKey?: string | null
+      llmBaseUrl?: string
+      llmModel?: string
+      llmApiKey?: string | null
+    }
+    if (cfg.relayApiKey && (!store.get('manualApiKey') || !getApiKey())) {
+      setApiKey(cfg.relayApiKey)
+      if (cfg.relayBaseUrl) store.set('relayBaseUrl', cfg.relayBaseUrl)
+    }
+    if (cfg.llmApiKey && (!store.get('manualLlmKey') || !getLlmKey())) {
+      setLlmKey(cfg.llmApiKey)
+      if (cfg.llmBaseUrl) store.set('llmBaseUrl', cfg.llmBaseUrl)
+      if (cfg.llmModel) store.set('llmModel', cfg.llmModel)
+    }
+  } catch {
+    /* 服务端不可达时静默——回退用户自填 */
+  }
 }
 
 export async function logout(): Promise<void> {

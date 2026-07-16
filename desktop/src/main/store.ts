@@ -11,6 +11,9 @@ interface StoreSchema {
   llmModel: string
   /** webpage API 地址（私人层 ingest/search）；生产填 Vercel 域名 */
   apiBaseUrl: string
+  /** 用户手动填过 key 则服务端下发不覆盖 */
+  manualApiKey?: boolean
+  manualLlmKey?: boolean
   encryptedLlmKey?: string
 }
 

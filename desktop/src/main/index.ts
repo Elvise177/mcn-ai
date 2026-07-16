@@ -2,6 +2,7 @@ import './env-hooks'
 import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { registerIpc, openStoredVault } from './ipc'
+import { provisionKeys } from './auth'
 import { vaultManager } from './vault'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
@@ -39,6 +40,7 @@ app.whenReady().then(() => {
   registerIpc()
   createWindow()
   void openStoredVault() // 启动即加载上次的库，工作台首页直接可问
+  void provisionKeys() // 已登录用户启动时刷新服务端下发的 AI 配置
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

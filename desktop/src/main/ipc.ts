@@ -2,7 +2,7 @@ import { ipcMain, dialog } from 'electron'
 import { store, setApiKey, getApiKey, setLlmKey, getLlmKey } from './store'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
-import { login, logout, authState } from './auth'
+import { login, logout, authState, provisionKeys } from './auth'
 import { artifactsWatcher } from './agent/artifacts'
 import { listConversations, saveConversation, deleteConversation, type Conversation } from './agent/conversations'
 import { syncConversation } from './knowledge/client'
@@ -22,11 +22,13 @@ export function registerIpc(): void {
 
   ipcMain.handle('settings:setLlmKey', (_e: Electron.IpcMainInvokeEvent, key: string) => {
     setLlmKey(key.trim())
+    store.set('manualLlmKey', true)
     return { ok: true }
   })
 
   ipcMain.handle('settings:setKey', (_e: Electron.IpcMainInvokeEvent, key: string) => {
     setApiKey(key.trim())
+    store.set('manualApiKey', true)
     return { ok: true }
   })
 
