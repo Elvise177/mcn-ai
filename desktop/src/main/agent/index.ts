@@ -18,6 +18,22 @@ export interface AgentStreamPayload {
   costUsd?: number
 }
 
+/** SDK 的 CLI 是平台二进制；打包后 asar 内路径无法 spawn（ENOTDIR），显式指到真实位置 */
+function claudeCliBin(): string | undefined {
+  const pkg = `@anthropic-ai/claude-agent-sdk-darwin-${process.arch}`
+  // unpacked 优先；主进程 fs 对 asar 内路径也返回存在，必须排除未解包的 asar 路径（spawn 不认 asar）
+  const candidates = [
+    join(process.resourcesPath ?? '', 'app.asar.unpacked', 'node_modules', pkg, 'claude'),
+    join(app.getAppPath(), 'node_modules', pkg, 'claude'),
+  ]
+  for (const p of candidates) {
+    if (!p) continue
+    if (p.includes('app.asar') && !p.includes('app.asar.unpacked')) continue
+    if (existsSync(p)) return p
+  }
+  return undefined
+}
+
 interface LiveSession {
   abort: AbortController
 }
@@ -208,6 +224,7 @@ export class AgentManager {
           mcpServers: { knowledge },
           maxTurns: 30,
           includePartialMessages: true,
+          pathToClaudeCodeExecutable: claudeCliBin(),
           executable: process.execPath as never,
           env: {
             ...process.env,

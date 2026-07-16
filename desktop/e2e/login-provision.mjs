@@ -17,9 +17,11 @@ mkdirSync(shots, { recursive: true })
 const USERDATA = '/tmp/mcnai-e2e-fresh'
 rmSync(USERDATA, { recursive: true, force: true })
 
+// MCNAI_APP_BIN 指向打包后的二进制时 = 打包形态回归；否则 dev 形态
+const packagedBin = process.env.MCNAI_APP_BIN
 const app = await electron.launch({
-  executablePath: join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
-  args: [root],
+  executablePath: packagedBin || join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
+  args: packagedBin ? [] : [root],
   env: { ...process.env, MCNAI_USER_DATA: USERDATA, MCNAI_VAULT: '/tmp/mcnai-e2e-vault' },
 })
 const win = await app.firstWindow()
@@ -27,6 +29,7 @@ await win.setViewportSize({ width: 1440, height: 920 })
 
 const fail = async (msg) => {
   console.log('❌', msg)
+  await win.screenshot({ path: join(shots, 'FAIL-现场.png') }).catch(() => {})
   await app.close()
   process.exit(1)
 }

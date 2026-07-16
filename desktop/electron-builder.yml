@@ -10,6 +10,7 @@ extraResources:
     to: resources/
 asarUnpack:
   - "node_modules/@anthropic-ai/claude-agent-sdk/**"
+  - "node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**"
   - "node_modules/minisearch/**"
   - "out/main/search-worker.js"
 mac:

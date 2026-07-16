@@ -12,9 +12,11 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const shots = join(root, 'e2e', 'shots')
 mkdirSync(shots, { recursive: true })
 
+// MCNAI_APP_BIN 指向打包后的二进制时 = 打包形态回归；否则 dev 形态
+const packagedBin = process.env.MCNAI_APP_BIN
 const app = await electron.launch({
-  executablePath: join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
-  args: [root],
+  executablePath: packagedBin || join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
+  args: packagedBin ? [] : [root],
   env: {
     ...process.env,
     MCNAI_USER_DATA: '/tmp/mcnai-e2e-userdata',
