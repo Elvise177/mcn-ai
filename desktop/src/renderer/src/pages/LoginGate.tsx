@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import logo from '../assets/logo.png'
 
 /** 启动登录门（Claude Desktop 式）：登录后自动下发 AI 配置；可跳过进入纯本地模式 */
 export default function LoginGate({
@@ -25,8 +26,9 @@ export default function LoginGate({
 
   return (
     <div className="titlebar-drag flex h-full flex-col items-center justify-center bg-bg">
-      <div className="mb-2 font-serif text-5xl text-ink">mcn-ai</div>
-      <div className="mb-10 text-sm text-muted">你的 AI 工作操作台 · 登录后即刻可用</div>
+      <img src={logo} alt="" className="fade-up mb-4 h-20 w-20" draggable={false} />
+      <div className="mb-2 font-serif text-3xl text-ink">你的 AI 工作操作台</div>
+      <div className="mb-10 text-sm text-muted">登录后即刻可用</div>
 
       <div className="w-96 space-y-3">
         <input

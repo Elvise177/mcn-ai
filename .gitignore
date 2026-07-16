@@ -44,3 +44,6 @@ dist/
 wheels/
 *.egg-info
 .venv
+
+# 桌面端打包资源（图标等）需要入库
+!desktop/build/

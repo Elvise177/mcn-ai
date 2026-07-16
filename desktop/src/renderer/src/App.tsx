@@ -3,6 +3,7 @@ import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
 import LoginGate from './pages/LoginGate'
 import { UiHost, ui } from './components/ui'
+import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
 
 type Page = 'workbench' | 'vault' | 'settings'
@@ -55,8 +56,8 @@ export default function App() {
   if (account === null) {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-bg">
-        <div className="fade-up font-serif text-4xl text-ink">mcn-ai</div>
-        <div className="thinking-dots mt-5"><span /><span /><span /></div>
+        <img src={logo} alt="" className="fade-up h-16 w-16" draggable={false} />
+        <div className="thinking-dots mt-6"><span /><span /><span /></div>
       </div>
     )
   }

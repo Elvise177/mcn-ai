@@ -4,13 +4,26 @@
  * 每个里程碑交付前必须跑一遍并人工/AI 检视截图——「构建通过」不等于「功能可用」。
  */
 import { _electron as electron } from 'playwright-core'
-import { mkdirSync, copyFileSync, existsSync } from 'fs'
+import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync } from 'fs'
 import { join, dirname } from 'path'
+import { homedir } from 'os'
 import { fileURLToPath } from 'url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const shots = join(root, 'e2e', 'shots')
 mkdirSync(shots, { recursive: true })
+
+// 每次重置隔离环境：userData 清空（保证登录门可见），vault 副本重拷（保证确定性）
+const userData = '/tmp/mcnai-e2e-userdata'
+rmSync(userData, { recursive: true, force: true })
+const vaultCopy = process.env.E2E_VAULT || '/tmp/mcnai-e2e-vault'
+if (!process.env.E2E_VAULT) {
+  const src = join(homedir(), 'Documents', 'AI', 'maggie-vault')
+  if (existsSync(src)) {
+    rmSync(vaultCopy, { recursive: true, force: true })
+    cpSync(src, vaultCopy, { recursive: true })
+  }
+}
 
 // MCNAI_APP_BIN 指向打包后的二进制时 = 打包形态回归；否则 dev 形态
 const packagedBin = process.env.MCNAI_APP_BIN
@@ -19,8 +32,8 @@ const app = await electron.launch({
   args: packagedBin ? [] : [root],
   env: {
     ...process.env,
-    MCNAI_USER_DATA: '/tmp/mcnai-e2e-userdata',
-    MCNAI_VAULT: process.env.E2E_VAULT || '/tmp/mcnai-e2e-vault',
+    MCNAI_USER_DATA: userData,
+    MCNAI_VAULT: vaultCopy,
   },
 })
 const win = await app.firstWindow()
