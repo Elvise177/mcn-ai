@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { wikiLinkPlugin } from 'remark-wiki-link'
 import ForceGraph2D from 'react-force-graph-2d'
 import { FastMarkdown } from '../components/Markdown'
+import { VaultWizard } from '../components/VaultWizard'
 import { ui } from '../components/ui'
 import { X } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
@@ -31,42 +32,13 @@ export default function VaultPage() {
 
   if (loading)
     return <div className="flex h-full items-center justify-center text-sm text-muted">正在索引你的库…</div>
-  if (!vault) return <Wizard onReady={setVault} />
-  return <Explorer vault={vault} onSwitch={() => setVault(null)} />
-}
-
-function Wizard({ onReady }: { onReady: (v: VaultOpenResult) => void }) {
-  const [busy, setBusy] = useState(false)
-  const pick = async (create: boolean): Promise<void> => {
-    setBusy(true)
-    const v = create ? await window.api.vault.createNew() : await window.api.vault.pickExisting()
-    setBusy(false)
-    if (v) onReady(v)
-  }
-  return (
-    <div className="flex h-full flex-col items-center justify-center">
-      <h1 className="mb-2 font-serif text-3xl">建立你的知识库</h1>
-      <p className="mb-10 text-sm text-muted">一个普通的 markdown 文件夹，数据永远在你自己手里</p>
-      <div className="flex gap-6">
-        <button
-          disabled={busy}
-          onClick={() => pick(true)}
-          className="w-64 rounded-2xl border-2 border-rose bg-rose-soft p-6 text-left hover:opacity-90"
-        >
-          <div className="mb-1 font-medium text-rose">新建库</div>
-          <div className="text-xs text-muted">按 MCN 模板创建分区结构，含投递箱与产物目录</div>
-        </button>
-        <button
-          disabled={busy}
-          onClick={() => pick(false)}
-          className="w-64 rounded-2xl border border-line bg-card p-6 text-left hover:bg-rose-soft/40"
-        >
-          <div className="mb-1 font-medium">使用已有库</div>
-          <div className="text-xs text-muted">指向现有 Obsidian vault 或任何 markdown 文件夹</div>
-        </button>
+  if (!vault)
+    return (
+      <div className="flex h-full flex-col items-center justify-center">
+        <VaultWizard onReady={setVault} />
       </div>
-    </div>
-  )
+    )
+  return <Explorer vault={vault} onSwitch={() => setVault(null)} />
 }
 
 const STAGE_ZH: Record<string, string> = {

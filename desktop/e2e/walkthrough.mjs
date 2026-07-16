@@ -27,6 +27,31 @@ if (!process.env.E2E_VAULT) {
 
 // MCNAI_APP_BIN 指向打包后的二进制时 = 打包形态回归；否则 dev 形态
 const packagedBin = process.env.MCNAI_APP_BIN
+
+// ---- 首跑引导环节：全新 userData 且不给库 → 登录门 → 建库引导 → 跳过 → 对话页 ----
+{
+  rmSync('/tmp/mcnai-e2e-firstrun', { recursive: true, force: true })
+  const env2 = { ...process.env, MCNAI_USER_DATA: '/tmp/mcnai-e2e-firstrun' }
+  delete env2.MCNAI_VAULT
+  const app2 = await electron.launch({
+    executablePath: packagedBin || join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
+    args: packagedBin ? [] : [root],
+    env: env2,
+  })
+  const w2 = await app2.firstWindow()
+  await w2.setViewportSize({ width: 1440, height: 920 })
+  await w2.waitForTimeout(1500)
+  await w2.click('text=暂不登录')
+  await w2.locator('text=建立你的知识库').waitFor({ timeout: 5000 })
+  await w2.screenshot({ path: join(shots, '00c-首跑-建库引导.png') })
+  console.log('shot: 00c-首跑-建库引导')
+  await w2.click('text=暂时跳过')
+  await w2.locator('text=问你的库，或直接说要做什么').waitFor({ timeout: 5000 })
+  await w2.screenshot({ path: join(shots, '00d-首跑-跳过后落对话页.png') })
+  console.log('shot: 00d-首跑-跳过后落对话页')
+  await app2.close()
+}
+
 const app = await electron.launch({
   executablePath: packagedBin || join(root, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'),
   args: packagedBin ? [] : [root],

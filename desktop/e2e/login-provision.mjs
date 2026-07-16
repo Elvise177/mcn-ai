@@ -47,8 +47,11 @@ try {
   await win.fill('input[placeholder="邮箱"]', 'mcnai-test-a@example.com')
   await win.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
   await win.click('button:has-text("登录")')
-  await win.waitForSelector('text=对话工作台', { timeout: 20000 }).catch(() => fail('登录后未进入主界面'))
-  console.log('✅ 登录门登录成功，进入主界面')
+  // 登录后应直接落在对话页（＋新对话可见 + 空态问候）
+  await win.waitForSelector('text=＋ 新对话', { timeout: 20000 }).catch(() => fail('登录后未进入主界面'))
+  const chatHome = await win.locator('text=问你的库，或直接说要做什么').count()
+  if (!chatHome) await fail('登录后没有落在对话页')
+  console.log('✅ 登录门登录成功，直接落在对话页')
 
   // 2. 等下发落库
   await win.waitForTimeout(4000)
@@ -58,8 +61,7 @@ try {
   if (!s.hasApiKey) await fail('key 未下发')
   await win.screenshot({ path: join(shots, '11-登录即用-key就绪.png') })
 
-  // 3. 零配置直接对话（用下发的 key 走真实模型）
-  await win.click('text=对话工作台')
+  // 3. 零配置直接对话（用下发的 key 走真实模型；对话页即首页无需切换）
   // 提问不含期待答案词，且只认 AI 气泡（.md-article）——防止匹配用户自己的气泡造成假阳性
   await win.fill('textarea', '一加一等于几？只用一个中文数字回答，不要其他内容')
   await win.press('textarea', 'Enter')

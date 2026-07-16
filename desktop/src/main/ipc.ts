@@ -14,7 +14,7 @@ import { createVault } from './vault/wizard'
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
   ipcMain.handle('settings:get', () => ({
-    vaultPath: store.get('vaultPath') ?? null,
+    vaultPath: process.env.MCNAI_VAULT || store.get('vaultPath') || null,
     relayBaseUrl: store.get('relayBaseUrl'),
     hasApiKey: !!getApiKey(),
     llmBaseUrl: store.get('llmBaseUrl'),

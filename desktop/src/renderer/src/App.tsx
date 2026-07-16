@@ -3,6 +3,7 @@ import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
 import LoginGate from './pages/LoginGate'
 import { UiHost, ui } from './components/ui'
+import { VaultWizard } from './components/VaultWizard'
 import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
 
@@ -21,6 +22,8 @@ export default function App() {
   const [active, setActive] = useState<Conversation>(newConv)
   const [account, setAccount] = useState<{ loggedIn: boolean; email?: string } | null>(null)
   const [localMode, setLocalMode] = useState(() => localStorage.getItem('localMode') === '1')
+  const [vaultState, setVaultState] = useState<'loading' | 'none' | 'ready'>('loading')
+  const [vaultSkipped, setVaultSkipped] = useState(() => localStorage.getItem('vaultSkipped') === '1')
 
   // 会话状态统一在这里维护：convsRef 同步镜像，流式事件按 sessionId 找到归属对话，
   // 即使用户已切到新对话，旧对话的回复也照常入库（否则切走=丢消息）
@@ -60,6 +63,7 @@ export default function App() {
       setConvs(list)
     })
     window.api.auth.state().then(setAccount)
+    window.api.settings.get().then((s) => setVaultState(s.vaultPath ? 'ready' : 'none'))
     const offShortcut = window.api.shortcut.on((name) => {
       if (name === 'new-chat') {
         setActive(newConv())
@@ -126,6 +130,28 @@ export default function App() {
           setLocalMode(true)
         }}
       />
+    )
+  }
+  // 首跑第二步：建库引导（登录 → 建库 → 对话）。跳过后可随时在「个人知识库」里建
+  if (vaultState === 'loading') {
+    return (
+      <div className="flex h-full flex-col items-center justify-center bg-bg">
+        <img src={logo} alt="" className="fade-up h-16 w-16" draggable={false} />
+        <div className="thinking-dots mt-6"><span /><span /><span /></div>
+      </div>
+    )
+  }
+  if (vaultState === 'none' && !vaultSkipped) {
+    return (
+      <div className="titlebar-drag flex h-full flex-col items-center justify-center bg-bg">
+        <VaultWizard
+          onReady={() => setVaultState('ready')}
+          onSkip={() => {
+            localStorage.setItem('vaultSkipped', '1')
+            setVaultSkipped(true)
+          }}
+        />
+      </div>
     )
   }
 
