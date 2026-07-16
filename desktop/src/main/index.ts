@@ -59,6 +59,16 @@ function buildMenu(): void {
         ],
       },
       {
+        label: '文件',
+        submenu: [
+          {
+            label: '新对话',
+            accelerator: 'CmdOrCtrl+N',
+            click: () => BrowserWindow.getFocusedWindow()?.webContents.send('shortcut', 'new-chat'),
+          },
+        ],
+      },
+      {
         label: '编辑',
         submenu: [
           { label: '撤销', role: 'undo' },

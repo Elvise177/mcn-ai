@@ -516,6 +516,21 @@ function NoteView({
               <button onClick={startEdit} className="rounded-full border border-line px-3 py-1 hover:bg-rose-soft">
                 编辑
               </button>
+              <button
+                onClick={async () => {
+                  const name = prompt('新名称：', note.title)
+                  if (!name || name === note.title) return
+                  try {
+                    const newRel = await window.api.vault.renameNote(path, name)
+                    onOpenLink(newRel)
+                  } catch (e) {
+                    alert(String(e))
+                  }
+                }}
+                className="rounded-full border border-line px-3 py-1 hover:bg-rose-soft"
+              >
+                重命名
+              </button>
               <button onClick={onDelete} className="rounded-full border border-line px-3 py-1 text-muted hover:text-rose">
                 删除
               </button>

@@ -23,6 +23,12 @@ export default function App() {
   useEffect(() => {
     window.api.chat.list().then(setConvs)
     window.api.auth.state().then(setAccount)
+    return window.api.shortcut.on((name) => {
+      if (name === 'new-chat') {
+        setActive(newConv())
+        setPage('workbench')
+      }
+    })
   }, [])
 
   const handleLogout = useCallback(async () => {

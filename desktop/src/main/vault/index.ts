@@ -120,6 +120,19 @@ export class VaultManager {
     return rel
   }
 
+  /** 重命名（同目录）；索引由 watcher 的 unlink+add 自动跟进 */
+  async renameNote(relPath: string, newName: string): Promise<string> {
+    if (!this.root) throw new Error('vault 未打开')
+    const safe = newName.replace(/[\\/:*?"<>|]/g, '').trim()
+    if (!safe) throw new Error('名称无效')
+    const dir = relPath.split('/').slice(0, -1).join('/')
+    const newRel = dir ? `${dir}/${safe}.md` : `${safe}.md`
+    if (newRel === relPath) return relPath
+    if (this.notes.has(newRel)) throw new Error('同名笔记已存在')
+    await fs.rename(join(this.root, relPath), join(this.root, newRel))
+    return newRel
+  }
+
   /** 删除 = 移入系统废纸篓（可恢复，不做硬删除） */
   async deleteNote(relPath: string): Promise<void> {
     if (!this.root) throw new Error('vault 未打开')

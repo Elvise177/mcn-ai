@@ -95,6 +95,7 @@ interface Window {
       write: (relPath: string, raw: string) => Promise<void>
       createNote: (dir: string, name: string) => Promise<string>
       deleteNote: (relPath: string) => Promise<void>
+      renameNote: (relPath: string, newName: string) => Promise<string>
       openFile: (href: string, fromNote: string) => Promise<boolean>
       onChanged: (cb: (payload: { path: string }) => void) => () => void
     }
@@ -116,6 +117,9 @@ interface Window {
       login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>
       logout: () => Promise<void>
       state: () => Promise<{ loggedIn: boolean; email?: string }>
+    }
+    shortcut: {
+      on: (cb: (name: string) => void) => () => void
     }
     diag: {
       export: () => Promise<string>

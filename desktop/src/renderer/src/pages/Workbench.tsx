@@ -133,10 +133,16 @@ export default function Workbench({
                       <div className="max-w-[80%] rounded-2xl bg-sidebar px-4 py-2.5 text-[14px]">{m.text}</div>
                     </div>
                   ) : (
-                    <div key={i} className="flex gap-3">
+                    <div key={i} className="group flex gap-3">
                       <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-rose" />
                       <div className="min-w-0 flex-1">
                         <FastMarkdown body={m.text} onLink={handleLink} />
+                        <button
+                          onClick={() => navigator.clipboard.writeText(m.text)}
+                          className="mt-1 hidden rounded-full border border-line px-2.5 py-0.5 text-[11px] text-muted hover:text-rose group-hover:inline-block"
+                        >
+                          复制
+                        </button>
                       </div>
                     </div>
                   )

@@ -64,6 +64,7 @@ export function registerIpc(): void {
   ipcMain.handle('vault:write', (_e, relPath: string, raw: string) => vaultManager.write(relPath, raw))
   ipcMain.handle('vault:createNote', (_e, dir: string, name: string) => vaultManager.createNote(dir, name))
   ipcMain.handle('vault:deleteNote', (_e, relPath: string) => vaultManager.deleteNote(relPath))
+  ipcMain.handle('vault:renameNote', (_e, relPath: string, newName: string) => vaultManager.renameNote(relPath, newName))
   ipcMain.handle('vault:openFile', (_e, href: string, fromNote: string) => vaultManager.openFile(href, fromNote))
 
   // ---- auth ----

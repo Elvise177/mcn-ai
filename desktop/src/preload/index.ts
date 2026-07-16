@@ -20,6 +20,7 @@ const api = {
     write: (relPath: string, raw: string) => ipcRenderer.invoke('vault:write', relPath, raw),
     createNote: (dir: string, name: string) => ipcRenderer.invoke('vault:createNote', dir, name),
     deleteNote: (relPath: string) => ipcRenderer.invoke('vault:deleteNote', relPath),
+    renameNote: (relPath: string, newName: string) => ipcRenderer.invoke('vault:renameNote', relPath, newName),
     openFile: (href: string, fromNote: string) => ipcRenderer.invoke('vault:openFile', href, fromNote),
     onChanged: (cb: (payload: { path: string }) => void) => {
       const listener = (_e: unknown, payload: { path: string }): void => cb(payload)
@@ -67,11 +68,18 @@ const artifacts = {
     return () => ipcRenderer.removeListener('artifact:created', listener)
   },
 }
+const shortcut = {
+  on: (cb: (name: string) => void) => {
+    const listener = (_e: unknown, name: string): void => cb(name)
+    ipcRenderer.on('shortcut', listener)
+    return () => ipcRenderer.removeListener('shortcut', listener)
+  },
+}
 const diag = {
   export: () => ipcRenderer.invoke('diag:export'),
   log: (level: 'info' | 'warn' | 'error', msg: string) => ipcRenderer.invoke('log:renderer', level, msg),
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth, diag }
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi
