@@ -53,9 +53,8 @@ try {
   }
   await snap('01-工作台首页', 800)
 
-  // 对话工作台：空态 + 输入 + 快捷指令
-  await win.click('text=对话工作台')
-  await snap('01b-工作台-空态', 800)
+  // 对话工作台（默认页，无模块入口——新对话/Recents 即入口）：空态 + 输入 + 快捷指令
+  await snap('01b-工作台-空态', 400)
   const chatInput = win.locator('textarea').first()
   if (await chatInput.count()) {
     await chatInput.fill('灰太太最近的数据怎么样？')

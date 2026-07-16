@@ -150,7 +150,6 @@ export default function App() {
         <nav className="space-y-1 px-3">
           {(
             [
-              ['workbench', '对话工作台'],
               ['vault', '个人知识库'],
               ['settings', '设置'],
             ] as [Page, string][]
