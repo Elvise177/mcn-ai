@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
+import LoginGate from './pages/LoginGate'
 import { pendingNote } from './lib/bus'
 
 type Page = 'workbench' | 'vault' | 'settings'
@@ -16,9 +17,19 @@ export default function App() {
   const [page, setPage] = useState<Page>('workbench')
   const [convs, setConvs] = useState<Conversation[]>([])
   const [active, setActive] = useState<Conversation>(newConv)
+  const [account, setAccount] = useState<{ loggedIn: boolean; email?: string } | null>(null)
+  const [localMode, setLocalMode] = useState(() => localStorage.getItem('localMode') === '1')
 
   useEffect(() => {
     window.api.chat.list().then(setConvs)
+    window.api.auth.state().then(setAccount)
+  }, [])
+
+  const handleLogout = useCallback(async () => {
+    await window.api.auth.logout()
+    localStorage.removeItem('localMode')
+    setLocalMode(false)
+    setAccount({ loggedIn: false })
   }, [])
 
   const onConvUpdate = useCallback((c: Conversation) => {
@@ -33,6 +44,21 @@ export default function App() {
       setPage('vault')
     }
   }, [])
+
+  if (account === null) {
+    return <div className="flex h-full items-center justify-center bg-bg text-sm text-muted">…</div>
+  }
+  if (!account.loggedIn && !localMode) {
+    return (
+      <LoginGate
+        onLoggedIn={async () => setAccount(await window.api.auth.state())}
+        onSkip={() => {
+          localStorage.setItem('localMode', '1')
+          setLocalMode(true)
+        }}
+      />
+    )
+  }
 
   return (
     <div className="flex h-full">
@@ -111,13 +137,19 @@ export default function App() {
       <main className="flex-1 overflow-hidden">
         {page === 'workbench' && <Workbench conv={active} onConvUpdate={onConvUpdate} onOpenNote={openNoteFromChat} />}
         {page === 'vault' && <VaultPage />}
-        {page === 'settings' && <SettingsPage />}
+        {page === 'settings' && <SettingsPage account={account} onLogout={handleLogout} />}
       </main>
     </div>
   )
 }
 
-function SettingsPage() {
+function SettingsPage({
+  account,
+  onLogout,
+}: {
+  account: { loggedIn: boolean; email?: string }
+  onLogout: () => void
+}) {
   const [hasKey, setHasKey] = useState(false)
   const [baseUrl, setBaseUrl] = useState('')
   const [draft, setDraft] = useState('')
@@ -126,22 +158,8 @@ function SettingsPage() {
   const [llmBaseUrl, setLlmBaseUrl] = useState('')
   const [llmDraft, setLlmDraft] = useState('')
   const [llmSaved, setLlmSaved] = useState(false)
-
-  const [account, setAccount] = useState<{ loggedIn: boolean; email?: string }>({ loggedIn: false })
   const [apiBase, setApiBase] = useState('')
-  const [loginEmail, setLoginEmail] = useState('')
-  const [loginPwd, setLoginPwd] = useState('')
-  const [loginErr, setLoginErr] = useState('')
-  const [loggingIn, setLoggingIn] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
-
-  const refreshSettings = () =>
-    window.api.settings.get().then((s) => {
-      setHasKey(s.hasApiKey)
-      setHasLlmKey(s.hasLlmKey)
-      setBaseUrl(s.relayBaseUrl)
-      setLlmBaseUrl(s.llmBaseUrl)
-    })
 
   useEffect(() => {
     window.api.settings.get().then((s) => {
@@ -151,7 +169,6 @@ function SettingsPage() {
       setLlmBaseUrl(s.llmBaseUrl)
       setApiBase(s.apiBaseUrl)
     })
-    window.api.auth.state().then(setAccount)
   }, [])
 
   return (
@@ -167,54 +184,22 @@ function SettingsPage() {
               已登录：<span className="text-rose">{account.email}</span>
             </span>
             <button
-              onClick={async () => {
-                await window.api.auth.logout()
-                setAccount({ loggedIn: false })
-              }}
+              onClick={onLogout}
               className="rounded-full border border-line px-3 py-1 text-[12px] text-muted hover:text-rose"
             >
-              退出
+              退出登录
             </button>
           </div>
         ) : (
-          <>
-            <div className="flex gap-2">
-              <input
-                value={loginEmail}
-                onChange={(e) => setLoginEmail(e.target.value)}
-                placeholder="邮箱"
-                className="flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-sm outline-none focus:border-rose"
-              />
-              <input
-                type="password"
-                value={loginPwd}
-                onChange={(e) => setLoginPwd(e.target.value)}
-                placeholder="密码"
-                className="flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-sm outline-none focus:border-rose"
-              />
-              <button
-                disabled={loggingIn}
-                onClick={async () => {
-                  setLoggingIn(true)
-                  setLoginErr('')
-                  const r = await window.api.auth.login(loginEmail.trim(), loginPwd)
-                  setLoggingIn(false)
-                  if (r.ok) {
-                    setAccount(await window.api.auth.state())
-                    setLoginPwd('')
-                    setTimeout(refreshSettings, 1500) // 等服务端下发 key 落库
-                  } else {
-                    setLoginErr(r.error ?? '登录失败')
-                  }
-                }}
-                className="rounded-lg bg-rose px-4 py-2 text-sm text-white hover:opacity-90 disabled:opacity-50"
-              >
-                {loggingIn ? '登录中…' : '登录'}
-              </button>
-            </div>
-            {loginErr && <div className="text-[12px] text-red-600">{loginErr}</div>}
-            <div className="text-[12px] text-muted">与网页版同一账号。不登录也能用（仅本地，无云端检索与同步）。</div>
-          </>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted">当前为本地模式（无云端检索与同步）</span>
+            <button
+              onClick={onLogout}
+              className="rounded-full bg-rose px-3 py-1 text-[12px] text-white hover:opacity-90"
+            >
+              去登录
+            </button>
+          </div>
         )}
         <div className="text-sm">
           AI 服务：

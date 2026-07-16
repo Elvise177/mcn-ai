@@ -41,13 +41,14 @@ try {
   console.log(s.hasApiKey || s.hasLlmKey ? '❌ 初始竟有 key（隔离失败）' : '✅ 全新环境：无任何 key')
   if (s.hasApiKey) await fail('隔离失败')
 
-  // 1. GUI 登录（真实点击输入，不走脚本后门）
-  await win.click('text=设置')
+  // 1. 启动登录门上真实登录（Claude Desktop 式首屏）
+  await win.waitForSelector('input[placeholder="邮箱"]', { timeout: 10000 }).catch(() => fail('登录门未出现'))
+  await win.screenshot({ path: join(shots, '00b-登录门.png') })
   await win.fill('input[placeholder="邮箱"]', 'mcnai-test-a@example.com')
   await win.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
   await win.click('button:has-text("登录")')
-  await win.waitForSelector('text=已登录', { timeout: 15000 }).catch(() => fail('登录未成功'))
-  console.log('✅ GUI 登录成功')
+  await win.waitForSelector('text=对话工作台', { timeout: 20000 }).catch(() => fail('登录后未进入主界面'))
+  console.log('✅ 登录门登录成功，进入主界面')
 
   // 2. 等下发落库
   await win.waitForTimeout(4000)

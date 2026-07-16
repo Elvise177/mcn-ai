@@ -32,7 +32,13 @@ const snap = async (name, ms = 600) => {
 }
 
 try {
-  await snap('01-工作台首页', 1500)
+  await snap('00-登录门', 1500)
+  const skip = win.locator('text=暂不登录')
+  if (await skip.count()) {
+    await skip.click()
+    await win.waitForTimeout(800)
+  }
+  await snap('01-工作台首页', 800)
 
   // 对话工作台：空态 + 输入 + 快捷指令
   await win.click('text=对话工作台')

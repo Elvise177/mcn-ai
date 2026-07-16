@@ -104,7 +104,7 @@ export default function Workbench({
   const empty = messages.length === 0 && !streaming
 
   return (
-    <div className="flex h-full">
+    <div className="relative flex h-full">
       <div className="flex min-w-0 flex-1 flex-col">
         {empty ? (
           <div className="flex flex-1 flex-col items-center justify-center px-8">
@@ -172,6 +172,7 @@ export default function Workbench({
   )
 }
 
+
 function InputBox({
   value,
   onChange,
@@ -223,6 +224,12 @@ function ArtifactPanel() {
   const [items, setItems] = useState<ArtifactInfo[]>([])
   const [fresh, setFresh] = useState<string | null>(null)
   const [preview, setPreview] = useState<{ path: string; text: string } | null>(null)
+  const [open, setOpen] = useState(() => localStorage.getItem('chat.artifacts') !== '0')
+
+  const setVisible = (v: boolean): void => {
+    localStorage.setItem('chat.artifacts', v ? '1' : '0')
+    setOpen(v)
+  }
 
   const refresh = useCallback(() => {
     window.api.artifacts.list().then(setItems)
@@ -233,15 +240,33 @@ function ArtifactPanel() {
     return window.api.artifacts.onCreated((a) => {
       setFresh(a.path)
       refresh()
+      setVisible(true) // 新产物生成时自动弹出
     })
-  }, [refresh])
+  }, [refresh]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (items.length === 0) return null
 
+  if (!open) {
+    return (
+      <button
+        onClick={() => setVisible(true)}
+        title="打开产物面板"
+        className="absolute right-4 top-3 z-10 rounded-full border border-line bg-card px-3 py-1 text-[12px] text-muted hover:text-rose"
+      >
+        产物 {items.length}
+      </button>
+    )
+  }
+
   return (
     <div className="flex w-[300px] shrink-0 flex-col border-l border-line">
-      <div className="border-b border-line px-4 py-3 text-sm font-medium">
-        产物 <span className="text-[11px] font-normal text-muted">90_产物/</span>
+      <div className="flex items-center justify-between border-b border-line px-4 py-3">
+        <div className="text-sm font-medium">
+          产物 <span className="text-[11px] font-normal text-muted">90_产物/</span>
+        </div>
+        <button onClick={() => setVisible(false)} title="关闭产物面板" className="rounded px-1.5 text-muted hover:text-rose">
+          ✕
+        </button>
       </div>
       <div className="flex-1 overflow-auto p-3 space-y-2">
         {items.map((a) => (
