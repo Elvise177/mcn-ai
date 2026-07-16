@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
 import LoginGate from './pages/LoginGate'
+import { UiHost, ui } from './components/ui'
 import { pendingNote } from './lib/bus'
 
 type Page = 'workbench' | 'vault' | 'settings'
@@ -52,7 +53,12 @@ export default function App() {
   }, [])
 
   if (account === null) {
-    return <div className="flex h-full items-center justify-center bg-bg text-sm text-muted">…</div>
+    return (
+      <div className="flex h-full flex-col items-center justify-center bg-bg">
+        <div className="fade-up font-serif text-4xl text-ink">mcn-ai</div>
+        <div className="thinking-dots mt-5"><span /><span /><span /></div>
+      </div>
+    )
   }
   if (!account.loggedIn && !localMode) {
     return (
@@ -68,6 +74,7 @@ export default function App() {
 
   return (
     <div className="flex h-full">
+      <UiHost />
       <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-sidebar">
         <div className="titlebar-drag px-5 pb-4 pt-10">
           <div className="text-xl font-semibold text-rose">mcn-ai</div>
@@ -137,11 +144,15 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="border-t border-line px-5 py-4 text-[11px] text-muted">v0.1.0 · MVP</div>
+        <div className="border-t border-line px-5 py-4 text-[11px] text-muted">
+          {account.email ? account.email.split('@')[0] + ' · ' : ''}v0.1.0
+        </div>
       </aside>
 
       <main className="flex-1 overflow-hidden">
-        {page === 'workbench' && <Workbench conv={active} onConvUpdate={onConvUpdate} onOpenNote={openNoteFromChat} />}
+        {page === 'workbench' && (
+          <Workbench conv={active} onConvUpdate={onConvUpdate} onOpenNote={openNoteFromChat} userName={account.email?.split('@')[0]} />
+        )}
         {page === 'vault' && <VaultPage />}
         {page === 'settings' && <SettingsPage account={account} onLogout={handleLogout} />}
       </main>
@@ -232,6 +243,7 @@ function SettingsPage({
         <button
           onClick={async () => {
             await window.api.diag.export()
+            ui.toast('诊断报告已导出到桌面')
           }}
           className="rounded-full border border-line px-4 py-1.5 text-[13px] hover:bg-rose-soft"
         >

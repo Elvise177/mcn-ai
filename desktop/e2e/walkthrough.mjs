@@ -74,6 +74,11 @@ try {
     await snap('04-笔记打开-图谱缩小', 1200)
   }
 
+  // 应用内弹窗（替代系统 prompt 的验证）
+  await win.click('text=＋新建')
+  await snap('03b-应用内弹窗', 500)
+  await win.keyboard.press('Escape')
+
   // 搜索
   await win.fill('input[placeholder="搜索库…"]', '灰太太')
   await snap('05-搜索结果', 2500)

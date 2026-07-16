@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowUp, Square, Copy, Loader2, X } from 'lucide-react'
 import { FastMarkdown } from '../components/Markdown'
+import { ui } from '../components/ui'
 
 const CHIPS = ['写种草脚本', '做课件 PPT', '生成周报', '达人复盘', '检索我的库']
 
@@ -17,10 +19,12 @@ export default function Workbench({
   conv,
   onConvUpdate,
   onOpenNote,
+  userName,
 }: {
   conv: Conversation
   onConvUpdate: (c: Conversation) => void
   onOpenNote: (wikiTarget: string) => void
+  userName?: string
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>(conv.messages)
   const [input, setInput] = useState('')
@@ -108,7 +112,13 @@ export default function Workbench({
       <div className="flex min-w-0 flex-1 flex-col">
         {empty ? (
           <div className="flex flex-1 flex-col items-center justify-center px-8">
-            <h1 className="mb-2 font-serif text-4xl">你好，大头</h1>
+            <h1 className="fade-up mb-2 font-serif text-4xl">
+              {(() => {
+                const h = new Date().getHours()
+                const t = h < 5 ? '夜深了' : h < 11 ? '早上好' : h < 14 ? '中午好' : h < 18 ? '下午好' : '晚上好'
+                return userName ? `${t}，${userName}` : t
+              })()}
+            </h1>
             <p className="mb-8 text-sm text-muted">问你的库，或直接说要做什么</p>
             <InputBox value={input} onChange={setInput} onSend={() => send(input)} streaming={false} wide />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
@@ -138,10 +148,13 @@ export default function Workbench({
                       <div className="min-w-0 flex-1">
                         <FastMarkdown body={m.text} onLink={handleLink} />
                         <button
-                          onClick={() => navigator.clipboard.writeText(m.text)}
-                          className="mt-1 hidden rounded-full border border-line px-2.5 py-0.5 text-[11px] text-muted hover:text-rose group-hover:inline-block"
+                          onClick={() => {
+                            navigator.clipboard.writeText(m.text)
+                            ui.toast('已复制')
+                          }}
+                          className="mt-1 hidden items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-[11px] text-muted hover:text-rose group-hover:inline-flex"
                         >
-                          复制
+                          <Copy size={11} /> 复制
                         </button>
                       </div>
                     </div>
@@ -151,12 +164,18 @@ export default function Workbench({
                   <div className="flex gap-3">
                     <span className="mt-2 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-rose" />
                     <div className="min-w-0 flex-1">
-                      {toolLine && <div className="mb-1 text-[12px] text-muted">⚙ {toolLine}…</div>}
+                      {toolLine && (
+                        <div className="mb-1 flex items-center gap-1.5 text-[12px] text-muted">
+                          <Loader2 size={12} className="animate-spin" /> {toolLine}…
+                        </div>
+                      )}
                       {draft && <FastMarkdown body={draft} onLink={handleLink} />}
                     </div>
                   </div>
                 )}
-                {streaming && !draft && !toolLine && <div className="text-[12px] text-muted">思考中…</div>}
+                {streaming && !draft && !toolLine && (
+                  <div className="thinking-dots pl-6 pt-1"><span /><span /><span /></div>
+                )}
               </div>
             </div>
             <div className="border-t border-line px-8 py-4">
@@ -210,8 +229,12 @@ function InputBox({
         className="max-h-32 flex-1 resize-none bg-transparent text-[14px] leading-6 outline-none"
       />
       {streaming ? (
-        <button onClick={onStop} className="rounded-full border border-rose px-3 py-1 text-[12px] text-rose hover:bg-rose-soft">
-          停止
+        <button
+          onClick={onStop}
+          title="停止生成"
+          className="flex h-8 w-8 items-center justify-center rounded-full border border-rose text-rose hover:bg-rose-soft"
+        >
+          <Square size={12} fill="currentColor" />
         </button>
       ) : (
         <button
@@ -219,7 +242,7 @@ function InputBox({
           className="flex h-8 w-8 items-center justify-center rounded-full bg-rose text-white hover:opacity-90"
           title="发送"
         >
-          ↑
+          <ArrowUp size={16} />
         </button>
       )}
     </div>
@@ -265,13 +288,13 @@ function ArtifactPanel() {
   }
 
   return (
-    <div className="flex w-[300px] shrink-0 flex-col border-l border-line">
+    <div className="slide-in-right flex w-[300px] shrink-0 flex-col border-l border-line">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <div className="text-sm font-medium">
           产物 <span className="text-[11px] font-normal text-muted">90_产物/</span>
         </div>
-        <button onClick={() => setVisible(false)} title="关闭产物面板" className="rounded px-1.5 text-muted hover:text-rose">
-          ✕
+        <button onClick={() => setVisible(false)} title="关闭产物面板" className="rounded p-1 text-muted hover:text-rose">
+          <X size={14} />
         </button>
       </div>
       <div className="flex-1 overflow-auto p-3 space-y-2">

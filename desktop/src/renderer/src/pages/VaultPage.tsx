@@ -4,6 +4,8 @@ import remarkGfm from 'remark-gfm'
 import { wikiLinkPlugin } from 'remark-wiki-link'
 import ForceGraph2D from 'react-force-graph-2d'
 import { FastMarkdown } from '../components/Markdown'
+import { ui } from '../components/ui'
+import { X } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
 
 const GROUP_COLORS = ['#e25484', '#ba8c1e', '#4a76be', '#589860', '#8c6bb8', '#c96a4a', '#5aa7a7']
@@ -244,7 +246,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   }, [])
 
   const createNote = async (): Promise<void> => {
-    const name = prompt('笔记名称：')
+    const name = await ui.prompt({ title: '新建笔记', placeholder: '笔记名称' })
     if (!name) return
     const dir = current ? current.split('/').slice(0, -1).join('/') : ''
     const rel = await window.api.vault.createNote(dir, name)
@@ -253,7 +255,8 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
 
   const deleteNote = async (): Promise<void> => {
     if (!current) return
-    if (!confirm(`删除「${note?.title}」？（移入废纸篓，可恢复）`)) return
+    const okd = await ui.confirm({ title: `删除「${note?.title}」？`, message: '将移入系统废纸篓，可随时找回。', danger: true, okText: '删除' })
+    if (!okd) return
     await window.api.vault.deleteNote(current)
     closeNote()
   }
@@ -502,8 +505,8 @@ function NoteView({
                 保存
               </button>
               <button
-                onClick={() => {
-                  if (dirty && !confirm('放弃未保存的修改？')) return
+                onClick={async () => {
+                  if (dirty && !(await ui.confirm({ title: '放弃未保存的修改？', danger: true, okText: '放弃' }))) return
                   setEditing(false)
                 }}
                 className="rounded-full border border-line px-3 py-1 hover:bg-rose-soft"
@@ -518,13 +521,14 @@ function NoteView({
               </button>
               <button
                 onClick={async () => {
-                  const name = prompt('新名称：', note.title)
+                  const name = await ui.prompt({ title: '重命名笔记', initial: note.title })
                   if (!name || name === note.title) return
                   try {
                     const newRel = await window.api.vault.renameNote(path, name)
                     onOpenLink(newRel)
+                    ui.toast('已重命名')
                   } catch (e) {
-                    alert(String(e))
+                    ui.toast(String(e), 'error')
                   }
                 }}
                 className="rounded-full border border-line px-3 py-1 hover:bg-rose-soft"
@@ -534,8 +538,8 @@ function NoteView({
               <button onClick={onDelete} className="rounded-full border border-line px-3 py-1 text-muted hover:text-rose">
                 删除
               </button>
-              <button onClick={onClose} title="关闭文件" className="rounded-full border border-line px-2.5 py-1 text-muted hover:text-rose">
-                ✕
+              <button onClick={onClose} title="关闭文件" className="flex items-center rounded-full border border-line px-2.5 py-1 text-muted hover:text-rose">
+                <X size={13} />
               </button>
             </>
           )}
@@ -730,8 +734,8 @@ const GraphPanel = memo(function GraphPanel({
             {data.nodes.length} 节点 · {data.links.length} 边 · 滚轮缩放显示标签
           </span>
         </div>
-        <button onClick={onClose} title="关闭关系图" className="rounded px-1.5 text-muted hover:text-rose">
-          ✕
+        <button onClick={onClose} title="关闭关系图" className="rounded p-1 text-muted hover:text-rose">
+          <X size={14} />
         </button>
       </div>
       <div ref={boxRef} className="flex-1">
