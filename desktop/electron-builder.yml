@@ -22,3 +22,16 @@ mac:
       arch: [arm64]
   identity: null
   category: public.app-category.productivity
+# 测试版未签名，dmg 内附安装说明（去 quarantine 标记）；正式签名方案见 docs/分发指南.md
+dmg:
+  contents:
+    - x: 130
+      y: 150
+    - x: 410
+      y: 150
+      type: link
+      path: /Applications
+    - x: 270
+      y: 300
+      type: file
+      path: build/安装说明.txt
