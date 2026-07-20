@@ -15,6 +15,11 @@ interface StoreSchema {
   manualApiKey?: boolean
   manualLlmKey?: boolean
   encryptedLlmKey?: string
+  /** 自动化中心 · 钉钉群机器人 */
+  dingtalkWebhook?: string
+  dingtalkSecret?: string
+  dingtalkNotifyInbox: boolean
+  dingtalkNotifyArtifact: boolean
 }
 
 export const store = new Store<StoreSchema>({
@@ -23,6 +28,8 @@ export const store = new Store<StoreSchema>({
     llmBaseUrl: 'https://api.deepseek.com',
     llmModel: 'deepseek-v4-flash',
     apiBaseUrl: 'https://www.makeupai.top',
+    dingtalkNotifyInbox: true,
+    dingtalkNotifyArtifact: true,
   },
 })
 

@@ -2,6 +2,7 @@ import { promises as fs } from 'fs'
 import { join, relative, basename } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
 import { shell, type BrowserWindow } from 'electron'
+import { notifyDingtalk } from '../lib/dingtalk'
 
 export interface Artifact {
   path: string
@@ -31,6 +32,7 @@ export class ArtifactsWatcher {
     })
     this.watcher.on('add', (p: string) => {
       this.win?.webContents.send('artifact:created', { path: relative(this.dir!, p), name: basename(p) })
+      notifyDingtalk('artifact', 'mcn-ai 产物', `### 新产物生成 📄\n\n**${basename(p)}**\n\n> ${new Date().toLocaleString('zh-CN')} · mcn-ai 自动化`)
     })
   }
 

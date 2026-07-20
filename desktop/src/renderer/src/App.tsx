@@ -244,6 +244,97 @@ export default function App() {
   )
 }
 
+/** 自动化中心 · 钉钉群通知：投递箱完成/产物生成推送到钉钉群 */
+function DingtalkCard() {
+  const [webhook, setWebhook] = useState('')
+  const [secret, setSecret] = useState('')
+  const [notifyInbox, setNotifyInbox] = useState(true)
+  const [notifyArtifact, setNotifyArtifact] = useState(true)
+  const [testing, setTesting] = useState(false)
+
+  useEffect(() => {
+    window.api.settings.get().then((s) => {
+      setWebhook(s.dingtalkWebhook)
+      setSecret(s.dingtalkSecret)
+      setNotifyInbox(s.dingtalkNotifyInbox)
+      setNotifyArtifact(s.dingtalkNotifyArtifact)
+    })
+  }, [])
+
+  const save = (patch?: Partial<{ notifyInbox: boolean; notifyArtifact: boolean }>): void => {
+    void window.api.settings.setDingtalk({
+      webhook,
+      secret,
+      notifyInbox: patch?.notifyInbox ?? notifyInbox,
+      notifyArtifact: patch?.notifyArtifact ?? notifyArtifact,
+    })
+  }
+
+  return (
+    <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
+      <div className="text-sm font-medium">自动化 · 钉钉通知</div>
+      <div className="text-[12px] leading-5 text-muted">
+        投递箱处理完成、AI 产物生成时自动推送到钉钉群。钉钉群 → 群设置 → 智能群助手 → 添加「自定义」机器人（安全设置选<b>加签</b>），把 Webhook 和加签密钥粘到这里。
+      </div>
+      <input
+        value={webhook}
+        onChange={(e) => setWebhook(e.target.value)}
+        onBlur={() => save()}
+        placeholder="https://oapi.dingtalk.com/robot/send?access_token=…"
+        className="w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-rose"
+      />
+      <input
+        type="password"
+        value={secret}
+        onChange={(e) => setSecret(e.target.value)}
+        onBlur={() => save()}
+        placeholder="加签密钥 SEC…（安全设置选了加签才需要）"
+        className="w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-rose"
+      />
+      <div className="flex items-center gap-5 text-[13px]">
+        <label className="flex cursor-pointer items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={notifyInbox}
+            onChange={(e) => {
+              setNotifyInbox(e.target.checked)
+              save({ notifyInbox: e.target.checked })
+            }}
+            className="accent-rose"
+          />
+          投递箱完成
+        </label>
+        <label className="flex cursor-pointer items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={notifyArtifact}
+            onChange={(e) => {
+              setNotifyArtifact(e.target.checked)
+              save({ notifyArtifact: e.target.checked })
+            }}
+            className="accent-rose"
+          />
+          产物生成
+        </label>
+        <button
+          onClick={async () => {
+            if (!webhook.trim()) return ui.toast('先填写 Webhook 地址', 'error')
+            setTesting(true)
+            save()
+            const r = await window.api.dingtalk.test()
+            setTesting(false)
+            r.ok ? ui.toast('测试消息已发到钉钉群') : ui.toast(`发送失败：${r.error}`, 'error')
+          }}
+          disabled={testing}
+          className="ml-auto rounded-full border border-line px-4 py-1.5 text-[12px] hover:bg-rose-soft disabled:opacity-50"
+        >
+          {testing ? '发送中…' : '发送测试消息'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function SettingsPage({
   account,
   onLogout,
@@ -320,6 +411,8 @@ function SettingsPage({
           />
         </div>
       </div>
+
+      <DingtalkCard />
 
       <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
         <div className="text-sm font-medium">遇到问题？</div>

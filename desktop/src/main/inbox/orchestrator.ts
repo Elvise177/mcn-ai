@@ -8,6 +8,7 @@ import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
+import { notifyDingtalk } from '../lib/dingtalk'
 
 export interface InboxEvent {
   type: 'file-added' | 'run-start' | 'stage' | 'run-end'
@@ -30,6 +31,8 @@ export class InboxOrchestrator {
   private debounce: ReturnType<typeof setTimeout> | null = null
   /** 最近一次运行的阶段记录，UI 恢复用 */
   lastRun: InboxEvent[] = []
+  /** 本轮收到的文件名（钉钉通知用），run-end 后清空 */
+  private runFiles: string[] = []
 
   attachWindow(win: BrowserWindow): void {
     this.win = win
@@ -84,7 +87,10 @@ export class InboxOrchestrator {
       const now = Date.now()
       const last = this.recentFiles.get(name) ?? 0
       this.recentFiles.set(name, now)
-      if (now - last > 5000) this.send({ type: 'file-added', file: name })
+      if (now - last > 5000) {
+        this.send({ type: 'file-added', file: name })
+        this.runFiles.push(name)
+      }
       this.schedule()
     })
     return inboxName
@@ -213,6 +219,15 @@ export class InboxOrchestrator {
     if (ok) await this.cloudSync(runStart)
 
     this.send({ type: 'run-end', ok })
+    {
+      const files = this.runFiles.splice(0)
+      const fileLine = files.length ? `\n\n处理文件：${files.slice(0, 8).join('、')}${files.length > 8 ? ` 等${files.length}个` : ''}` : ''
+      notifyDingtalk(
+        'inbox',
+        'mcn-ai 投递箱',
+        `### 投递箱处理${ok ? '完成 ✅' : '失败 ❌'}${fileLine}\n\n> ${new Date().toLocaleString('zh-CN')} · mcn-ai 自动化`
+      )
+    }
     this.running = false
     if (this.rerun) {
       this.rerun = false

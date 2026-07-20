@@ -6,6 +6,8 @@ const api = {
     setKey: (key: string) => ipcRenderer.invoke('settings:setKey', key),
     setLlmKey: (key: string) => ipcRenderer.invoke('settings:setLlmKey', key),
     setApiBase: (url: string) => ipcRenderer.invoke('settings:setApiBase', url),
+    setDingtalk: (cfg: { webhook: string; secret: string; notifyInbox: boolean; notifyArtifact: boolean }) =>
+      ipcRenderer.invoke('settings:setDingtalk', cfg),
   },
   vault: {
     pickExisting: () => ipcRenderer.invoke('vault:pickExisting'),
@@ -79,7 +81,10 @@ const diag = {
   export: () => ipcRenderer.invoke('diag:export'),
   log: (level: 'info' | 'warn' | 'error', msg: string) => ipcRenderer.invoke('log:renderer', level, msg),
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut }
+const dingtalk = {
+  test: () => ipcRenderer.invoke('dingtalk:test'),
+}
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi

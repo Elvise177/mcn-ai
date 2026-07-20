@@ -5,6 +5,10 @@ interface DesktopSettings {
   llmBaseUrl: string
   hasLlmKey: boolean
   apiBaseUrl: string
+  dingtalkWebhook: string
+  dingtalkSecret: string
+  dingtalkNotifyInbox: boolean
+  dingtalkNotifyArtifact: boolean
 }
 
 interface InboxEvent {
@@ -81,6 +85,15 @@ interface Window {
       setKey: (key: string) => Promise<{ ok: boolean }>
       setLlmKey: (key: string) => Promise<{ ok: boolean }>
       setApiBase: (url: string) => Promise<{ ok: boolean }>
+      setDingtalk: (cfg: {
+        webhook: string
+        secret: string
+        notifyInbox: boolean
+        notifyArtifact: boolean
+      }) => Promise<{ ok: boolean }>
+    }
+    dingtalk: {
+      test: () => Promise<{ ok: boolean; error?: string }>
     }
     vault: {
       pickExisting: () => Promise<VaultOpenResult | null>

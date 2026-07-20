@@ -10,6 +10,7 @@ import { vaultManager } from './vault'
 import { log } from './lib/logger'
 import { exportDiagnostics } from './lib/diagnostics'
 import { createVault } from './vault/wizard'
+import { sendDingtalk } from './lib/dingtalk'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
@@ -20,7 +21,26 @@ export function registerIpc(): void {
     llmBaseUrl: store.get('llmBaseUrl'),
     hasLlmKey: !!getLlmKey(),
     apiBaseUrl: store.get('apiBaseUrl'),
+    dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
+    dingtalkSecret: store.get('dingtalkSecret') ?? '',
+    dingtalkNotifyInbox: store.get('dingtalkNotifyInbox'),
+    dingtalkNotifyArtifact: store.get('dingtalkNotifyArtifact'),
   }))
+
+  ipcMain.handle(
+    'settings:setDingtalk',
+    (_e, cfg: { webhook: string; secret: string; notifyInbox: boolean; notifyArtifact: boolean }) => {
+      store.set('dingtalkWebhook', cfg.webhook.trim())
+      store.set('dingtalkSecret', cfg.secret.trim())
+      store.set('dingtalkNotifyInbox', cfg.notifyInbox)
+      store.set('dingtalkNotifyArtifact', cfg.notifyArtifact)
+      return { ok: true }
+    }
+  )
+
+  ipcMain.handle('dingtalk:test', () =>
+    sendDingtalk('mcn-ai 测试', `### 钉钉接入成功 🎉\n\nmcn-ai 自动化中心已连上这个群。\n\n> ${new Date().toLocaleString('zh-CN')}`)
+  )
 
   ipcMain.handle('settings:setLlmKey', (_e: Electron.IpcMainInvokeEvent, key: string) => {
     setLlmKey(key.trim())
