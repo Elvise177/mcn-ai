@@ -30,19 +30,24 @@ if (!accessToken) {
 }
 console.log('✅ accessToken 获取成功');
 
-const call = async (path) => {
+const call = async (method, path, body) => {
   const sep = path.includes('?') ? '&' : '?';
   const r = await fetch(`${API}${path}${sep}operatorId=${encodeURIComponent(DINGTALK_OPERATOR_ID)}`, {
-    headers: { 'x-acs-dingtalk-access-token': accessToken },
+    method,
+    headers: {
+      'x-acs-dingtalk-access-token': accessToken,
+      'Content-Type': 'application/json',
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
   if (!r.ok) throw new Error(`${r.status}: ${text.slice(0, 300)}`);
   return JSON.parse(text);
 };
 
-// 2. 列工作表
+// 2. 列工作表（GET /v1.0/notable/bases/{baseId}/sheets）
 try {
-  const sheets = await call(`/v2.0/notable/bases/${baseId}/sheets`);
+  const sheets = await call('GET', `/v1.0/notable/bases/${baseId}/sheets`);
   const list = sheets.value ?? sheets.items ?? [];
   console.log(`✅ 工作表 ${list.length} 张:`, list.map((s) => s.name).join(' / '));
 } catch (e) {
@@ -50,9 +55,13 @@ try {
   process.exit(1);
 }
 
-// 3. 读源表样例
+// 3. 读源表样例（POST …/records/list）
 try {
-  const j = await call(`/v2.0/notable/bases/${baseId}/sheets/${encodeURIComponent(sourceSheet)}/records?maxResults=3`);
+  const j = await call(
+    'POST',
+    `/v1.0/notable/bases/${baseId}/sheets/${encodeURIComponent(sourceSheet)}/records/list`,
+    { maxResults: 3 },
+  );
   const rows = j.records ?? j.value ?? [];
   console.log(`✅ 源表「${sourceSheet}」读到 ${rows.length} 行样例:`);
   for (const row of rows) console.log('  ', JSON.stringify(row.fields).slice(0, 200));

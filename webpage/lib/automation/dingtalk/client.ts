@@ -12,14 +12,21 @@
 
 const API = 'https://api.dingtalk.com';
 
-/** 接口路径集中定义（联调时如有出入只改这里） */
+/**
+ * 接口路径集中定义。已按开放平台 API Explorer（多维表 notable_1.0）核对：
+ *   获取所有数据表  GET  /v1.0/notable/bases/{baseId}/sheets
+ *   列出多行记录    POST /v1.0/notable/bases/{baseId}/sheets/{sheet}/records/list
+ *   新增记录        POST /v1.0/notable/bases/{baseId}/sheets/{sheet}/records
+ *   更新多行记录    PUT  /v1.0/notable/bases/{baseId}/sheets/{sheet}/records
+ *   删除多行记录    DELETE /v1.0/notable/bases/{baseId}/sheets/{sheet}/records?recordIds=a,b
+ */
 const EP = {
   token: `${API}/v1.0/oauth2/accessToken`,
-  sheets: (baseId: string) => `${API}/v2.0/notable/bases/${baseId}/sheets`,
+  sheets: (baseId: string) => `${API}/v1.0/notable/bases/${baseId}/sheets`,
   records: (baseId: string, sheet: string) =>
-    `${API}/v2.0/notable/bases/${baseId}/sheets/${encodeURIComponent(sheet)}/records`,
-  recordsDelete: (baseId: string, sheet: string) =>
-    `${API}/v2.0/notable/bases/${baseId}/sheets/${encodeURIComponent(sheet)}/records/delete`,
+    `${API}/v1.0/notable/bases/${baseId}/sheets/${encodeURIComponent(sheet)}/records`,
+  recordsList: (baseId: string, sheet: string) =>
+    `${API}/v1.0/notable/bases/${baseId}/sheets/${encodeURIComponent(sheet)}/records/list`,
 };
 
 export interface NotableRecord {
@@ -58,7 +65,7 @@ function operatorId(): string {
 }
 
 async function call<T>(
-  method: 'GET' | 'POST' | 'PUT',
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   url: string,
   body?: unknown,
 ): Promise<T> {
@@ -99,7 +106,7 @@ export async function listSheets(baseId: string): Promise<NotableSheet[]> {
 
 // ---- 记录：读（自动翻页） ----
 
-/** 拉取工作表全部记录（sheet 可传名称或 id；maxResults 单页上限，自动翻页取全量） */
+/** 拉取工作表全部记录（sheet 可传名称或 id；自动翻页取全量） */
 export async function listRecords(
   baseId: string,
   sheet: string,
@@ -110,13 +117,15 @@ export async function listRecords(
   const out: NotableRecord[] = [];
   let nextToken: string | undefined;
   do {
-    const q = `maxResults=${pageSize}${nextToken ? `&nextToken=${encodeURIComponent(nextToken)}` : ''}`;
     const j = await call<{
       records?: NotableRecord[];
       value?: NotableRecord[];
       nextToken?: string;
       hasMore?: boolean;
-    }>('GET', `${EP.records(baseId, sheet)}?${q}`);
+    }>('POST', EP.recordsList(baseId, sheet), {
+      maxResults: pageSize,
+      ...(nextToken ? { nextToken } : {}),
+    });
     out.push(...(j.records ?? j.value ?? []));
     nextToken = j.hasMore === false ? undefined : j.nextToken;
   } while (nextToken && out.length < maxTotal);
@@ -166,7 +175,10 @@ export async function deleteRecords(
   let n = 0;
   for (let i = 0; i < recordIds.length; i += BATCH) {
     const chunk = recordIds.slice(i, i + BATCH);
-    await call('POST', EP.recordsDelete(baseId, sheet), { recordIds: chunk });
+    await call(
+      'DELETE',
+      `${EP.records(baseId, sheet)}?recordIds=${encodeURIComponent(chunk.join(','))}`,
+    );
     n += chunk.length;
   }
   return n;
