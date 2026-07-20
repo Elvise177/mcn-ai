@@ -14,15 +14,25 @@ import { runDailySync } from '@/lib/automation/dingtalk/sync';
 export const maxDuration = 300;
 
 function authorized(req: NextRequest): boolean {
-  const secret = process.env.AUTOMATION_SECRET;
-  if (!secret) return false;
-  return req.headers.get('authorization') === `Bearer ${secret}`;
+  // AUTOMATION_SECRET 供手动 curl；CRON_SECRET 是 Vercel Cron 的约定（配置后 Cron 请求自动带 Bearer）
+  const auth = req.headers.get('authorization');
+  const secrets = [process.env.AUTOMATION_SECRET, process.env.CRON_SECRET].filter(Boolean);
+  return secrets.some((s) => auth === `Bearer ${s}`);
 }
 
 export async function GET(req: NextRequest) {
   if (!authorized(req)) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   const baseId = req.nextUrl.searchParams.get('baseId') ?? process.env.DINGTALK_BASE_ID;
   if (!baseId) return NextResponse.json({ error: '缺少 baseId' }, { status: 400 });
+  // Vercel Cron 只发 GET：带 run=1 时执行同步（与 POST 等价）
+  if (req.nextUrl.searchParams.get('run') === '1') {
+    try {
+      const result = await runDailySync(baseId);
+      return NextResponse.json({ ok: true, result });
+    } catch (e) {
+      return NextResponse.json({ ok: false, error: String(e) }, { status: 500 });
+    }
+  }
   try {
     const sheets = await listSheets(baseId);
     const sourceSheet = process.env.DINGTALK_SOURCE_SHEET ?? '抖音数据';
