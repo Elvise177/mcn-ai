@@ -20,6 +20,10 @@ interface StoreSchema {
   dingtalkSecret?: string
   dingtalkNotifyInbox: boolean
   dingtalkNotifyArtifact: boolean
+  /** 经营数据自动入库（钉钉→vault），暂默认关闭 */
+  bizSyncEnabled: boolean
+  /** AI 产物生成后自动送入投递箱转为知识 */
+  artifactAutoIngest: boolean
 }
 
 export const store = new Store<StoreSchema>({
@@ -30,6 +34,8 @@ export const store = new Store<StoreSchema>({
     apiBaseUrl: 'https://www.makeupai.top',
     dingtalkNotifyInbox: true,
     dingtalkNotifyArtifact: true,
+    bizSyncEnabled: false,
+    artifactAutoIngest: false,
   },
 })
 

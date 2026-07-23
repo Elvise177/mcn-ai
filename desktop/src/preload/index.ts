@@ -8,6 +8,7 @@ const api = {
     setApiBase: (url: string) => ipcRenderer.invoke('settings:setApiBase', url),
     setDingtalk: (cfg: { webhook: string; secret: string; notifyInbox: boolean; notifyArtifact: boolean }) =>
       ipcRenderer.invoke('settings:setDingtalk', cfg),
+    setArtifactAutoIngest: (v: boolean) => ipcRenderer.invoke('settings:setArtifactAutoIngest', v),
   },
   vault: {
     pickExisting: () => ipcRenderer.invoke('vault:pickExisting'),

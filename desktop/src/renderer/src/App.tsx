@@ -244,6 +244,34 @@ export default function App() {
   )
 }
 
+/** 知识入库设置：AI 产物是否自动送入投递箱转为可检索知识 */
+function IngestCard() {
+  const [auto, setAuto] = useState(false)
+  useEffect(() => {
+    window.api.settings.get().then((s) => setAuto(s.artifactAutoIngest))
+  }, [])
+  return (
+    <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
+      <div className="text-sm font-medium">知识入库</div>
+      <label className="flex cursor-pointer items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={auto}
+          onChange={(e) => {
+            setAuto(e.target.checked)
+            void window.api.settings.setArtifactAutoIngest(e.target.checked)
+          }}
+          className="accent-rose"
+        />
+        AI 生成的产物自动入库（送入投递箱转为可检索知识）
+      </label>
+      <div className="text-[12px] leading-5 text-muted">
+        关闭时产物仅保存在 90_产物/，可在产物面板对单个文件点「入库」；开启后每个新产物自动转为知识库笔记并参与 AI 检索。
+      </div>
+    </div>
+  )
+}
+
 function SettingsPage({
   account,
   onLogout,
@@ -309,6 +337,8 @@ function SettingsPage({
           />
         </div>
       </div>
+
+      <IngestCard />
 
       <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
         <div className="text-sm font-medium">遇到问题？</div>

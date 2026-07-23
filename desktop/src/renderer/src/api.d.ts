@@ -9,6 +9,7 @@ interface DesktopSettings {
   dingtalkSecret: string
   dingtalkNotifyInbox: boolean
   dingtalkNotifyArtifact: boolean
+  artifactAutoIngest: boolean
 }
 
 interface InboxEvent {
@@ -91,6 +92,7 @@ interface Window {
         notifyInbox: boolean
         notifyArtifact: boolean
       }) => Promise<{ ok: boolean }>
+      setArtifactAutoIngest: (v: boolean) => Promise<{ ok: boolean }>
     }
     dingtalk: {
       test: () => Promise<{ ok: boolean; error?: string }>

@@ -293,6 +293,17 @@ function ArtifactPanel() {
               <button onClick={() => window.api.artifacts.open(a.path)} className="rounded-full border border-line px-2.5 py-0.5 hover:bg-rose-soft">
                 打开
               </button>
+              <button
+                onClick={async () => {
+                  const s = await window.api.settings.get()
+                  if (!s.vaultPath) return ui.toast('请先打开知识库', 'error')
+                  await window.api.inbox.enqueue([s.vaultPath + '/90_产物/' + a.path])
+                  ui.toast('已送入投递箱，处理完成后可被 AI 检索')
+                }}
+                className="rounded-full border border-line px-2.5 py-0.5 hover:bg-rose-soft"
+              >
+                入库
+              </button>
               {a.name.endsWith('.md') && (
                 <button
                   onClick={async () => setPreview({ path: a.path, text: await window.api.artifacts.readText(a.path) })}

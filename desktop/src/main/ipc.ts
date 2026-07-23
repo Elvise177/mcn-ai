@@ -26,7 +26,13 @@ export function registerIpc(): void {
     dingtalkSecret: store.get('dingtalkSecret') ?? '',
     dingtalkNotifyInbox: store.get('dingtalkNotifyInbox'),
     dingtalkNotifyArtifact: store.get('dingtalkNotifyArtifact'),
+    artifactAutoIngest: store.get('artifactAutoIngest'),
   }))
+
+  ipcMain.handle('settings:setArtifactAutoIngest', (_e, v: boolean) => {
+    store.set('artifactAutoIngest', !!v)
+    return { ok: true }
+  })
 
   ipcMain.handle(
     'settings:setDingtalk',
@@ -140,6 +146,6 @@ async function openVault(path: string): Promise<{ path: string; noteCount: numbe
   store.set('vaultPath', path)
   await inboxOrchestrator.configure(path)
   await artifactsWatcher.configure(path)
-  startBizSync(path)
+  if (store.get('bizSyncEnabled')) startBizSync(path)
   return { path, noteCount }
 }
