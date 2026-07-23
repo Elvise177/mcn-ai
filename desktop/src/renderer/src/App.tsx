@@ -272,6 +272,86 @@ function IngestCard() {
   )
 }
 
+/** 投递箱分流：客户可自助配置「投递箱子文件夹 → 落位目录」规则，无需碰配置文件 */
+function RoutesCard() {
+  const [routes, setRoutesState] = useState<Array<{ name: string; dest: string; builtin?: boolean }>>([])
+  const [newName, setNewName] = useState('')
+  const [newDest, setNewDest] = useState('')
+
+  const load = (): void => {
+    void window.api.routes.get().then(setRoutesState)
+  }
+  useEffect(load, [])
+
+  const save = async (next: Array<{ name: string; dest: string; builtin?: boolean }>): Promise<void> => {
+    const r = await window.api.routes.set(next.filter((x) => !x.builtin))
+    if (r.ok) {
+      setRoutesState(next)
+      ui.toast('分流规则已保存，投递文件夹已就绪')
+    } else {
+      ui.toast(r.error ?? '保存失败', 'error')
+    }
+  }
+
+  return (
+    <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
+      <div className="text-sm font-medium">投递箱分流</div>
+      <div className="text-[12px] leading-5 text-muted">
+        往「投递箱 / 某文件夹」丢文件，会自动转成笔记放进对应目录（不做业务打标）。适合参考书、竞品资料等外部内容。
+      </div>
+      <div className="space-y-1.5">
+        {routes.map((r) => (
+          <div key={r.name} className="flex items-center gap-2 rounded-lg bg-bg px-3 py-2 text-[13px]">
+            <span className="font-medium">投递箱/{r.name}</span>
+            <span className="text-muted">→</span>
+            <span className="flex-1 truncate">{r.dest}/</span>
+            {r.builtin ? (
+              <span className="text-[11px] text-muted">内置</span>
+            ) : (
+              <button
+                onClick={() => void save(routes.filter((x) => x.name !== r.name))}
+                className="rounded px-1 text-[12px] text-muted hover:text-rose"
+                title="删除规则"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          placeholder="文件夹名，如：竞品"
+          className="w-36 rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] outline-none focus:border-rose"
+        />
+        <span className="text-muted">→</span>
+        <input
+          value={newDest}
+          onChange={(e) => setNewDest(e.target.value)}
+          placeholder="落位目录，如：70_外部资料/竞品"
+          className="flex-1 rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] outline-none focus:border-rose"
+        />
+        <button
+          onClick={() => {
+            const name = newName.trim()
+            const dest = newDest.trim() || '70_外部资料/' + name
+            if (!name) return ui.toast('请填写文件夹名', 'error')
+            if (routes.some((x) => x.name === name)) return ui.toast('该文件夹已有规则', 'error')
+            void save([...routes, { name, dest }])
+            setNewName('')
+            setNewDest('')
+          }}
+          className="rounded-full bg-rose px-4 py-1.5 text-[13px] text-white hover:opacity-90"
+        >
+          添加
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function SettingsPage({
   account,
   onLogout,
@@ -339,6 +419,8 @@ function SettingsPage({
       </div>
 
       <IngestCard />
+
+      <RoutesCard />
 
       <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
         <div className="text-sm font-medium">遇到问题？</div>

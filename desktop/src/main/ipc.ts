@@ -12,6 +12,7 @@ import { exportDiagnostics } from './lib/diagnostics'
 import { createVault } from './vault/wizard'
 import { sendDingtalk } from './lib/dingtalk'
 import { startBizSync } from './knowledge/bizdata'
+import { getRoutes, setRoutes, ensureRouteFolders } from './lib/routes'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
@@ -125,6 +126,18 @@ export function registerIpc(): void {
   ipcMain.handle('log:renderer', (_e, level: 'info' | 'warn' | 'error', msg: string) => log(level, 'renderer', msg))
 
   // ---- inbox ----
+  // ---- 投递箱分流配置（设置界面用） ----
+  ipcMain.handle('routes:get', async () => {
+    const v = process.env.MCNAI_VAULT || store.get('vaultPath')
+    return v ? getRoutes(v) : []
+  })
+  ipcMain.handle('routes:set', async (_e, routes: Array<{ name: string; dest: string }>) => {
+    const v = process.env.MCNAI_VAULT || store.get('vaultPath')
+    if (!v) return { ok: false, error: '请先打开知识库' }
+    await setRoutes(v, routes)
+    return { ok: true }
+  })
+
   ipcMain.handle('inbox:enqueue', (_e, paths: string[]) => inboxOrchestrator.enqueue(paths))
   ipcMain.handle('inbox:runNow', () => void inboxOrchestrator.run())
   ipcMain.handle('inbox:lastRun', () => inboxOrchestrator.lastRun)
@@ -146,6 +159,7 @@ async function openVault(path: string): Promise<{ path: string; noteCount: numbe
   store.set('vaultPath', path)
   await inboxOrchestrator.configure(path)
   await artifactsWatcher.configure(path)
+  await ensureRouteFolders(path)
   if (store.get('bizSyncEnabled')) startBizSync(path)
   return { path, noteCount }
 }

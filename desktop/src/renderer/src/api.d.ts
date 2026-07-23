@@ -97,6 +97,10 @@ interface Window {
     dingtalk: {
       test: () => Promise<{ ok: boolean; error?: string }>
     }
+    routes: {
+      get: () => Promise<Array<{ name: string; dest: string; builtin?: boolean }>>
+      set: (rs: Array<{ name: string; dest: string }>) => Promise<{ ok: boolean; error?: string }>
+    }
     vault: {
       pickExisting: () => Promise<VaultOpenResult | null>
       createNew: () => Promise<VaultOpenResult | null>

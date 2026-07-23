@@ -82,10 +82,14 @@ const diag = {
   export: () => ipcRenderer.invoke('diag:export'),
   log: (level: 'info' | 'warn' | 'error', msg: string) => ipcRenderer.invoke('log:renderer', level, msg),
 }
+const routes = {
+  get: () => ipcRenderer.invoke('routes:get'),
+  set: (rs: Array<{ name: string; dest: string }>) => ipcRenderer.invoke('routes:set', rs),
+}
 const dingtalk = {
   test: () => ipcRenderer.invoke('dingtalk:test'),
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk }
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi
