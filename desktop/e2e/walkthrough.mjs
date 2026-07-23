@@ -160,33 +160,6 @@ try {
   await win.click('text=设置')
   await snap('10-设置页', 600)
 
-  // 自动化 · 钉钉通知：本地 mock 扮演钉钉，验证 UI→IPC→加签→HTTP 全链路
-  {
-    const { createServer } = await import('http')
-    let got = null
-    const srv = createServer((req, res) => {
-      let b = ''
-      req.on('data', (d) => (b += d))
-      req.on('end', () => {
-        got = { url: req.url, body: b }
-        res.setHeader('content-type', 'application/json')
-        res.end('{"errcode":0}')
-      })
-    })
-    await new Promise((r) => srv.listen(0, '127.0.0.1', r))
-    const port = srv.address().port
-    await win.fill('input[placeholder*="oapi.dingtalk"]', `http://127.0.0.1:${port}/robot/send?access_token=e2e`)
-    await win.fill('input[placeholder*="加签密钥"]', 'SECe2e-test')
-    await win.click('text=发送测试消息')
-    await win.waitForTimeout(2000)
-    srv.close()
-    if (!got) throw new Error('钉钉 mock 未收到请求')
-    if (!got.url.includes('sign=') || !got.url.includes('timestamp=')) throw new Error('钉钉加签参数缺失: ' + got.url)
-    if (!got.body.includes('markdown')) throw new Error('钉钉消息体格式不对: ' + got.body.slice(0, 120))
-    const toastOk = await win.locator('text=测试消息已发到钉钉群').count()
-    if (!toastOk) throw new Error('钉钉测试成功 toast 未出现')
-    await snap('11-钉钉接入-测试成功', 300)
-  }
 } finally {
   await app.close()
 }

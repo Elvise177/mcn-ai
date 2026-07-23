@@ -244,97 +244,6 @@ export default function App() {
   )
 }
 
-/** 自动化中心 · 钉钉群通知：投递箱完成/产物生成推送到钉钉群 */
-function DingtalkCard() {
-  const [webhook, setWebhook] = useState('')
-  const [secret, setSecret] = useState('')
-  const [notifyInbox, setNotifyInbox] = useState(true)
-  const [notifyArtifact, setNotifyArtifact] = useState(true)
-  const [testing, setTesting] = useState(false)
-
-  useEffect(() => {
-    window.api.settings.get().then((s) => {
-      setWebhook(s.dingtalkWebhook)
-      setSecret(s.dingtalkSecret)
-      setNotifyInbox(s.dingtalkNotifyInbox)
-      setNotifyArtifact(s.dingtalkNotifyArtifact)
-    })
-  }, [])
-
-  const save = (patch?: Partial<{ notifyInbox: boolean; notifyArtifact: boolean }>): void => {
-    void window.api.settings.setDingtalk({
-      webhook,
-      secret,
-      notifyInbox: patch?.notifyInbox ?? notifyInbox,
-      notifyArtifact: patch?.notifyArtifact ?? notifyArtifact,
-    })
-  }
-
-  return (
-    <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
-      <div className="text-sm font-medium">自动化 · 钉钉通知</div>
-      <div className="text-[12px] leading-5 text-muted">
-        投递箱处理完成、AI 产物生成时自动推送到钉钉群。钉钉群 → 群设置 → 智能群助手 → 添加「自定义」机器人（安全设置选<b>加签</b>），把 Webhook 和加签密钥粘到这里。
-      </div>
-      <input
-        value={webhook}
-        onChange={(e) => setWebhook(e.target.value)}
-        onBlur={() => save()}
-        placeholder="https://oapi.dingtalk.com/robot/send?access_token=…"
-        className="w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-rose"
-      />
-      <input
-        type="password"
-        value={secret}
-        onChange={(e) => setSecret(e.target.value)}
-        onBlur={() => save()}
-        placeholder="加签密钥 SEC…（安全设置选了加签才需要）"
-        className="w-full rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-rose"
-      />
-      <div className="flex items-center gap-5 text-[13px]">
-        <label className="flex cursor-pointer items-center gap-1.5">
-          <input
-            type="checkbox"
-            checked={notifyInbox}
-            onChange={(e) => {
-              setNotifyInbox(e.target.checked)
-              save({ notifyInbox: e.target.checked })
-            }}
-            className="accent-rose"
-          />
-          投递箱完成
-        </label>
-        <label className="flex cursor-pointer items-center gap-1.5">
-          <input
-            type="checkbox"
-            checked={notifyArtifact}
-            onChange={(e) => {
-              setNotifyArtifact(e.target.checked)
-              save({ notifyArtifact: e.target.checked })
-            }}
-            className="accent-rose"
-          />
-          产物生成
-        </label>
-        <button
-          onClick={async () => {
-            if (!webhook.trim()) return ui.toast('先填写 Webhook 地址', 'error')
-            setTesting(true)
-            save()
-            const r = await window.api.dingtalk.test()
-            setTesting(false)
-            r.ok ? ui.toast('测试消息已发到钉钉群') : ui.toast(`发送失败：${r.error}`, 'error')
-          }}
-          disabled={testing}
-          className="ml-auto rounded-full border border-line px-4 py-1.5 text-[12px] hover:bg-rose-soft disabled:opacity-50"
-        >
-          {testing ? '发送中…' : '发送测试消息'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
 function SettingsPage({
   account,
   onLogout,
@@ -343,30 +252,19 @@ function SettingsPage({
   onLogout: () => void
 }) {
   const [hasKey, setHasKey] = useState(false)
-  const [baseUrl, setBaseUrl] = useState('')
-  const [draft, setDraft] = useState('')
-  const [saved, setSaved] = useState(false)
-  const [hasLlmKey, setHasLlmKey] = useState(false)
-  const [llmBaseUrl, setLlmBaseUrl] = useState('')
-  const [llmDraft, setLlmDraft] = useState('')
-  const [llmSaved, setLlmSaved] = useState(false)
   const [apiBase, setApiBase] = useState('')
-  const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => {
     window.api.settings.get().then((s) => {
       setHasKey(s.hasApiKey)
-      setBaseUrl(s.relayBaseUrl)
-      setHasLlmKey(s.hasLlmKey)
-      setLlmBaseUrl(s.llmBaseUrl)
       setApiBase(s.apiBaseUrl)
     })
   }, [])
 
   return (
-    <div className="overflow-auto p-10">
+    <div className="h-full overflow-auto p-10">
       <h2 className="mb-1 text-xl font-semibold">设置</h2>
-      <p className="mb-6 text-sm text-muted">密钥均用 macOS Keychain 加密存储</p>
+      <p className="mb-6 text-sm text-muted">AI 服务随账号自动配置，密钥用 macOS Keychain 加密存储</p>
 
       <div className="mb-6 max-w-xl space-y-4 rounded-2xl border border-line bg-card p-6">
         <div className="text-sm font-medium">账号（云端同步：私人知识层 + 聊天记录）</div>
@@ -412,8 +310,6 @@ function SettingsPage({
         </div>
       </div>
 
-      <DingtalkCard />
-
       <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
         <div className="text-sm font-medium">遇到问题？</div>
         <div className="text-[12px] text-muted">导出诊断报告（环境信息 + 最近日志，已自动去除密钥），发给管理员即可远程排查。</div>
@@ -428,77 +324,6 @@ function SettingsPage({
         </button>
       </div>
 
-      <button
-        onClick={() => setShowAdvanced((v) => !v)}
-        className="mb-4 text-[13px] text-muted hover:text-rose"
-      >
-        {showAdvanced ? '▾' : '▸'} 高级设置（自备 API key 的用户可在此覆盖，默认无需配置）
-      </button>
-
-      {showAdvanced && (
-      <>
-      <div className="max-w-xl space-y-4 rounded-2xl border border-line bg-card p-6">
-        <div className="text-sm font-medium">对话模型（Claude 中转站）</div>
-        <div className="text-sm">
-          地址：<span className="font-mono text-[13px]">{baseUrl}</span>　状态：
-          {hasKey ? <span className="text-rose">已配置 ✓</span> : <span className="text-muted">未配置</span>}
-        </div>
-        <div className="flex gap-2">
-          <input
-            type="password"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            placeholder="粘贴 API Key…"
-            className="flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-sm outline-none focus:border-rose"
-          />
-          <button
-            onClick={async () => {
-              if (!draft.trim()) return
-              await window.api.settings.setKey(draft)
-              setDraft('')
-              setHasKey(true)
-              setSaved(true)
-              setTimeout(() => setSaved(false), 2000)
-            }}
-            className="rounded-lg bg-rose px-4 py-2 text-sm text-white hover:opacity-90"
-          >
-            {saved ? '已保存 ✓' : '保存'}
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-6 max-w-xl space-y-4 rounded-2xl border border-line bg-card p-6">
-        <div className="text-sm font-medium">投递箱打标模型（DeepSeek）</div>
-        <div className="text-[12px] text-muted">批量打标约 ¥0.003/文件。不配置则投递箱只做转换与建链，不打标。</div>
-        <div className="text-sm">
-          端点：<span className="font-mono text-[13px]">{llmBaseUrl}</span>　状态：
-          {hasLlmKey ? <span className="text-rose">已配置 ✓</span> : <span className="text-muted">未配置</span>}
-        </div>
-        <div className="flex gap-2">
-          <input
-            type="password"
-            value={llmDraft}
-            onChange={(e) => setLlmDraft(e.target.value)}
-            placeholder="粘贴 DeepSeek API Key…"
-            className="flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-sm outline-none focus:border-rose"
-          />
-          <button
-            onClick={async () => {
-              if (!llmDraft.trim()) return
-              await window.api.settings.setLlmKey(llmDraft)
-              setLlmDraft('')
-              setHasLlmKey(true)
-              setLlmSaved(true)
-              setTimeout(() => setLlmSaved(false), 2000)
-            }}
-            className="rounded-lg bg-rose px-4 py-2 text-sm text-white hover:opacity-90"
-          >
-            {llmSaved ? '已保存 ✓' : '保存'}
-          </button>
-        </div>
-      </div>
-      </>
-      )}
     </div>
   )
 }

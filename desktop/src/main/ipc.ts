@@ -11,6 +11,7 @@ import { log } from './lib/logger'
 import { exportDiagnostics } from './lib/diagnostics'
 import { createVault } from './vault/wizard'
 import { sendDingtalk } from './lib/dingtalk'
+import { startBizSync } from './knowledge/bizdata'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
@@ -139,5 +140,6 @@ async function openVault(path: string): Promise<{ path: string; noteCount: numbe
   store.set('vaultPath', path)
   await inboxOrchestrator.configure(path)
   await artifactsWatcher.configure(path)
+  startBizSync(path)
   return { path, noteCount }
 }
