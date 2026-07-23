@@ -242,6 +242,27 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     return () => clearTimeout(t)
   }, [query])
 
+  const [routes, setRoutes] = useState<Array<{ name: string; dest: string }>>([])
+  useEffect(() => {
+    void window.api.routes.get().then(setRoutes)
+  }, [])
+
+  const dropPaths = (e: React.DragEvent): string[] =>
+    [...e.dataTransfer.files]
+      .map((f) => (f as File & { path?: string }).path)
+      .filter((p): p is string => !!p)
+
+  const doEnqueue = async (e: React.DragEvent, subdir?: string): Promise<void> => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+    const paths = dropPaths(e)
+    if (paths.length) {
+      setShowInbox(true)
+      await window.api.inbox.enqueue(paths, subdir)
+    }
+  }
+
   return (
     <div
       className="relative flex h-full"
@@ -249,22 +270,32 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         e.preventDefault()
         setDragOver(true)
       }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={async (e) => {
-        e.preventDefault()
-        setDragOver(false)
-        const paths = [...e.dataTransfer.files]
-          .map((f) => (f as File & { path?: string }).path)
-          .filter((p): p is string => !!p)
-        if (paths.length) {
-          setShowInbox(true)
-          await window.api.inbox.enqueue(paths)
-        }
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragOver(false)
       }}
+      onDrop={(e) => void doEnqueue(e)}
     >
       {dragOver && (
-        <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center border-4 border-dashed border-rose bg-rose-soft/60 text-lg font-medium text-rose">
-          松手投递到知识库
+        <div className="absolute inset-0 z-30 flex gap-3 bg-black/20 p-6">
+          <div
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => void doEnqueue(e)}
+            className="flex flex-1 flex-col items-center justify-center rounded-2xl border-4 border-dashed border-rose bg-rose-soft/90 text-rose"
+          >
+            <div className="text-xl font-semibold">业务资料</div>
+            <div className="mt-2 text-[13px] opacity-80">公司文件 · 智能打标 → 80_Library</div>
+          </div>
+          {routes.map((r) => (
+            <div
+              key={r.name}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => void doEnqueue(e, r.name)}
+              className="flex flex-1 flex-col items-center justify-center rounded-2xl border-4 border-dashed border-line bg-card/95 text-ink"
+            >
+              <div className="text-xl font-semibold">{r.name}</div>
+              <div className="mt-2 text-[13px] text-muted">主题打标 · 概念建链 → {r.dest}/</div>
+            </div>
+          ))}
         </div>
       )}
       {(showInbox || inboxRunning) && (

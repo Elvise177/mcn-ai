@@ -119,7 +119,7 @@ interface Window {
       onChanged: (cb: (payload: { path: string }) => void) => () => void
     }
     inbox: {
-      enqueue: (paths: string[]) => Promise<number>
+      enqueue: (paths: string[], subdir?: string) => Promise<number>
       runNow: () => Promise<void>
       lastRun: () => Promise<InboxEvent[]>
       onEvent: (cb: (ev: InboxEvent) => void) => () => void

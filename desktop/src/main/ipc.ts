@@ -138,7 +138,7 @@ export function registerIpc(): void {
     return { ok: true }
   })
 
-  ipcMain.handle('inbox:enqueue', (_e, paths: string[]) => inboxOrchestrator.enqueue(paths))
+  ipcMain.handle('inbox:enqueue', (_e, paths: string[], subdir?: string) => inboxOrchestrator.enqueue(paths, subdir))
   ipcMain.handle('inbox:runNow', () => void inboxOrchestrator.run())
   ipcMain.handle('inbox:lastRun', () => inboxOrchestrator.lastRun)
 }

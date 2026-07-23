@@ -105,8 +105,10 @@ export class InboxOrchestrator {
   }
 
   /** 拖拽/批量导入入口：拷贝进投递箱，watcher 自然接管 */
-  async enqueue(paths: string[]): Promise<number> {
+  async enqueue(paths: string[], subdir?: string): Promise<number> {
     if (!this.inboxDir) throw new Error('投递箱未就绪，请先打开知识库')
+    const destDir = subdir ? join(this.inboxDir, subdir.replace(/[\\:*?"<>|.]/g, '')) : this.inboxDir
+    await fs.mkdir(destDir, { recursive: true })
     let n = 0
     for (const p of paths) {
       try {
@@ -115,12 +117,12 @@ export class InboxOrchestrator {
           for (const f of await fs.readdir(p)) {
             const src = join(p, f)
             if ((await fs.stat(src)).isFile() && !f.startsWith('.')) {
-              await fs.copyFile(src, join(this.inboxDir, f))
+              await fs.copyFile(src, join(destDir, f))
               n++
             }
           }
         } else if (!basename(p).startsWith('.')) {
-          await fs.copyFile(p, join(this.inboxDir, basename(p)))
+          await fs.copyFile(p, join(destDir, basename(p)))
           n++
         }
       } catch (e) {

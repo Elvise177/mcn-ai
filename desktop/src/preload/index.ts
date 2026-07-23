@@ -34,7 +34,7 @@ const api = {
 }
 
 const inbox = {
-  enqueue: (paths: string[]) => ipcRenderer.invoke('inbox:enqueue', paths),
+  enqueue: (paths: string[], subdir?: string) => ipcRenderer.invoke('inbox:enqueue', paths, subdir),
   runNow: () => ipcRenderer.invoke('inbox:runNow'),
   lastRun: () => ipcRenderer.invoke('inbox:lastRun'),
   onEvent: (cb: (ev: unknown) => void) => {
