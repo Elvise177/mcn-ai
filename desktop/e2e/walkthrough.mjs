@@ -141,9 +141,15 @@ try {
         const sample = join(root, 'e2e', 'sample.docx')
         if (existsSync(sample)) {
           copyFileSync(sample, join(dir, `e2e测试文档_${Date.now()}.docx`))
+          // 外部资料分流通道：参考资料子文件夹 → 70_外部资料（轻管线）
+          mkdirSync(join(dir, '参考资料'), { recursive: true })
+          copyFileSync(sample, join(dir, '参考资料', 'e2e参考书籍.docx'))
           await snap('07-投递箱-收到文件', 4000)
           await snap('08-投递箱-处理中', 8000)
           await snap('09-投递箱-完成后', 25000)
+          const extMd = join(settings.vaultPath, '70_外部资料', 'e2e参考书籍.md')
+          if (!existsSync(extMd)) throw new Error('外部资料分流失败：' + extMd + ' 未生成')
+          console.log('外部资料分流 ✓ →', extMd)
         }
         break
       }
