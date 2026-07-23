@@ -138,12 +138,32 @@ try {
     for (const c of inboxCandidates) {
       const dir = join(settings.vaultPath, c)
       if (existsSync(dir)) {
+        // 分区投递覆盖层：合成 dragover 事件触发，断言业务区+分流区渲染
+        await win.evaluate(() => {
+          const el = document.querySelector('.relative.flex.h-full')
+          el?.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true }))
+        })
+        await win.waitForTimeout(400)
+        const zoneBiz = await win.locator('text=业务资料').count()
+        const zoneRef = await win.locator('text=主题打标 · 概念建链').count()
+        if (!zoneBiz || !zoneRef) throw new Error(`分区投递覆盖层缺失：业务区=${zoneBiz} 分流区=${zoneRef}`)
+        await snap('06b-分区投递覆盖层', 200)
+        await win.evaluate(() => {
+          const el = document.querySelector('.relative.flex.h-full')
+          el?.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true }))
+        })
+
         const sample = join(root, 'e2e', 'sample.docx')
         if (existsSync(sample)) {
           copyFileSync(sample, join(dir, `e2e测试文档_${Date.now()}.docx`))
-          // 外部资料分流通道：参考资料子文件夹 → 70_外部资料（轻管线）
-          mkdirSync(join(dir, '参考资料'), { recursive: true })
-          copyFileSync(sample, join(dir, '参考资料', 'e2e参考书籍.docx'))
+          // 外部资料分流：走 enqueue 子目录 API（即分区投递松手后的真实链路）
+          await win.evaluate((p) => window.api.inbox.enqueue([p], '参考资料'), sample)
+          const { renameSync } = await import('fs')
+          // enqueue 以原名拷贝：把落进 参考资料/ 的 sample.docx 改名成断言目标
+          await win.waitForTimeout(500)
+          if (existsSync(join(dir, '参考资料', 'sample.docx'))) {
+            renameSync(join(dir, '参考资料', 'sample.docx'), join(dir, '参考资料', 'e2e参考书籍.docx'))
+          }
           await snap('07-投递箱-收到文件', 4000)
           await snap('08-投递箱-处理中', 8000)
           await snap('09-投递箱-完成后', 25000)
