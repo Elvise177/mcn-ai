@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare } from 'lucide-react'
+import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox } from 'lucide-react'
 import { FastMarkdown } from '../components/Markdown'
 import { FileIcon } from '../components/FileIcon'
 import { ui } from '../components/ui'
 import { CHIPS } from '../config/chips'
 import { greetingLine } from '../lib/profile'
+import { errText } from '../lib/err'
 
 const TOOL_ZH: Record<string, string> = {
   search_knowledge: '检索知识库',
@@ -96,8 +97,48 @@ export default function Workbench({
 
   const empty = messages.length === 0 && !streaming
 
+  // 拖文件进工作台页：以前没人拦，Electron 直接导航到 file:// 把整个应用替换掉。
+  // 现在走和知识库页同一条链路（inbox.enqueue），拖入时给覆盖层告诉用户会发生什么
+  const [dragOver, setDragOver] = useState(false)
+  const onDrop = async (e: React.DragEvent): Promise<void> => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+    const paths = [...e.dataTransfer.files]
+      .map((f) => (f as File & { path?: string }).path)
+      .filter((p): p is string => !!p)
+    if (!paths.length) return
+    try {
+      await window.api.inbox.enqueue(paths)
+      ui.toast(`已送入投递箱（${paths.length} 个文件），可在「个人知识库」看处理进度`)
+    } catch (err) {
+      ui.toast(`入库失败：${errText(err)}`, 'error')
+    }
+  }
+
   return (
-    <div className="relative flex h-full">
+    <div
+      className="relative flex h-full"
+      onDragOver={(e) => {
+        e.preventDefault()
+        setDragOver(true)
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setDragOver(false)
+      }}
+      onDrop={(e) => void onDrop(e)}
+    >
+      {dragOver && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-overlay p-6">
+          <div className="flex w-full max-w-md flex-col items-center rounded-xl border-2 border-dashed border-accent bg-card px-8 py-10 text-center">
+            <Inbox size={28} className="mb-3 text-accent" />
+            <div className="text-xl font-semibold">松手即入库</div>
+            <div className="mt-2 text-base text-muted">
+              文件会送进投递箱，自动转成笔记并打标建链，之后就能被 AI 检索到
+            </div>
+          </div>
+        </div>
+      )}
       <div className="flex min-w-0 flex-1 flex-col">
         {empty ? (
           // 问候区落在视口上方 1/3（--home-top），下面依次是输入框、快捷指令、最近卡片区

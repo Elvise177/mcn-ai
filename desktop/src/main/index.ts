@@ -33,6 +33,14 @@ function createWindow(): void {
   agentManager.attachWindow(win)
   artifactsWatcher.attachWindow(win)
 
+  // 兜底：拖文件进窗口时 Electron 默认导航到 file://，整个应用被那个文件替换、只能退出重开。
+  // 渲染层已在 main.tsx 全局 preventDefault，这里再拦一层（同 URL 放行，别挡住 reload）
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url === win.webContents.getURL()) return
+    e.preventDefault()
+    log('warn', 'nav-blocked', url)
+  })
+
   win.webContents.on('render-process-gone', (_e, details) => {
     log('error', 'renderer-gone', details.reason)
     dialog.showErrorBox('mcn-ai 界面异常', `界面进程异常退出（${details.reason}），即将自动恢复。\n如反复出现，请在设置页导出诊断报告。`)

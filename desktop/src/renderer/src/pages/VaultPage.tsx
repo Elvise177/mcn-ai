@@ -10,6 +10,7 @@ import { X, Inbox, MoveUpLeft, MoreHorizontal } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
 import { GRAPH_GROUP_TOKENS, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
+import { errText } from '../lib/err'
 
 const colorOf = (group: string): string => {
   let h = 0
@@ -88,6 +89,9 @@ function Divider({
 export default function VaultPage() {
   const [vault, setVault] = useState<VaultOpenResult | null>(null)
   const [loading, setLoading] = useState(true)
+  // 换库：以前直接 setVault(null)，在 Finder 选择框点取消就永久停在向导页、回不到原来的库。
+  // 现在原库留在 state 里（主进程的 currentRoot 本来也没变），向导给一个「返回当前库」的出口
+  const [switching, setSwitching] = useState(false)
 
   useEffect(() => {
     window.api.vault.openStored().then((v) => {
@@ -98,13 +102,20 @@ export default function VaultPage() {
 
   if (loading)
     return <div className="flex h-full items-center justify-center text-md text-muted">正在索引你的库…</div>
-  if (!vault)
+  if (!vault || switching)
     return (
       <div className="flex h-full flex-col items-center justify-center">
-        <VaultWizard onReady={setVault} />
+        <VaultWizard
+          onReady={(v) => {
+            setVault(v)
+            setSwitching(false)
+          }}
+          onSkip={switching ? () => setSwitching(false) : undefined}
+          skipLabel="返回当前库"
+        />
       </div>
     )
-  return <Explorer vault={vault} onSwitch={() => setVault(null)} />
+  return <Explorer vault={vault} onSwitch={() => setSwitching(true)} />
 }
 
 const STAGE_ZH: Record<string, string> = {
@@ -362,7 +373,26 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     return off
   }, [refreshTree])
 
-  const openNote = useCallback((path: string, reveal = false) => {
+  // 编辑态的「有未保存改动」提到这一层：NoteView 是 key={current} 挂载的，
+  // 换一篇笔记它整个销毁，局部 dirty 跟着没了 —— 改动就这么静默丢掉
+  const dirtyRef = useRef(false)
+  const onDirty = useCallback((d: boolean) => {
+    dirtyRef.current = d
+  }, [])
+  /** 任何会让当前编辑态消失的动作（换笔记/关笔记/换库）之前都先过这一关 */
+  const confirmDiscard = useCallback(async (): Promise<boolean> => {
+    if (!dirtyRef.current) return true
+    const ok = await ui.confirm({
+      title: '放弃未保存的修改？',
+      message: '当前笔记正在编辑且有未保存的改动，继续将丢失这些修改。',
+      danger: true,
+      okText: '放弃修改',
+    })
+    if (ok) dirtyRef.current = false
+    return ok
+  }, [])
+
+  const openNoteRaw = useCallback((path: string, reveal = false) => {
     setCurrent(path)
     currentRef.current = path
     setHits([])
@@ -382,11 +412,32 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     window.api.vault.read(path).then(setNote).catch(() => setNote(null))
   }, [])
 
-  const closeNote = useCallback(() => {
+  const openNote = useCallback(
+    async (path: string, reveal = false) => {
+      if (!(await confirmDiscard())) return
+      openNoteRaw(path, reveal)
+    },
+    [confirmDiscard, openNoteRaw]
+  )
+
+  const closeNote = useCallback(async () => {
+    if (!(await confirmDiscard())) return
+    dirtyRef.current = false
     setCurrent(null)
     currentRef.current = null
     setNote(null)
-  }, [])
+  }, [confirmDiscard])
+
+  /** 换库：先问未保存的改动，再确认这次切换本身（H-02 的确认在这里） */
+  const switchVault = useCallback(async () => {
+    if (!(await confirmDiscard())) return
+    const ok = await ui.confirm({
+      title: '切换到另一个知识库？',
+      message: `当前库：${vault.path}\n\n会回到建库/选库引导，在那里点「返回当前库」可以随时回来。`,
+      okText: '去换库',
+    })
+    if (ok) onSwitch()
+  }, [confirmDiscard, onSwitch, vault.path])
 
   const createNote = async (): Promise<void> => {
     const name = await ui.prompt({ title: '新建笔记', placeholder: '笔记名称' })
@@ -408,7 +459,8 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     if (!okd) return
     await window.api.vault.deleteNote(current)
     ui.toast(`已删除「${note?.title ?? current}」，可在废纸篓找回`)
-    closeNote()
+    dirtyRef.current = false // 文件都删了，别再问"放弃未保存的修改"
+    void closeNote()
   }
 
   useEffect(() => {
@@ -525,7 +577,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
                   图谱
                 </button>
               )}
-              <button onClick={onSwitch} title="切换知识库" className="hover:text-accent">
+              <button onClick={() => void switchVault()} title="切换知识库" className="hover:text-accent">
                 换库
               </button>
             </span>
@@ -568,6 +620,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
             onOpenLink={openNote}
             onDelete={deleteNote}
             onClose={closeNote}
+            onDirty={onDirty}
           />
         </div>
       )}
@@ -725,27 +778,48 @@ function NoteView({
   onOpenLink,
   onDelete,
   onClose,
+  onDirty,
 }: {
   path: string
   note: NoteContent
   onOpenLink: (p: string) => void
   onDelete: () => void
   onClose: () => void
+  /** 把「有未保存改动」上报给 Explorer，换笔记/关笔记/换库时由它统一拦一道 */
+  onDirty: (d: boolean) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [dirty, setDirty] = useState(false)
 
+  useEffect(() => {
+    onDirty(dirty)
+    // 卸载（换 key）时复位：此时要么已确认放弃、要么是保存后正常离开
+    return () => onDirty(false)
+  }, [dirty, onDirty])
+
   const startEdit = async (): Promise<void> => {
-    setDraft(await window.api.vault.readRaw(path))
-    setDirty(false)
-    setEditing(true)
+    try {
+      setDraft(await window.api.vault.readRaw(path))
+      setDirty(false)
+      setEditing(true)
+    } catch (e) {
+      ui.toast(`打不开编辑器：${errText(e)}`, 'error')
+    }
   }
 
+  // 保存三态：以前无论写盘成不成功都是"按钮变灰 + 退出编辑态"，
+  // 磁盘只读/文件被 Obsidian 锁住/库被移走，用户全都以为存上了
   const save = async (): Promise<void> => {
-    await window.api.vault.write(path, draft)
-    setDirty(false)
-    setEditing(false)
+    try {
+      await window.api.vault.write(path, draft)
+      setDirty(false)
+      setEditing(false)
+      ui.toast('已保存')
+    } catch (e) {
+      // 失败保留编辑态与 draft，用户还能复制内容出去，别把人家写的东西弄没了
+      ui.toast(`保存失败：${errText(e)}`, 'error')
+    }
   }
 
   const handleLink = async (href: string): Promise<void> => {
@@ -796,6 +870,7 @@ function NoteView({
               <button
                 onClick={async () => {
                   if (dirty && !(await ui.confirm({ title: '放弃未保存的修改？', danger: true, okText: '放弃' }))) return
+                  setDirty(false) // 不复位的话 Explorer 那边的 dirtyRef 会一直挂着
                   setEditing(false)
                 }}
                 className="rounded-full border border-line px-3 py-1 hover:bg-accent-soft"

@@ -8,6 +8,7 @@ import { VaultWizard } from './components/VaultWizard'
 import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
+import { errText } from './lib/err'
 
 type Page = 'workbench' | 'vault' | 'settings'
 
@@ -93,6 +94,20 @@ export default function App() {
       offStream()
     }
   }, [appendMessage])
+
+  // AI key 下发失败以前是全程静默 catch，用户只在发第一条消息时撞到「请先配置 API Key」。
+  // 主 UI（含 UiHost）挂上之后再报：启动那次 provision 早于渲染层，所以还要补查一次原因
+  const mainVisible =
+    account !== null &&
+    (account.loggedIn || localMode) &&
+    vaultState !== 'loading' &&
+    !(vaultState === 'none' && !vaultSkipped)
+  useEffect(() => {
+    if (!mainVisible) return
+    const say = (msg: string): void => ui.toast(`AI 配置获取失败：${msg}（可在设置页手填 Key）`, 'error')
+    void window.api.auth.provisionError().then((msg) => msg && say(msg))
+    return window.api.auth.onProvisionFailed(say)
+  }, [mainVisible])
 
   const handleLogout = useCallback(async () => {
     await window.api.auth.logout()
@@ -219,12 +234,22 @@ export default function App() {
                     >
                       {c.title}
                     </button>
+                    {/* 与笔记删除同一套标准：二次确认（带标题）+ 删除后 toast。
+                        以前是 hover ✕ 一点就永久没了，同类操作两套标准 */}
                     <button
                       onClick={async () => {
+                        const okd = await ui.confirm({
+                          title: '确认删除这个对话？',
+                          message: `「${c.title}」\n\n对话记录会从本机删除，无法找回。`,
+                          danger: true,
+                          okText: '删除',
+                        })
+                        if (!okd) return
                         await window.api.chat.delete(c.id)
                         convsRef.current = convsRef.current.filter((x) => x.id !== c.id)
                         setConvs(convsRef.current)
                         if (active.id === c.id) setActive(newConv())
+                        ui.toast(`已删除对话「${c.title}」`)
                       }}
                       className="absolute right-1.5 top-1 hidden rounded px-1 text-sm text-muted hover:text-accent group-hover:block"
                       title="删除对话"
@@ -397,12 +422,18 @@ function SettingsPage({
   onNickname: (v: string) => void
 }) {
   const [hasKey, setHasKey] = useState(false)
+  const [manualKey, setManualKey] = useState(false)
   const [apiBase, setApiBase] = useState('')
   const [nick, setNickDraft] = useState(nickname ?? '')
+  const [keyDraft, setKeyDraft] = useState('')
+  const [provisioning, setProvisioning] = useState(false)
+  // safeStorage 写 Keychain 在 macOS 上要几秒、期间主进程是卡住的，不给忙态用户会连点
+  const [savingKey, setSavingKey] = useState(false)
 
   useEffect(() => {
     window.api.settings.get().then((s) => {
       setHasKey(s.hasApiKey)
+      setManualKey(s.manualApiKey)
       setApiBase(s.apiBaseUrl)
     })
   }, [])
@@ -448,13 +479,72 @@ function SettingsPage({
             className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-base outline-none focus:border-accent"
           />
         </div>
-        <div className="text-md">
-          AI 服务：
-          {hasKey ? (
-            <span className="text-accent">已就绪 ✓（随账号自动配置）</span>
-          ) : (
-            <span className="text-muted">登录后自动配置</span>
-          )}
+        {/* AI 服务：下发失败时这里以前是死路——只有一行只读文字，没有手填入口也没有重试 */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-md">
+            <span>
+              AI 服务：
+              {hasKey ? (
+                <span className="text-accent">已就绪 ✓（{manualKey ? '手动填写' : '随账号自动配置'}）</span>
+              ) : (
+                <span className="text-muted">未就绪（登录后自动配置，或在下方手动填写）</span>
+              )}
+            </span>
+            <button
+              onClick={async () => {
+                setProvisioning(true)
+                const r = await window.api.auth.provision()
+                setProvisioning(false)
+                const s = await window.api.settings.get()
+                setHasKey(s.hasApiKey)
+                setManualKey(s.manualApiKey)
+                if (r.ok) ui.toast('已重新获取服务端配置')
+                else ui.toast(`获取失败：${r.error ?? '未知原因'}`, 'error')
+              }}
+              disabled={provisioning}
+              className="shrink-0 rounded-full border border-line px-3 py-1 text-sm text-muted hover:text-accent disabled:opacity-60"
+            >
+              {provisioning ? '获取中…' : '重新获取服务端配置'}
+            </button>
+          </div>
+          <div className="flex items-center gap-2 text-md">
+            <span className="shrink-0 text-muted">API Key</span>
+            <input
+              data-testid="apikey-input"
+              value={keyDraft}
+              onChange={(e) => setKeyDraft(e.target.value)}
+              type="password"
+              placeholder={hasKey ? '已配置（填入新值可覆盖）' : 'sk-… 服务端下发失败时手动填写'}
+              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+            />
+            <button
+              data-testid="apikey-save"
+              disabled={savingKey}
+              onClick={async () => {
+                const k = keyDraft.trim()
+                if (!k) return ui.toast('请先填写 API Key', 'error')
+                setSavingKey(true)
+                try {
+                  await window.api.settings.setKey(k)
+                  setKeyDraft('')
+                  const s = await window.api.settings.get()
+                  setHasKey(s.hasApiKey)
+                  setManualKey(s.manualApiKey)
+                  ui.toast('API Key 已保存（系统加密存储）')
+                } catch (e) {
+                  ui.toast(`保存失败：${errText(e)}`, 'error')
+                } finally {
+                  setSavingKey(false)
+                }
+              }}
+              className="shrink-0 rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover disabled:opacity-60"
+            >
+              {savingKey ? '保存中…' : '保存'}
+            </button>
+          </div>
+          <div className="text-sm leading-5 text-muted">
+            手动填写的 Key 用 macOS Keychain 加密存储，且不会被服务端下发的配置覆盖。
+          </div>
         </div>
         <div className="flex items-center gap-2 text-md">
           <span className="shrink-0 text-muted">服务器</span>

@@ -177,8 +177,12 @@ try {
     await win.fill('input[placeholder="密码"]', E2E_PASSWORD)
     await win.click('button:has-text("登录")')
     await win.locator('button[title="新对话"]').waitFor({ timeout: 30000 })
-    await win.waitForTimeout(5000) // 等服务端下发 key 落库
-    const s = await win.evaluate(() => window.api.settings.get())
+    // 等服务端下发 key 落库：safeStorage 写 Keychain 要好几秒（实测 ~6s），固定等会误判
+    let s = await win.evaluate(() => window.api.settings.get())
+    for (let i = 0; i < 30 && !s.hasApiKey; i++) {
+      await win.waitForTimeout(1000)
+      s = await win.evaluate(() => window.api.settings.get())
+    }
     if (!s.hasApiKey) throw new Error('登录后没拿到 AI key，E2E_CHAT 跑不了（检查中转站/账号）')
     console.log('登录 ✓ key 已下发')
   } else {
@@ -641,9 +645,105 @@ try {
     console.log('markdown 表格 ✓', JSON.stringify({ ...tbl, idleBg, hoverBg, note: rel }))
   }
 
+  // ---- H-05 保存三态：保存成功要有轻 toast（以前成功失败长得一模一样，写盘失败是静默的）----
+  {
+    await win.click('button:has-text("编辑")')
+    await win.locator('textarea').first().waitFor({ timeout: 5000 })
+    await win.locator('textarea').first().fill('# 表格样式走查\n\nH-05 保存三态走查：这一行是编辑后写进去的。\n')
+    await snap('20-笔记编辑态', 300)
+    await win.click('button:has-text("保存")')
+    await win.locator('text=已保存').waitFor({ timeout: 5000 })
+    await snap('20b-保存成功toast', 200)
+    // 保存成功必须退出编辑态，且内容真的落盘（不是只把按钮变灰）
+    if (await win.locator('textarea').count()) throw new Error('保存成功后没有退出编辑态')
+    const saved = await win.evaluate(async () => window.api.vault.readRaw('e2e表格样式.md'))
+    if (!saved.includes('H-05 保存三态走查')) throw new Error('保存内容没落盘：' + saved.slice(0, 80))
+    console.log('H-05 保存成功 toast + 落盘 ✓')
+  }
+
+  // ---- H-04 未保存确认：编辑中切到另一篇笔记必须先问，取消要留在原地且草稿还在 ----
+  {
+    await win.click('button:has-text("编辑")')
+    await win.locator('textarea').first().waitFor({ timeout: 5000 })
+    const dirtyText = '# 表格样式走查\n\nH-04 这段改动没保存，切走时必须弹确认。\n'
+    await win.locator('textarea').first().fill(dirtyText)
+    // 换一篇笔记：找一个不是当前这篇的叶子
+    const other = win.locator('button.block.truncate').filter({ hasNotText: 'e2e表格样式' }).first()
+    const otherName = (await other.innerText()).trim()
+    await other.click()
+    await win.locator('text=放弃未保存的修改？').waitFor({ timeout: 5000 })
+    await snap('21-未保存确认弹窗', 200)
+    // 取消：应留在原来那篇的编辑态，草稿一个字都不能少
+    // （编辑态头部也有个「取消」，弹窗按钮一律收敛到 .w-modal 里点，否则撞 strict mode）
+    await win.click('.w-modal button:has-text("取消")')
+    await win.waitForTimeout(400)
+    const stillEditing = await win.locator('textarea').count()
+    if (!stillEditing) throw new Error('取消未保存确认后编辑态没了')
+    // 编辑态 + 草稿原样还在 = 确实没跳走（跳走的话 NoteView 会换 key 重挂，根本不在编辑态）
+    const keptDraft = await win.locator('textarea').first().inputValue()
+    if (keptDraft !== dirtyText) throw new Error('取消后草稿被改了：' + JSON.stringify(keptDraft.slice(0, 40)))
+    await snap('21b-未保存确认-取消后留在原地', 200)
+    // 再切一次并选「放弃修改」：这次应该真的跳过去，且磁盘上的内容仍是上一次保存的
+    await other.click()
+    await win.locator('text=放弃未保存的修改？').waitFor({ timeout: 5000 })
+    await win.click('.w-modal button:has-text("放弃修改")')
+    await win.waitForTimeout(800)
+    if (await win.locator('textarea').count()) throw new Error('放弃修改后没退出编辑态')
+    const onDisk = await win.evaluate(async () => window.api.vault.readRaw('e2e表格样式.md'))
+    if (onDisk.includes('H-04 这段改动没保存')) throw new Error('放弃的改动竟然写进了磁盘')
+    await snap('21c-放弃修改后切到另一篇', 300)
+    console.log('H-04 未保存确认 ✓', JSON.stringify({ 切到: otherName }))
+  }
+
+  // ---- H-02 换库出口：换库要先确认，向导里要有「返回当前库」能退回来 ----
+  {
+    await win.click('button[title="切换知识库"]')
+    await win.locator('text=切换到另一个知识库？').waitFor({ timeout: 5000 })
+    const switchMsg = await win.locator('.whitespace-pre-line').first().innerText()
+    if (!switchMsg.includes(settings.vaultPath)) throw new Error(`换库确认没显示当前库路径：「${switchMsg}」`)
+    await snap('22-换库二次确认', 200)
+    // 取消：应该还在原来的库里（文件树还在）
+    await win.click('.w-modal button:has-text("取消")')
+    await win.waitForTimeout(400)
+    if (!(await win.locator('[data-testid="tree-col"]').count())) throw new Error('取消换库后离开了当前库')
+    // 确认进向导：必须有退出口
+    await win.click('button[title="切换知识库"]')
+    await win.click('.w-modal button:has-text("去换库")')
+    await win.locator('text=建立你的知识库').waitFor({ timeout: 5000 })
+    if (!(await win.locator('button:has-text("返回当前库")').count()))
+      throw new Error('换库向导没有「返回当前库」出口（点了系统对话框取消就回不去了）')
+    await snap('22b-换库向导-有返回出口', 300)
+    await win.click('button:has-text("返回当前库")')
+    await win.locator('[data-testid="tree-col"]').waitFor({ timeout: 8000 })
+    await snap('22c-返回当前库', 800)
+    console.log('H-02 换库确认 + 返回当前库 ✓')
+  }
+
   // 设置页
   await win.click('text=设置')
   await snap('10-设置页', 600)
+
+  // ---- H-06 AI 服务卡片：手填 key 输入框 + 重新获取按钮（以前下发失败 = 死路）----
+  {
+    const keyInput = win.locator('[data-testid="apikey-input"]')
+    if (!(await keyInput.count())) throw new Error('设置页没有手填 API Key 的输入框')
+    if (!(await win.locator('button:has-text("重新获取服务端配置")').count()))
+      throw new Error('设置页没有「重新获取服务端配置」按钮')
+    await keyInput.fill('sk-e2e-manual-key-0123456789')
+    // safeStorage 写 Keychain 会把主进程卡住几秒（实测 ~6s，偶发更久），
+    // 主进程一卡 CDP 也跟着停，默认 30s 超时会误判成"点不动"，这里单独放宽
+    await win.click('[data-testid="apikey-save"]', { timeout: 120000 })
+    await win.locator('text=API Key 已保存').waitFor({ timeout: 60000 })
+    const afterKey = await win.evaluate(() => window.api.settings.get())
+    if (!afterKey.hasApiKey) throw new Error('手填 key 保存后 hasApiKey 仍为 false')
+    await snap('10b-设置页-手填key已保存', 300)
+    // 「重新获取」真点：本地模式会失败（未登录），登录态会成功，两种都必须有可见反馈
+    await win.click('button:has-text("重新获取服务端配置")')
+    await win.locator('text=/已重新获取服务端配置|获取失败/').first().waitFor({ timeout: 15000 })
+    const provText = await win.locator('text=/已重新获取服务端配置|获取失败/').first().innerText()
+    await snap('10c-设置页-重新获取反馈', 200)
+    console.log('H-06 手填 key + 重新获取 ✓', JSON.stringify({ 反馈: provText.trim() }))
+  }
 
   // ---- 首页「最近对话」卡片区：造两条历史会话，重载后应同时出现在侧栏和首页卡片区 ----
   await win.evaluate(async () => {
@@ -662,6 +762,33 @@ try {
   await snap('17-最近对话卡片-点开会话', 200)
   await win.click('button[title="新对话"]')
   await win.waitForTimeout(600)
+
+  // ---- H-03 删除对话：二次确认（带对话标题）+ 删除后 toast，与笔记删除同一套标准 ----
+  {
+    const row = win.locator('aside div.group').filter({ hasText: 'e2e 历史会话一' }).first()
+    await row.hover() // ✕ 是 group-hover 才出的
+    await row.locator('button[title="删除对话"]').click()
+    await win.locator('text=确认删除这个对话？').waitFor({ timeout: 5000 })
+    const delMsg = await win.locator('.whitespace-pre-line').first().innerText()
+    if (!delMsg.includes('e2e 历史会话一')) throw new Error(`删除对话确认没显示标题：「${delMsg}」`)
+    await snap('23-删除对话-二次确认', 200)
+    // 取消：对话必须还在
+    await win.click('.w-modal button:has-text("取消")')
+    await win.waitForTimeout(300)
+    if (!(await win.locator('aside button:has-text("e2e 历史会话一")').count()))
+      throw new Error('取消删除后对话却没了')
+    // 确认删除：toast + 侧栏里消失
+    await row.hover()
+    await row.locator('button[title="删除对话"]').click()
+    await win.locator('text=确认删除这个对话？').waitFor({ timeout: 5000 })
+    await win.click('.w-modal button:has-text("删除")')
+    await win.locator('text=已删除对话').waitFor({ timeout: 5000 })
+    await snap('23b-删除对话-完成toast', 200)
+    await win.waitForTimeout(500)
+    if (await win.locator('aside button:has-text("e2e 历史会话一")').count())
+      throw new Error('确认删除后对话还在侧栏里')
+    console.log('H-03 删除对话确认 + toast ✓')
+  }
 
   // ---- 产物卡片：文件类型图标 + hover 出操作按钮，逐个真点 ----
   // 放在最后跑：「入库」会真的排队跑 pipeline，不让它影响前面的投递箱断言
@@ -703,6 +830,63 @@ try {
   await cardMd.locator('button:has-text("打开")').click()
   await win.waitForTimeout(800)
   console.log('产物卡片 打开/入库/预览 ✓')
+
+  // ---- H-01 拖文件到「对话工作台」：以前整个应用会被那个文件替换（导航到 file://）----
+  // 放最后跑：这一步会真的往投递箱丢文件、触发一轮 pipeline，不让它影响前面的投递箱断言
+  {
+    await win.click('button[title="新对话"]')
+    await win.waitForTimeout(600)
+    const hrefBefore = await win.evaluate(() => location.href)
+    const dropSrc = join(root, 'e2e', 'sample.docx')
+    const dropName = `e2e拖入工作台_${Date.now()}.docx`
+    const stagedDrop = join('/tmp', dropName)
+    copyFileSync(dropSrc, stagedDrop)
+    // 上一步「入库」的 toast 文案也含「已送入投递箱」，等它自然消失再拖，别断言到旧 toast
+    await win
+      .locator('text=已送入投递箱')
+      .waitFor({ state: 'detached', timeout: 8000 })
+      .catch(() => {})
+
+    // dragover：工作台必须给覆盖层提示（以前拖进来什么反馈都没有，松手直接炸）
+    await win.evaluate(() => {
+      const dt = new DataTransfer()
+      document
+        .querySelector('main .relative.flex.h-full')
+        ?.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    })
+    await win.waitForTimeout(400)
+    if (!(await win.locator('text=松手即入库').count())) throw new Error('工作台拖入没有覆盖层提示')
+    await snap('24-工作台-拖入覆盖层', 200)
+
+    // drop：合成一个带真实磁盘路径的 File（渲染层读的就是 File.path，和真拖同一条链路）
+    await win.evaluate((p) => {
+      const f = new File(['x'], p.split('/').pop(), { type: 'application/octet-stream' })
+      Object.defineProperty(f, 'path', { value: p })
+      const dt = new DataTransfer()
+      dt.items.add(f)
+      document
+        .querySelector('main .relative.flex.h-full')
+        ?.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    }, stagedDrop)
+    await win.locator('text=已送入投递箱').waitFor({ timeout: 15000 })
+    await snap('24b-工作台-拖入已送入投递箱', 200)
+
+    // ① 应用没被替换掉：没发生导航，侧栏与工作台都还在
+    const hrefAfter = await win.evaluate(() => location.href)
+    if (hrefAfter !== hrefBefore) throw new Error(`拖入后发生了导航：${hrefBefore} → ${hrefAfter}`)
+    if (!(await win.locator('aside button[title="新对话"]').count()))
+      throw new Error('拖入后侧栏没了（应用被那个文件替换了）')
+    if (!(await win.locator('textarea').count())) throw new Error('拖入后工作台输入框没了')
+
+    // ② 文件真进了投递箱队列（enqueue 拷进投递箱目录，watcher 随后接管）
+    let queued = false
+    for (const c of ['95_待入库', '00_投递箱']) {
+      if (existsSync(join(settings.vaultPath, c, dropName))) queued = true
+    }
+    if (!queued) throw new Error(`拖入的文件没进投递箱：${dropName}`)
+    rmSync(stagedDrop, { force: true })
+    console.log('H-01 工作台拖入 ✓（应用未被替换 + 文件进队列）', dropName)
+  }
 
 } finally {
   await app.close()

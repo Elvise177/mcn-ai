@@ -2,6 +2,8 @@ interface DesktopSettings {
   vaultPath: string | null
   relayBaseUrl: string
   hasApiKey: boolean
+  /** true = 用户在设置页手填的 key（服务端下发不会覆盖它） */
+  manualApiKey: boolean
   llmBaseUrl: string
   hasLlmKey: boolean
   apiBaseUrl: string
@@ -138,6 +140,9 @@ interface Window {
       login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>
       logout: () => Promise<void>
       state: () => Promise<{ loggedIn: boolean; email?: string }>
+      provision: () => Promise<{ ok: boolean; error?: string }>
+      provisionError: () => Promise<string | null>
+      onProvisionFailed: (cb: (msg: string) => void) => () => void
     }
     shortcut: {
       on: (cb: (name: string) => void) => () => void

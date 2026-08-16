@@ -2,7 +2,7 @@ import { ipcMain, dialog } from 'electron'
 import { store, setApiKey, getApiKey, setLlmKey, getLlmKey } from './store'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
-import { login, logout, authState, provisionKeys } from './auth'
+import { login, logout, authState, provisionKeys, getProvisionError } from './auth'
 import { artifactsWatcher } from './agent/artifacts'
 import { listConversations, saveConversation, deleteConversation, type Conversation } from './agent/conversations'
 import { syncConversation } from './knowledge/client'
@@ -20,6 +20,7 @@ export function registerIpc(): void {
     vaultPath: process.env.MCNAI_VAULT || store.get('vaultPath') || null,
     relayBaseUrl: store.get('relayBaseUrl'),
     hasApiKey: !!getApiKey(),
+    manualApiKey: store.get('manualApiKey') === true,
     llmBaseUrl: store.get('llmBaseUrl'),
     hasLlmKey: !!getLlmKey(),
     apiBaseUrl: store.get('apiBaseUrl'),
@@ -99,6 +100,9 @@ export function registerIpc(): void {
   ipcMain.handle('auth:login', (_e, email: string, password: string) => login(email, password))
   ipcMain.handle('auth:logout', () => logout())
   ipcMain.handle('auth:state', () => authState())
+  // 设置页「重新获取服务端配置」；启动那次失败的原因也在这查（渲染层挂载晚于启动 provision）
+  ipcMain.handle('auth:provision', () => provisionKeys())
+  ipcMain.handle('auth:provisionError', () => getProvisionError())
   ipcMain.handle('settings:setApiBase', (_e, url: string) => {
     store.set('apiBaseUrl', url.trim().replace(/\/$/, ''))
     return { ok: true }

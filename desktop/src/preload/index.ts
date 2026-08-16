@@ -47,6 +47,13 @@ const auth = {
   login: (email: string, password: string) => ipcRenderer.invoke('auth:login', email, password),
   logout: () => ipcRenderer.invoke('auth:logout'),
   state: () => ipcRenderer.invoke('auth:state'),
+  provision: () => ipcRenderer.invoke('auth:provision'),
+  provisionError: () => ipcRenderer.invoke('auth:provisionError'),
+  onProvisionFailed: (cb: (msg: string) => void) => {
+    const listener = (_e: unknown, msg: string): void => cb(msg)
+    ipcRenderer.on('auth:provision-failed', listener)
+    return () => ipcRenderer.removeListener('auth:provision-failed', listener)
+  },
 }
 const chat = {
   send: (sessionId: string, prompt: string, resume?: string) =>

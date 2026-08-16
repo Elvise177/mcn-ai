@@ -1,7 +1,7 @@
 import '../env-hooks'
 import { createClient, type SupabaseClient, type Session } from '@supabase/supabase-js'
 import WebSocket from 'ws'
-import { safeStorage } from 'electron'
+import { BrowserWindow, safeStorage } from 'electron'
 import Store from 'electron-store'
 
 /** Supabase 公开配置（anon key 设计上可公开，RLS 才是安全边界）；从 webpage 同项目取 */
@@ -64,16 +64,36 @@ export async function login(email: string, password: string): Promise<{ ok: bool
   return { ok: true }
 }
 
+export type ProvisionResult = { ok: boolean; error?: string }
+
+/** 最近一次下发失败的原因；渲染层挂载晚于启动那次 provision，用它补一次查询 */
+let lastProvisionError: string | null = null
+export const getProvisionError = (): string | null => lastProvisionError
+
+/** 失败要让用户看得见：设置页里有手填 key 的入口，不通知就等于死路一条 */
+function notifyProvisionFailed(msg: string): void {
+  lastProvisionError = msg
+  for (const w of BrowserWindow.getAllWindows()) {
+    const send = (): void => w.webContents.send('auth:provision-failed', msg)
+    if (w.webContents.isLoading()) w.webContents.once('did-finish-load', send)
+    else send()
+  }
+}
+
 /** 从服务端拉取 AI 配置；用户手动填过的 key 不覆盖 */
-export async function provisionKeys(): Promise<void> {
+export async function provisionKeys(): Promise<ProvisionResult> {
   try {
     const { store, setApiKey, setLlmKey, getApiKey, getLlmKey } = await import('../store')
     const token = await getAccessToken()
-    if (!token) return
+    if (!token) return { ok: false, error: '未登录，无法获取服务端配置' }
     const res = await fetch(`${store.get('apiBaseUrl')}/api/v1/client-config`, {
       headers: { authorization: `Bearer ${token}` },
     })
-    if (!res.ok) return
+    if (!res.ok) {
+      const msg = `服务端返回 ${res.status}`
+      notifyProvisionFailed(msg)
+      return { ok: false, error: msg }
+    }
     const cfg = (await res.json()) as {
       relayBaseUrl?: string
       relayApiKey?: string | null
@@ -90,8 +110,18 @@ export async function provisionKeys(): Promise<void> {
       if (cfg.llmBaseUrl) store.set('llmBaseUrl', cfg.llmBaseUrl)
       if (cfg.llmModel) store.set('llmModel', cfg.llmModel)
     }
-  } catch {
-    /* 服务端不可达时静默——回退用户自填 */
+    if (!getApiKey()) {
+      const msg = '服务端未下发 AI Key，请在设置页手动填写'
+      notifyProvisionFailed(msg)
+      return { ok: false, error: msg }
+    }
+    lastProvisionError = null
+    return { ok: true }
+  } catch (e) {
+    // 服务端不可达仍然回退用户自填，但不再静默：设置页有手填入口，得让用户知道要用它
+    const msg = e instanceof Error ? e.message : String(e)
+    notifyProvisionFailed(`服务端不可达（${msg}）`)
+    return { ok: false, error: msg }
   }
 }
 

@@ -4,9 +4,12 @@ import { useState } from 'react'
 export function VaultWizard({
   onReady,
   onSkip,
+  skipLabel = '暂时跳过，之后可在「个人知识库」里建',
 }: {
   onReady: (v: { path: string; noteCount: number }) => void
   onSkip?: () => void
+  /** 换库入口复用本组件，退出口的文案不是「跳过」而是「返回当前库」 */
+  skipLabel?: string
 }) {
   const [busy, setBusy] = useState(false)
   const pick = async (create: boolean): Promise<void> => {
@@ -45,7 +48,7 @@ export function VaultWizard({
           onClick={onSkip}
           className="mt-8 text-sm text-muted underline underline-offset-4 hover:text-accent"
         >
-          暂时跳过，之后可在「个人知识库」里建
+          {skipLabel}
         </button>
       )}
     </div>

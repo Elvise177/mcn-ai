@@ -53,8 +53,13 @@ try {
   if (!chatHome) await fail('登录后没有落在对话页')
   console.log('✅ 登录门登录成功，直接落在对话页')
 
-  // 2. 等下发落库
-  await win.waitForTimeout(4000)
+  // 2. 等下发落库：safeStorage 写 Keychain 在 macOS 上要好几秒（实测 ~6s），
+  // 固定等 4s 会偶发误判成"没下发"，改成轮询
+  for (let i = 0; i < 30; i++) {
+    s = await win.evaluate(() => window.api.settings.get())
+    if (s.hasApiKey && s.hasLlmKey) break
+    await win.waitForTimeout(1000)
+  }
   s = await win.evaluate(() => window.api.settings.get())
   console.log(s.hasApiKey ? '✅ 中转站 key 已自动下发（Keychain）' : '❌ 中转站 key 未下发')
   console.log(s.hasLlmKey ? '✅ DeepSeek key 已自动下发' : '❌ DeepSeek key 未下发')
