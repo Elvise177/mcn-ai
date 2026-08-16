@@ -66,8 +66,8 @@ export function UiHost() {
         {toasts.map((t) => (
           <div
             key={t.id}
-            className={`fade-up pointer-events-auto rounded-full px-4 py-2 text-[13px] text-white shadow-lg ${
-              t.type === 'error' ? 'bg-red-500/95' : 'bg-ink/90'
+            className={`fade-up pointer-events-auto rounded-full px-4 py-2 text-base text-on-solid shadow-pop ${
+              t.type === 'error' ? 'bg-danger' : 'bg-ink'
             }`}
           >
             {t.msg}
@@ -77,16 +77,16 @@ export function UiHost() {
 
       {/* Modal */}
       {modal && (
-        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/25" onClick={() => close(modal.kind === 'confirm' ? false : null)}>
-          <div className="fade-up w-[380px] rounded-2xl border border-line bg-card p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-overlay" onClick={() => close(modal.kind === 'confirm' ? false : null)}>
+          <div className="fade-up w-modal rounded-xl border border-line bg-card p-6 shadow-pop" onClick={(e) => e.stopPropagation()}>
             <div className="mb-1 flex items-center justify-between">
-              <div className="text-[15px] font-semibold">{modal.opts.title}</div>
-              <button onClick={() => close(modal.kind === 'confirm' ? false : null)} className="rounded p-1 text-muted transition-colors hover:text-rose">
+              <div className="text-lg font-semibold">{modal.opts.title}</div>
+              <button onClick={() => close(modal.kind === 'confirm' ? false : null)} className="rounded p-1 text-muted transition-colors hover:text-accent">
                 <X size={15} />
               </button>
             </div>
             {modal.kind === 'confirm' && modal.opts.message && (
-              <div className="mb-4 text-[13px] leading-6 text-muted">{modal.opts.message}</div>
+              <div className="mb-4 text-base leading-6 text-muted">{modal.opts.message}</div>
             )}
             {modal.kind === 'prompt' && (
               <input
@@ -98,20 +98,20 @@ export function UiHost() {
                   if (e.key === 'Escape') close(null)
                 }}
                 placeholder={modal.opts.placeholder}
-                className="mb-4 mt-2 w-full rounded-xl border border-line bg-bg px-3 py-2.5 text-sm outline-none transition-colors focus:border-rose"
+                className="mb-4 mt-2 w-full rounded-xl border border-line bg-bg px-3 py-2.5 text-md outline-none transition-colors focus:border-accent"
               />
             )}
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => close(modal.kind === 'confirm' ? false : null)}
-                className="rounded-full border border-line px-4 py-1.5 text-[13px] transition-colors hover:bg-black/[0.03]"
+                className="rounded-full border border-line px-4 py-1.5 text-base transition-colors hover:bg-hover"
               >
                 取消
               </button>
               <button
                 onClick={() => close(modal.kind === 'confirm' ? true : text.trim() || null)}
-                className={`rounded-full px-4 py-1.5 text-[13px] text-white transition-opacity hover:opacity-90 ${
-                  modal.kind === 'confirm' && modal.opts.danger ? 'bg-red-500' : 'bg-rose'
+                className={`rounded-full px-4 py-1.5 text-base text-on-solid transition-opacity hover:opacity-90 ${
+                  modal.kind === 'confirm' && modal.opts.danger ? 'bg-danger' : 'bg-accent'
                 }`}
               >
                 {modal.opts.okText ?? '确定'}

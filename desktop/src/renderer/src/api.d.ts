@@ -71,6 +71,8 @@ interface ArtifactInfo {
   name: string
   mtimeMs: number
   size: number
+  /** v2 产物回流用：记录该产物由哪份草稿/会话生成，本期不实现，只占位 */
+  source_draft_id?: string
 }
 
 interface SearchHit {

@@ -27,8 +27,8 @@ export default function LoginGate({
   return (
     <div className="titlebar-drag flex h-full flex-col items-center justify-center bg-bg">
       <img src={logo} alt="" className="fade-up mb-4 h-20 w-20" draggable={false} />
-      <div className="mb-2 font-serif text-3xl text-ink">你的 AI 工作操作台</div>
-      <div className="mb-10 text-sm text-muted">登录后即刻可用</div>
+      <div className="mb-2 text-3xl font-semibold text-ink">你的 AI 工作操作台</div>
+      <div className="mb-10 text-md text-muted">登录后即刻可用</div>
 
       <div className="w-96 space-y-3">
         <input
@@ -36,7 +36,7 @@ export default function LoginGate({
           onChange={(e) => setEmail(e.target.value)}
           placeholder="邮箱"
           autoFocus
-          className="w-full rounded-xl border border-line bg-card px-4 py-3 text-sm outline-none focus:border-rose"
+          className="w-full rounded-input border border-line bg-card px-4 py-3 text-md outline-none focus:border-accent"
         />
         <input
           type="password"
@@ -44,21 +44,21 @@ export default function LoginGate({
           onChange={(e) => setPwd(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && submit()}
           placeholder="密码"
-          className="w-full rounded-xl border border-line bg-card px-4 py-3 text-sm outline-none focus:border-rose"
+          className="w-full rounded-input border border-line bg-card px-4 py-3 text-md outline-none focus:border-accent"
         />
-        {err && <div className="text-[12px] text-red-600">{err}</div>}
+        {err && <div className="text-sm text-danger">{err}</div>}
         <button
           onClick={submit}
           disabled={busy}
-          className="w-full rounded-xl bg-rose py-3 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+          className="w-full rounded-input bg-ink py-3 text-md font-medium text-on-solid hover:opacity-90 disabled:opacity-50"
         >
           {busy ? '登录中…' : '登录'}
         </button>
       </div>
 
-      <div className="mt-6 text-[12px] text-muted">
+      <div className="mt-6 text-sm text-muted">
         账号由管理员发放 ·{' '}
-        <button onClick={onSkip} className="hover:text-rose hover:underline">
+        <button onClick={onSkip} className="hover:text-accent hover:underline">
           暂不登录，仅本地使用
         </button>
       </div>

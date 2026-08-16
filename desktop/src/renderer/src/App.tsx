@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Library, Settings as SettingsIcon, Plus } from 'lucide-react'
 import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
 import LoginGate from './pages/LoginGate'
@@ -6,8 +7,16 @@ import { UiHost, ui } from './components/ui'
 import { VaultWizard } from './components/VaultWizard'
 import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
+import { getNickname, identityLabel, setNickname } from './lib/profile'
 
 type Page = 'workbench' | 'vault' | 'settings'
+
+const APP_VERSION = 'v0.1.0'
+
+const NAV: [Page, string, typeof Library][] = [
+  ['vault', '个人知识库', Library],
+  ['settings', '设置', SettingsIcon],
+]
 
 const newConv = (): Conversation => ({
   id: crypto.randomUUID(),
@@ -24,6 +33,8 @@ export default function App() {
   const [localMode, setLocalMode] = useState(() => localStorage.getItem('localMode') === '1')
   const [vaultState, setVaultState] = useState<'loading' | 'none' | 'ready'>('loading')
   const [vaultSkipped, setVaultSkipped] = useState(() => localStorage.getItem('vaultSkipped') === '1')
+  // 昵称是渲染层自己的资料（云端只给邮箱），设置页可改，问候语与侧栏身份行都用它
+  const [nickname, setNick] = useState<string | undefined>(getNickname)
 
   // 会话状态统一在这里维护：convsRef 同步镜像，流式事件按 sessionId 找到归属对话，
   // 即使用户已切到新对话，旧对话的回复也照常入库（否则切走=丢消息）
@@ -158,44 +169,42 @@ export default function App() {
   return (
     <div className="flex h-full">
       <UiHost />
-      <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-sidebar">
+      <aside className="flex w-sidebar shrink-0 flex-col border-r border-line bg-sidebar">
         <div className="titlebar-drag px-5 pb-4 pt-10">
-          <div className="text-xl font-semibold text-rose">mcn-ai</div>
-          <div className="mt-0.5 text-[11px] text-muted">AI 工作操作台</div>
+          <div className="text-xl font-semibold">mcn-ai</div>
+          <div className="mt-0.5 text-xs text-muted">AI 工作操作台</div>
         </div>
+        {/* 主色降级：新对话改描边样式，粉色只留给发送键/光标/选中态这类小面积点缀 */}
         <button
           onClick={() => {
             setActive(newConv())
             setPage('workbench')
           }}
-          className="mx-4 mb-4 rounded-full bg-rose py-2 text-sm font-medium text-white hover:opacity-90"
+          title="新对话"
+          className="mx-4 mb-5 flex items-center justify-center gap-1.5 rounded-full border border-line bg-transparent py-2 text-base font-medium text-ink hover:bg-hover"
         >
-          ＋ 新对话
+          <Plus size={15} /> 新对话
         </button>
 
         <nav className="space-y-1 px-3">
-          {(
-            [
-              ['vault', '个人知识库'],
-              ['settings', '设置'],
-            ] as [Page, string][]
-          ).map(([key, label]) => (
+          {NAV.map(([key, label, Icon]) => (
             <button
               key={key}
               onClick={() => setPage(key)}
-              className={`w-full rounded-lg px-3 py-2 text-left text-[13px] ${
-                page === key ? 'bg-rose-soft font-medium text-rose' : 'text-ink/70 hover:bg-black/[0.03]'
+              className={`flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-base ${
+                page === key ? 'bg-accent-soft font-medium text-accent' : 'text-ink-soft hover:bg-hover'
               }`}
             >
+              <Icon size={16} className="shrink-0" />
               {label}
             </button>
           ))}
         </nav>
 
-        <div className="mt-5 flex min-h-0 flex-1 flex-col">
+        <div className="mt-8 flex min-h-0 flex-1 flex-col">
           {convs.length > 0 && (
             <>
-              <div className="mb-1 px-5 text-[11px] text-muted">最近对话</div>
+              <div className="mb-1.5 px-5 text-2xs tracking-wide text-muted-soft">最近对话</div>
               <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
                 {convs.map((c) => (
                   <div key={c.id} className="group relative">
@@ -204,8 +213,8 @@ export default function App() {
                         setActive(c)
                         setPage('workbench')
                       }}
-                      className={`w-full truncate rounded-lg px-3 py-1.5 pr-7 text-left text-[13px] ${
-                        page === 'workbench' && active.id === c.id ? 'bg-card font-medium' : 'text-ink/70 hover:bg-black/[0.03]'
+                      className={`w-full truncate rounded-md px-3 py-1.5 pr-7 text-left text-base ${
+                        page === 'workbench' && active.id === c.id ? 'bg-card font-medium' : 'text-ink-soft hover:bg-hover'
                       }`}
                     >
                       {c.title}
@@ -217,7 +226,7 @@ export default function App() {
                         setConvs(convsRef.current)
                         if (active.id === c.id) setActive(newConv())
                       }}
-                      className="absolute right-1.5 top-1 hidden rounded px-1 text-[12px] text-muted hover:text-rose group-hover:block"
+                      className="absolute right-1.5 top-1 hidden rounded px-1 text-sm text-muted hover:text-accent group-hover:block"
                       title="删除对话"
                     >
                       ✕
@@ -228,17 +237,41 @@ export default function App() {
             </>
           )}
         </div>
-        <div className="border-t border-line px-5 py-4 text-[11px] text-muted">
-          {account.email ? account.email.split('@')[0] + ' · ' : ''}v0.1.0
+        {/* 身份行：昵称优先，其次完整邮箱（不再截前缀露出 QQ 号），再拼版本号 */}
+        <div className="truncate border-t border-line px-5 py-4 text-xs text-muted">
+          {[identityLabel(nickname, account.email), APP_VERSION].filter(Boolean).join(' · ')}
         </div>
       </aside>
 
       <main className="flex-1 overflow-hidden">
-        {page === 'workbench' && (
-          <Workbench conv={active} onSend={handleSend} onOpenNote={openNoteFromChat} userName={account.email?.split('@')[0]} />
-        )}
-        {page === 'vault' && <VaultPage />}
-        {page === 'settings' && <SettingsPage account={account} onLogout={handleLogout} />}
+        {/* key 换页触发一次淡入，避免页面切换硬切 */}
+        <div key={page} className="page-enter h-full">
+          {page === 'workbench' && (
+            <Workbench
+              conv={active}
+              onSend={handleSend}
+              onOpenNote={openNoteFromChat}
+              nickname={nickname}
+              recentConvs={convs}
+              onOpenConv={(c) => {
+                setActive(c)
+                setPage('workbench')
+              }}
+            />
+          )}
+          {page === 'vault' && <VaultPage />}
+          {page === 'settings' && (
+            <SettingsPage
+              account={account}
+              onLogout={handleLogout}
+              nickname={nickname}
+              onNickname={(v) => {
+                setNickname(v)
+                setNick(getNickname())
+              }}
+            />
+          )}
+        </div>
       </main>
     </div>
   )
@@ -251,9 +284,9 @@ function IngestCard() {
     window.api.settings.get().then((s) => setAuto(s.artifactAutoIngest))
   }, [])
   return (
-    <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
-      <div className="text-sm font-medium">知识入库</div>
-      <label className="flex cursor-pointer items-center gap-2 text-sm">
+    <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
+      <div className="text-md font-medium">知识入库</div>
+      <label className="flex cursor-pointer items-center gap-2 text-md">
         <input
           type="checkbox"
           checked={auto}
@@ -261,11 +294,11 @@ function IngestCard() {
             setAuto(e.target.checked)
             void window.api.settings.setArtifactAutoIngest(e.target.checked)
           }}
-          className="accent-rose"
+          className="accent-accent"
         />
         AI 生成的产物自动入库（送入投递箱转为可检索知识）
       </label>
-      <div className="text-[12px] leading-5 text-muted">
+      <div className="text-sm leading-5 text-muted">
         关闭时产物仅保存在 90_产物/，可在产物面板对单个文件点「入库」；开启后每个新产物自动转为知识库笔记并参与 AI 检索。
       </div>
     </div>
@@ -294,23 +327,23 @@ function RoutesCard() {
   }
 
   return (
-    <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
-      <div className="text-sm font-medium">投递箱分流</div>
-      <div className="text-[12px] leading-5 text-muted">
+    <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
+      <div className="text-md font-medium">投递箱分流</div>
+      <div className="text-sm leading-5 text-muted">
         往「投递箱 / 某文件夹」丢文件，会自动转成笔记放进对应目录（不做业务打标）。适合参考书、竞品资料等外部内容。
       </div>
       <div className="space-y-1.5">
         {routes.map((r) => (
-          <div key={r.name} className="flex items-center gap-2 rounded-lg bg-bg px-3 py-2 text-[13px]">
+          <div key={r.name} className="flex items-center gap-2 rounded-md bg-bg px-3 py-2 text-base">
             <span className="font-medium">投递箱/{r.name}</span>
             <span className="text-muted">→</span>
             <span className="flex-1 truncate">{r.dest}/</span>
             {r.builtin ? (
-              <span className="text-[11px] text-muted">内置</span>
+              <span className="text-xs text-muted">内置</span>
             ) : (
               <button
                 onClick={() => void save(routes.filter((x) => x.name !== r.name))}
-                className="rounded px-1 text-[12px] text-muted hover:text-rose"
+                className="rounded px-1 text-sm text-muted hover:text-accent"
                 title="删除规则"
               >
                 ✕
@@ -324,14 +357,14 @@ function RoutesCard() {
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           placeholder="文件夹名，如：竞品"
-          className="w-36 rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] outline-none focus:border-rose"
+          className="w-36 rounded-md border border-line bg-bg px-3 py-1.5 text-base outline-none focus:border-accent"
         />
         <span className="text-muted">→</span>
         <input
           value={newDest}
           onChange={(e) => setNewDest(e.target.value)}
           placeholder="落位目录，如：70_外部资料/竞品"
-          className="flex-1 rounded-lg border border-line bg-bg px-3 py-1.5 text-[13px] outline-none focus:border-rose"
+          className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-base outline-none focus:border-accent"
         />
         <button
           onClick={() => {
@@ -343,7 +376,7 @@ function RoutesCard() {
             setNewName('')
             setNewDest('')
           }}
-          className="rounded-full bg-rose px-4 py-1.5 text-[13px] text-white hover:opacity-90"
+          className="rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover"
         >
           添加
         </button>
@@ -355,12 +388,17 @@ function RoutesCard() {
 function SettingsPage({
   account,
   onLogout,
+  nickname,
+  onNickname,
 }: {
   account: { loggedIn: boolean; email?: string }
   onLogout: () => void
+  nickname?: string
+  onNickname: (v: string) => void
 }) {
   const [hasKey, setHasKey] = useState(false)
   const [apiBase, setApiBase] = useState('')
+  const [nick, setNickDraft] = useState(nickname ?? '')
 
   useEffect(() => {
     window.api.settings.get().then((s) => {
@@ -372,48 +410,59 @@ function SettingsPage({
   return (
     <div className="h-full overflow-auto p-10">
       <h2 className="mb-1 text-xl font-semibold">设置</h2>
-      <p className="mb-6 text-sm text-muted">AI 服务随账号自动配置，密钥用 macOS Keychain 加密存储</p>
+      <p className="mb-6 text-md text-muted">AI 服务随账号自动配置，密钥用 macOS Keychain 加密存储</p>
 
-      <div className="mb-6 max-w-xl space-y-4 rounded-2xl border border-line bg-card p-6">
-        <div className="text-sm font-medium">账号（云端同步：私人知识层 + 聊天记录）</div>
+      <div className="mb-6 max-w-xl space-y-4 rounded-xl border border-line bg-card p-6">
+        <div className="text-md font-medium">账号（云端同步：私人知识层 + 聊天记录）</div>
         {account.loggedIn ? (
-          <div className="flex items-center justify-between text-sm">
+          <div className="flex items-center justify-between text-md">
             <span>
-              已登录：<span className="text-rose">{account.email}</span>
+              已登录：<span className="text-accent">{account.email}</span>
             </span>
             <button
               onClick={onLogout}
-              className="rounded-full border border-line px-3 py-1 text-[12px] text-muted hover:text-rose"
+              className="rounded-full border border-line px-3 py-1 text-sm text-muted hover:text-accent"
             >
               退出登录
             </button>
           </div>
         ) : (
-          <div className="flex items-center justify-between text-sm">
+          <div className="flex items-center justify-between text-md">
             <span className="text-muted">当前为本地模式（无云端检索与同步）</span>
             <button
               onClick={onLogout}
-              className="rounded-full bg-rose px-3 py-1 text-[12px] text-white hover:opacity-90"
+              className="rounded-full border border-line px-3 py-1 text-sm hover:bg-hover"
             >
               去登录
             </button>
           </div>
         )}
-        <div className="text-sm">
+        {/* 昵称：账号邮箱前缀常是一串数字，问候语只认这里填的称呼 */}
+        <div className="flex items-center gap-2 text-md">
+          <span className="shrink-0 text-muted">昵称</span>
+          <input
+            value={nick}
+            onChange={(e) => setNickDraft(e.target.value)}
+            onBlur={() => onNickname(nick)}
+            placeholder="留空则首页只显示问候语"
+            className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-base outline-none focus:border-accent"
+          />
+        </div>
+        <div className="text-md">
           AI 服务：
           {hasKey ? (
-            <span className="text-rose">已就绪 ✓（随账号自动配置）</span>
+            <span className="text-accent">已就绪 ✓（随账号自动配置）</span>
           ) : (
             <span className="text-muted">登录后自动配置</span>
           )}
         </div>
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-2 text-md">
           <span className="shrink-0 text-muted">服务器</span>
           <input
             value={apiBase}
             onChange={(e) => setApiBase(e.target.value)}
             onBlur={() => window.api.settings.setApiBase(apiBase)}
-            className="flex-1 rounded-lg border border-line bg-bg px-3 py-1.5 font-mono text-[12px] outline-none focus:border-rose"
+            className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
           />
         </div>
       </div>
@@ -422,15 +471,15 @@ function SettingsPage({
 
       <RoutesCard />
 
-      <div className="mb-6 max-w-xl space-y-3 rounded-2xl border border-line bg-card p-6">
-        <div className="text-sm font-medium">遇到问题？</div>
-        <div className="text-[12px] text-muted">导出诊断报告（环境信息 + 最近日志，已自动去除密钥），发给管理员即可远程排查。</div>
+      <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
+        <div className="text-md font-medium">遇到问题？</div>
+        <div className="text-sm text-muted">导出诊断报告（环境信息 + 最近日志，已自动去除密钥），发给管理员即可远程排查。</div>
         <button
           onClick={async () => {
             await window.api.diag.export()
             ui.toast('诊断报告已导出到桌面')
           }}
-          className="rounded-full border border-line px-4 py-1.5 text-[13px] hover:bg-rose-soft"
+          className="rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover"
         >
           导出诊断报告到桌面
         </button>

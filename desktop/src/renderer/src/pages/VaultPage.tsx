@@ -6,14 +6,14 @@ import ForceGraph2D from 'react-force-graph-2d'
 import { FastMarkdown } from '../components/Markdown'
 import { VaultWizard } from '../components/VaultWizard'
 import { ui } from '../components/ui'
-import { X } from 'lucide-react'
+import { X, Inbox, MoveUpLeft } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
+import { GRAPH_GROUP_TOKENS, token } from '../theme'
 
-const GROUP_COLORS = ['#e25484', '#ba8c1e', '#4a76be', '#589860', '#8c6bb8', '#c96a4a', '#5aa7a7']
 const colorOf = (group: string): string => {
   let h = 0
   for (const c of group) h = (h * 31 + c.charCodeAt(0)) % 9973
-  return GROUP_COLORS[h % GROUP_COLORS.length]
+  return token(GRAPH_GROUP_TOKENS[h % GRAPH_GROUP_TOKENS.length])
 }
 
 /** 超过该长度改走 marked 快速渲染（remark 管线解析大表会卡界面 2-4 秒；marked 快一个数量级） */
@@ -31,7 +31,7 @@ export default function VaultPage() {
   }, [])
 
   if (loading)
-    return <div className="flex h-full items-center justify-center text-sm text-muted">正在索引你的库…</div>
+    return <div className="flex h-full items-center justify-center text-md text-muted">正在索引你的库…</div>
   if (!vault)
     return (
       <div className="flex h-full flex-col items-center justify-center">
@@ -52,6 +52,7 @@ const STAGE_ZH: Record<string, string> = {
   archive: '归档',
   spawn: '引擎启动',
   done: '完成',
+  cloud_sync: '上云', // 缺这条时日志里会直接漏出英文 stage id
 }
 
 function useInbox(onDone?: (files: string[]) => void, onEnd?: (ok: boolean) => void) {
@@ -82,35 +83,88 @@ function useInbox(onDone?: (files: string[]) => void, onEnd?: (ok: boolean) => v
   return { events, running }
 }
 
+/** 进度条用的主流程阶段（末尾"上云"是 M4 追加的第 6 段，未登录时会 skipped） */
+const FLOW: Array<[string, string]> = [
+  ['convert', '转换'],
+  ['pii_guard', 'PII守卫'],
+  ['tag_llm', '智能打标'],
+  ['sensitive_enrich', '实体建链'],
+  ['gen_moc', '索引重建'],
+  ['cloud_sync', '上云'],
+]
+
+/** 从事件流推出「第几段 / 共几段」——阶段来一条推一格，宽度变化交给 CSS 过渡 */
+function flowProgress(events: InboxEvent[]): { done: number; total: number; label: string; failed: boolean } {
+  const total = FLOW.length
+  let done = 0
+  let label = ''
+  let failed = false
+  for (const ev of events) {
+    if (ev.type !== 'stage' || !ev.stage) continue
+    const i = FLOW.findIndex(([k]) => k === ev.stage)
+    if (i < 0) continue
+    if (ev.status === 'error') failed = true
+    done = Math.max(done, i + 1)
+    label = FLOW[i][1]
+  }
+  return { done, total, label, failed }
+}
+
 function InboxPanel({ events, running, onClose }: { events: InboxEvent[]; running: boolean; onClose: () => void }) {
-  const dot = (s?: string): string =>
-    s === 'ok' ? 'bg-emerald-500' : s === 'error' ? 'bg-red-500' : 'bg-line'
+  const dot = (s?: string): string => (s === 'ok' ? 'bg-ok' : s === 'error' ? 'bg-danger' : 'bg-line')
+  const { done, total, label, failed } = flowProgress(events)
+  const pct = running || done > 0 ? Math.round((done / total) * 100) : 0
+  // 日志区跟着最新一条走：不然跑到一半新阶段全在折叠线以下，看着像卡住不动
+  const logRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const el = logRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  }, [events])
   return (
-    <div className="absolute bottom-4 right-4 z-20 w-80 rounded-2xl border border-line bg-card shadow-lg">
+    <div className="slide-in-right absolute bottom-4 right-4 z-20 w-80 rounded-xl border border-line bg-card shadow-pop">
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
-        <div className="text-sm font-medium">
-          投递箱 {running && <span className="text-[11px] text-rose">处理中…</span>}
+        <div className="text-md font-medium">
+          投递箱 {running && <span className="text-xs text-accent">处理中…</span>}
         </div>
-        <div className="flex gap-2 text-[12px]">
+        <div className="flex gap-2 text-sm">
           {!running && (
-            <button onClick={() => window.api.inbox.runNow()} className="text-muted hover:text-rose">
+            <button onClick={() => window.api.inbox.runNow()} className="text-muted hover:text-accent">
               立即处理
             </button>
           )}
-          <button onClick={onClose} className="text-muted hover:text-rose">
+          <button onClick={onClose} className="text-muted hover:text-accent">
             ✕
           </button>
         </div>
       </div>
-      <div className="max-h-64 overflow-auto px-4 py-2">
+      {/* 阶段进度条：过去只有一串日志行，看不出"还剩几步"，跑长任务时体感像卡死 */}
+      {(running || done > 0) && (
+        <div className="border-b border-line px-4 py-2.5">
+          <div className="mb-1.5 flex items-center justify-between text-xs text-muted">
+            <span>{failed ? '有阶段失败' : label || '准备中'}</span>
+            <span>
+              {done}/{total}
+            </span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-line">
+            <div
+              className={`inbox-bar-fill h-full rounded-full ${failed ? 'bg-danger' : 'bg-accent'} ${
+                running && !failed ? 'inbox-bar-running' : ''
+              }`}
+              style={{ width: `${Math.max(pct, running ? 6 : 0)}%` }}
+            />
+          </div>
+        </div>
+      )}
+      <div ref={logRef} className="max-h-64 overflow-auto px-4 py-2">
         {events.length === 0 ? (
-          <div className="py-3 text-[12px] text-muted">
+          <div className="py-3 text-sm text-muted">
             把文件拖进窗口，或在 Finder 里丢进投递箱目录，自动转换/打标/建链
           </div>
         ) : (
           events.map((ev, i) => (
-            <div key={i} className="flex items-center gap-2 py-1 text-[12px]">
-              <span className={`h-2 w-2 rounded-full ${ev.type === 'file-added' ? 'bg-rose' : dot(ev.status)}`} />
+            <div key={i} className="fade-up flex items-center gap-2 py-1 text-sm">
+              <span className={`h-2 w-2 shrink-0 rounded-full ${ev.type === 'file-added' ? 'bg-accent' : dot(ev.status)}`} />
               {ev.type === 'file-added' ? (
                 <span className="truncate">收到 {ev.file}</span>
               ) : (
@@ -121,13 +175,43 @@ function InboxPanel({ events, running, onClose }: { events: InboxEvent[]; runnin
                   {ev.status === 'skipped' && (
                     <span className="text-muted">（{ev.stage === 'convert' ? '本批已在分流完成' : '跳过'}）</span>
                   )}
-                  {ev.status === 'error' && <span className="text-red-600"> 失败：{ev.message}</span>}
+                  {ev.status === 'error' && <span className="text-danger"> 失败：{ev.message}</span>}
                   {ev.stage === 'init' && ev.pending != null && <span className="text-muted"> · {ev.pending} 个文件</span>}
                 </span>
               )}
             </div>
           ))
         )}
+      </div>
+    </div>
+  )
+}
+
+const countNotes = (nodes: VaultTreeNode[]): number =>
+  nodes.reduce((n, x) => n + (x.children ? countNotes(x.children) : 1), 0)
+
+/** 空库引导：替代"什么都没有"的中间区域，把用户指向投递箱入口 */
+function EmptyVaultGuide({ onOpenInbox }: { onOpenInbox: () => void }) {
+  return (
+    <div className="fade-up relative flex flex-1 flex-col items-center justify-center px-8">
+      {/* 指向左上角「投递箱」入口的视觉引导 */}
+      <div className="absolute left-6 top-4 flex items-center gap-1.5 text-xs text-accent">
+        <MoveUpLeft size={14} />
+        左上角「投递箱」可随时看处理进度
+      </div>
+      <div className="flex w-full max-w-md flex-col items-center rounded-xl border border-dashed border-accent-line bg-sidebar px-8 py-10 text-center">
+        <Inbox size={28} className="mb-3 text-accent" />
+        <div className="text-xl font-medium">拖入你的第一份资料试试</div>
+        <div className="mt-2 text-md leading-base text-muted">
+          把 Word / PPT / Excel / PDF 直接拖进这个窗口，投递箱会自动转成笔记、打标建链，
+          之后就能被 AI 检索到。
+        </div>
+        <button
+          onClick={onOpenInbox}
+          className="mt-5 flex items-center gap-1.5 rounded-full border border-line bg-card px-4 py-1.5 text-base hover:bg-hover"
+        >
+          <Inbox size={14} /> 打开投递箱
+        </button>
       </div>
     </div>
   )
@@ -170,14 +254,27 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [dragOver, setDragOver] = useState(false)
 
+  // 从 Finder 直接丢进投递箱目录时没人开过面板，跑完那一刻面板会"啪"地消失、
+  // 用户根本看不到结果。开跑就把面板钉住，结束后由上面的 4 秒计时器收起
+  useEffect(() => {
+    if (inboxRunning) setShowInbox(true)
+  }, [inboxRunning])
+
   const setGraphVisible = (v: boolean): void => {
     localStorage.setItem('vault.showGraph', v ? '1' : '0')
     setShowGraph(v)
   }
 
+  const [treeLoaded, setTreeLoaded] = useState(false)
   const refreshTree = useCallback(() => {
-    window.api.vault.tree().then(setTree)
+    window.api.vault.tree().then((t) => {
+      setTree(t)
+      setTreeLoaded(true)
+    })
   }, [])
+  // 空库：一篇笔记都没有时中间区域给引导，而不是一片空白的图谱。
+  // 用树里的叶子（= 笔记，原件不进树）计数，入库成功后 watcher 刷新树，引导自动消失
+  const vaultEmpty = treeLoaded && countNotes(tree) === 0 && !current
 
   useEffect(() => {
     if (pendingNote.path) {
@@ -280,24 +377,24 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
       onDrop={(e) => void doEnqueue(e)}
     >
       {dragOver && (
-        <div className="absolute inset-0 z-30 flex gap-3 bg-black/20 p-6">
+        <div className="absolute inset-0 z-30 flex gap-3 bg-overlay p-6">
           <div
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => void doEnqueue(e)}
-            className="flex flex-1 flex-col items-center justify-center rounded-2xl border-4 border-dashed border-rose bg-rose-soft/90 text-rose"
+            className="flex flex-1 flex-col items-center justify-center rounded-xl border-4 border-dashed border-accent bg-accent-soft text-accent"
           >
             <div className="text-xl font-semibold">业务资料</div>
-            <div className="mt-2 text-[13px] opacity-80">公司文件 · 智能打标 → 80_Library</div>
+            <div className="mt-2 text-base opacity-80">公司文件 · 智能打标 → 80_Library</div>
           </div>
           {routes.map((r) => (
             <div
               key={r.name}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => void doEnqueue(e, r.name)}
-              className="flex flex-1 flex-col items-center justify-center rounded-2xl border-4 border-dashed border-line bg-card/95 text-ink"
+              className="flex flex-1 flex-col items-center justify-center rounded-xl border-4 border-dashed border-line bg-card text-ink"
             >
               <div className="text-xl font-semibold">{r.name}</div>
-              <div className="mt-2 text-[13px] text-muted">主题打标 · 概念建链 → {r.dest}/</div>
+              <div className="mt-2 text-base text-muted">主题打标 · 概念建链 → {r.dest}/</div>
             </div>
           ))}
         </div>
@@ -306,32 +403,39 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         <InboxPanel events={inboxEvents} running={inboxRunning} onClose={() => setShowInbox(false)} />
       )}
       {/* 分区树 */}
-      <div className="flex w-72 shrink-0 flex-col border-r border-line">
+      <div className="flex w-tree shrink-0 flex-col border-r border-line">
         <div className="border-b border-line p-3">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索库…"
-            className="w-full rounded-lg border border-line bg-card px-3 py-1.5 text-sm outline-none focus:border-rose"
+            className="w-full rounded-md border border-line bg-card px-3 py-1.5 text-md outline-none focus:border-accent"
           />
-          <div className="mt-2 flex items-center justify-between text-[11px] text-muted">
-            <span>{vault.noteCount} 篇笔记</span>
+          <div className="mt-2 flex items-center justify-between text-xs text-muted">
+            <span>{countNotes(tree) || vault.noteCount} 篇笔记</span>
             <span className="flex gap-2">
+              {/* 空库时给投递箱入口加个描边，和中间区域的引导箭头对上 */}
               <button
                 onClick={() => setShowInbox((s) => !s)}
-                className={inboxRunning ? 'text-rose' : 'hover:text-rose'}
+                className={
+                  inboxRunning
+                    ? 'text-accent'
+                    : vaultEmpty
+                      ? 'rounded-full border border-accent-line px-2 text-accent'
+                      : 'hover:text-accent'
+                }
               >
                 投递箱{inboxRunning ? '·忙' : ''}
               </button>
-              <button onClick={createNote} className="hover:text-rose">
+              <button onClick={createNote} className="hover:text-accent">
                 ＋新建
               </button>
-              {!showGraph && (
-                <button onClick={() => setGraphVisible(true)} className="hover:text-rose">
+              {!showGraph && !vaultEmpty && (
+                <button onClick={() => setGraphVisible(true)} className="hover:text-accent">
                   图谱
                 </button>
               )}
-              <button onClick={onSwitch} className="hover:text-rose">
+              <button onClick={onSwitch} className="hover:text-accent">
                 换库
               </button>
             </span>
@@ -343,10 +447,10 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
               <button
                 key={h.path}
                 onClick={() => openNote(h.path)}
-                className="mb-1 w-full rounded-lg bg-card p-2 text-left hover:bg-rose-soft"
+                className="mb-1 w-full rounded-lg bg-card p-2 text-left hover:bg-accent-soft"
               >
-                <div className="text-[13px] font-medium">{h.title}</div>
-                <div className="line-clamp-2 text-[11px] text-muted">{h.snippet}</div>
+                <div className="text-base font-medium">{h.title}</div>
+                <div className="line-clamp-2 text-xs text-muted">{h.snippet}</div>
               </button>
             ))
           ) : (
@@ -369,8 +473,10 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         </div>
       )}
 
-      {/* 关系图：无笔记打开时占满右侧，有笔记时缩为侧栏（可关闭） */}
-      {showGraph ? (
+      {/* 空库优先给引导；否则关系图：无笔记打开时占满右侧，有笔记时缩为侧栏（可关闭） */}
+      {vaultEmpty ? (
+        <EmptyVaultGuide onOpenInbox={() => setShowInbox(true)} />
+      ) : showGraph ? (
         <GraphPanel
           expanded={!current}
           currentRef={currentRef}
@@ -379,9 +485,9 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         />
       ) : (
         !current && (
-          <div className="flex flex-1 items-center justify-center text-sm text-muted">
+          <div className="flex flex-1 items-center justify-center text-md text-muted">
             选择左侧笔记，或
-            <button onClick={() => setGraphVisible(true)} className="ml-1 text-rose hover:underline">
+            <button onClick={() => setGraphVisible(true)} className="ml-1 text-accent hover:underline">
               打开关系图
             </button>
           </div>
@@ -413,7 +519,7 @@ function Tree({
           <div key={n.path}>
             <button
               onClick={() => onToggle(n.path)}
-              className="w-full rounded px-2 py-1 text-left text-[13px] text-ink/80 hover:bg-black/[0.03]"
+              className="w-full rounded px-2 py-1 text-left text-base text-ink-soft hover:bg-hover"
               style={{ paddingLeft: 8 + depth * 14 }}
             >
               {expanded.has(n.path) ? '▾' : '▸'} {n.name}
@@ -426,8 +532,8 @@ function Tree({
           <button
             key={n.path}
             onClick={() => onOpen(n.path)}
-            className={`block w-full truncate rounded px-2 py-1 text-left text-[13px] ${
-              current === n.path ? 'bg-rose-soft text-rose' : 'text-ink/70 hover:bg-black/[0.03]'
+            className={`block w-full truncate rounded px-2 py-1 text-left text-base ${
+              current === n.path ? 'bg-accent-soft text-accent' : 'text-ink-soft hover:bg-hover'
             }`}
             style={{ paddingLeft: 22 + depth * 14 }}
           >
@@ -501,13 +607,13 @@ function NoteView({
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b border-line px-8 py-2.5">
-        <div className="truncate text-sm font-medium">{note.title}</div>
-        <div className="flex gap-2 text-[12px]">
+        <div className="truncate text-md font-medium">{note.title}</div>
+        <div className="flex gap-2 text-sm">
           {editing ? (
             <>
               <button
                 onClick={save}
-                className={`rounded-full px-3 py-1 ${dirty ? 'bg-rose text-white' : 'border border-line text-muted'}`}
+                className={`rounded-full px-3 py-1 ${dirty ? 'bg-accent text-on-solid' : 'border border-line text-muted'}`}
               >
                 保存
               </button>
@@ -516,14 +622,14 @@ function NoteView({
                   if (dirty && !(await ui.confirm({ title: '放弃未保存的修改？', danger: true, okText: '放弃' }))) return
                   setEditing(false)
                 }}
-                className="rounded-full border border-line px-3 py-1 hover:bg-rose-soft"
+                className="rounded-full border border-line px-3 py-1 hover:bg-accent-soft"
               >
                 取消
               </button>
             </>
           ) : (
             <>
-              <button onClick={startEdit} className="rounded-full border border-line px-3 py-1 hover:bg-rose-soft">
+              <button onClick={startEdit} className="rounded-full border border-line px-3 py-1 hover:bg-accent-soft">
                 编辑
               </button>
               <button
@@ -538,14 +644,14 @@ function NoteView({
                     ui.toast(String(e), 'error')
                   }
                 }}
-                className="rounded-full border border-line px-3 py-1 hover:bg-rose-soft"
+                className="rounded-full border border-line px-3 py-1 hover:bg-accent-soft"
               >
                 重命名
               </button>
-              <button onClick={onDelete} className="rounded-full border border-line px-3 py-1 text-muted hover:text-rose">
+              <button onClick={onDelete} className="rounded-full border border-line px-3 py-1 text-muted hover:text-accent">
                 删除
               </button>
-              <button onClick={onClose} title="关闭文件" className="flex items-center rounded-full border border-line px-2.5 py-1 text-muted hover:text-rose">
+              <button onClick={onClose} title="关闭文件" className="flex items-center rounded-full border border-line px-2.5 py-1 text-muted hover:text-accent">
                 <X size={13} />
               </button>
             </>
@@ -567,7 +673,7 @@ function NoteView({
             }
           }}
           spellCheck={false}
-          className="flex-1 resize-none bg-bg px-8 py-5 font-mono text-[13px] leading-6 outline-none"
+          className="flex-1 resize-none bg-bg px-8 py-5 font-mono text-base leading-6 outline-none"
         />
       ) : (
         <div className="flex-1 overflow-auto">
@@ -575,7 +681,7 @@ function NoteView({
             {fmEntries.length > 0 && (
               <div className="mb-5 overflow-hidden rounded-xl border border-line">
                 {fmEntries.map(([k, v]) => (
-                  <div key={k} className="flex border-b border-line text-[12px] last:border-0">
+                  <div key={k} className="flex border-b border-line text-sm last:border-0">
                     <div className="w-32 shrink-0 bg-sidebar px-3 py-1.5 text-muted">{k}</div>
                     <div className="px-3 py-1.5">{Array.isArray(v) ? v.join(' / ') : String(v)}</div>
                   </div>
@@ -583,7 +689,7 @@ function NoteView({
               </div>
             )}
             {emptyBody ? (
-              <div className="rounded-xl bg-sidebar px-4 py-3 text-[13px] text-muted">
+              <div className="rounded-xl bg-sidebar px-4 py-3 text-base text-muted">
                 该笔记只有属性、没有正文（模板类文件常见）。点右上角「编辑」可添加内容。
               </div>
             ) : oversize ? (
@@ -695,10 +801,10 @@ const GraphPanel = memo(function GraphPanel({
       ctx.globalAlpha = dimmed ? 0.1 : 1
       ctx.beginPath()
       ctx.arc(node.x!, node.y!, r, 0, 2 * Math.PI)
-      ctx.fillStyle = isCurrent || isHovered ? '#e25484' : colorOf(String(node.group ?? ''))
+      ctx.fillStyle = isCurrent || isHovered ? token('--color-accent') : colorOf(String(node.group ?? ''))
       ctx.fill()
       if (isCurrent || isHovered) {
-        ctx.strokeStyle = '#e25484'
+        ctx.strokeStyle = token('--color-accent')
         ctx.lineWidth = 1.5 / globalScale
         ctx.beginPath()
         ctx.arc(node.x!, node.y!, r + 2.5 / globalScale, 0, 2 * Math.PI)
@@ -709,10 +815,10 @@ const GraphPanel = memo(function GraphPanel({
       if (showLabel) {
         const label = String(node.name ?? '')
         const fontSize = isHovered ? Math.max(12 / globalScale, 4) : Math.min(11 / globalScale, 6)
-        ctx.font = `${isHovered ? 'bold ' : ''}${fontSize}px PingFang SC, sans-serif`
+        ctx.font = `${isHovered ? 'bold ' : ''}${fontSize}px ${token('--font-sans')}`
         ctx.textAlign = 'center'
         ctx.textBaseline = 'top'
-        ctx.fillStyle = dimmed ? 'rgba(61,57,47,0.1)' : 'rgba(61,57,47,0.85)'
+        ctx.fillStyle = dimmed ? token('--color-graph-label-dim') : token('--color-graph-label')
         ctx.fillText(label.length > 12 ? label.slice(0, 12) + '…' : label, node.x!, node.y! + r + 1.5)
       }
       ctx.globalAlpha = 1
@@ -733,15 +839,15 @@ const GraphPanel = memo(function GraphPanel({
   }
 
   return (
-    <div className={`flex shrink-0 flex-col border-l border-line ${expanded ? 'flex-1' : 'w-[360px]'}`}>
+    <div className={`flex shrink-0 flex-col border-l border-line ${expanded ? 'flex-1' : 'w-graph-panel'}`}>
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
-        <div className="text-sm font-medium">
+        <div className="text-md font-medium">
           关系图{' '}
-          <span className="text-[11px] font-normal text-muted">
+          <span className="text-xs font-normal text-muted">
             {data.nodes.length} 节点 · {data.links.length} 边 · 滚轮缩放显示标签
           </span>
         </div>
-        <button onClick={onClose} title="关闭关系图" className="rounded p-1 text-muted hover:text-rose">
+        <button onClick={onClose} title="关闭关系图" className="rounded p-1 text-muted hover:text-accent">
           <X size={14} />
         </button>
       </div>
@@ -750,7 +856,7 @@ const GraphPanel = memo(function GraphPanel({
           width={size.w}
           height={size.h}
           graphData={data}
-          backgroundColor="#faf9f5"
+          backgroundColor={token('--color-graph-bg')}
           nodeLabel="name"
           autoPauseRedraw={false}
           nodeCanvasObject={drawNode}
@@ -761,7 +867,11 @@ const GraphPanel = memo(function GraphPanel({
             ctx.fill()
           }}
           linkColor={(l: GLink) =>
-            linkTouchesHover(l) ? '#e25484' : hoverRef.current ? 'rgba(220,215,201,0.25)' : '#dcd7c9'
+            linkTouchesHover(l)
+              ? token('--color-accent')
+              : hoverRef.current
+                ? token('--color-graph-link-dim')
+                : token('--color-graph-link')
           }
           linkWidth={(l: GLink) => (linkTouchesHover(l) ? 1.8 : 1)}
           onNodeHover={(n: GNode | null) => {
