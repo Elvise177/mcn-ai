@@ -11,6 +11,7 @@ import type { VaultNote, VaultTreeNode, GraphData, SearchHit } from './types'
 export class VaultManager {
   private root: string | null = null
   private notes = new Map<string, VaultNote>()
+  private dirs = new Set<string>()
   private searcher = new VaultSearcher()
   private watcher: FSWatcher | null = null
   private win: BrowserWindow | null = null
@@ -30,8 +31,9 @@ export class VaultManager {
     }
     await this.close()
     this.root = root
-    const { notes, bodies } = await scanVault(root)
+    const { notes, bodies, dirs } = await scanVault(root)
     this.notes = notes
+    this.dirs = dirs
     // 检索索引后台构建，不阻塞界面打开
     this.searcher.rebuild(notes, bodies)
     this.startWatcher()
@@ -40,27 +42,43 @@ export class VaultManager {
 
   private startWatcher(): void {
     if (!this.root) return
-    this.watcher = chokidar.watch('**/*.md', {
+    // 监听整库（不再只盯 md）：目录与原文件的增删也要反映到文件树
+    // 追加隐藏文件/目录忽略（.checkpoint.jsonl 等 pipeline 内部文件不进树，与初始扫描 dot:false 对齐）
+    this.watcher = chokidar.watch('.', {
       cwd: this.root,
-      ignored: IGNORE,
+      ignored: [...IGNORE, /(^|[/\\])\../],
       ignoreInitial: true,
       awaitWriteFinish: { stabilityThreshold: 800, pollInterval: 100 },
     })
+    const isMd = (p: string): boolean => p.toLowerCase().endsWith('.md')
     const onUpsert = async (rel: string): Promise<void> => {
-      if (!this.root) return
+      if (!this.root || !isMd(rel)) return // 原件不进树，非 md 变更不刷新
       const r = await parseNote(this.root, join(this.root, rel))
       if (r) {
         this.notes.set(r.note.path, r.note)
         this.searcher.upsert(r.note, r.raw)
-        this.notify(r.note.path)
+        this.notify(rel)
       }
     }
     this.watcher.on('add', onUpsert)
     this.watcher.on('change', onUpsert)
     this.watcher.on('unlink', (rel: string) => {
+      if (!isMd(rel)) return
       this.notes.delete(rel)
       this.searcher.remove(rel)
       this.notify(rel)
+    })
+    this.watcher.on('addDir', (rel: string) => {
+      if (rel) {
+        this.dirs.add(rel)
+        this.notify(rel)
+      }
+    })
+    this.watcher.on('unlinkDir', (rel: string) => {
+      if (rel) {
+        this.dirs.delete(rel)
+        this.notify(rel)
+      }
     })
   }
 
@@ -72,11 +90,12 @@ export class VaultManager {
     await this.watcher?.close()
     this.watcher = null
     this.notes.clear()
+    this.dirs.clear()
     this.root = null
   }
 
   tree(): VaultTreeNode[] {
-    return buildTree(this.notes)
+    return buildTree(this.notes, this.dirs)
   }
 
   graph(): GraphData {

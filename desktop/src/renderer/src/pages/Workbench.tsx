@@ -193,9 +193,18 @@ function InputBox({
   streaming: boolean
   wide?: boolean
 }) {
+  // 高度跟随实际内容（含自动折行）：rows 按 \n 计数会漏掉软换行，长句折行时上一行被顶出视野
+  const taRef = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    const el = taRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = Math.min(el.scrollHeight, 128) + 'px'
+  }, [value])
   return (
     <div className={`flex items-end gap-2 rounded-2xl border-2 border-line bg-card px-4 py-3 focus-within:border-rose ${wide ? 'w-full max-w-2xl' : ''}`}>
       <textarea
+        ref={taRef}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
@@ -204,9 +213,9 @@ function InputBox({
             onSend()
           }
         }}
-        rows={Math.min(4, value.split('\n').length)}
+        rows={1}
         placeholder='问你的库，或说"把XX做成PPT"…'
-        className="max-h-32 flex-1 resize-none bg-transparent text-[14px] leading-6 outline-none"
+        className="max-h-32 flex-1 resize-none overflow-y-auto bg-transparent text-[14px] leading-6 outline-none"
       />
       {streaming ? (
         <button

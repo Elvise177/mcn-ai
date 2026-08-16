@@ -60,16 +60,22 @@ export async function parseNote(
   }
 }
 
-/** 全库扫描：单次读文件（索引与检索共用 raw），并发 64 */
+/** 全库扫描：单次读文件（索引与检索共用 raw），并发 64。
+ *  同时收集目录——文件树按磁盘真实文件夹展示（Obsidian 一致），
+ *  否则「只有原文件、没生成 md」的文件夹（如拖入视频/压缩包）在界面里永远看不到。
+ *  原件本身不进树（0号用户 2026-07-24：太多太乱），要看原件去 Finder 或笔记内链接。 */
 export async function scanVault(
   root: string
-): Promise<{ notes: Map<string, VaultNote>; bodies: Map<string, string> }> {
-  const files = await fg('**/*.md', { cwd: root, ignore: IGNORE, absolute: true, dot: false })
+): Promise<{ notes: Map<string, VaultNote>; bodies: Map<string, string>; dirs: Set<string> }> {
+  const [mdFiles, dirList] = await Promise.all([
+    fg('**/*.md', { cwd: root, ignore: IGNORE, absolute: true, dot: false }),
+    fg('**', { cwd: root, ignore: IGNORE, onlyDirectories: true, dot: false }),
+  ])
   const notes = new Map<string, VaultNote>()
   const bodies = new Map<string, string>()
   const CONCURRENCY = 64
-  for (let i = 0; i < files.length; i += CONCURRENCY) {
-    const batch = await Promise.all(files.slice(i, i + CONCURRENCY).map((f) => parseNote(root, f)))
+  for (let i = 0; i < mdFiles.length; i += CONCURRENCY) {
+    const batch = await Promise.all(mdFiles.slice(i, i + CONCURRENCY).map((f) => parseNote(root, f)))
     for (const r of batch) {
       if (r) {
         notes.set(r.note.path, r.note)
@@ -77,7 +83,8 @@ export async function scanVault(
       }
     }
   }
-  return { notes, bodies }
+  const dirs = new Set(dirList.map((d) => d.replace(/\/$/, '')))
+  return { notes, bodies, dirs }
 }
 
 export async function readNoteBody(
@@ -93,7 +100,7 @@ export async function readNoteBody(
   }
 }
 
-export function buildTree(notes: Map<string, VaultNote>): VaultTreeNode[] {
+export function buildTree(notes: Map<string, VaultNote>, dirs: Set<string> = new Set()): VaultTreeNode[] {
   const rootNodes: VaultTreeNode[] = []
   const dirMap = new Map<string, VaultTreeNode>()
 
@@ -109,8 +116,10 @@ export function buildTree(notes: Map<string, VaultNote>): VaultTreeNode[] {
     return node.children!
   }
 
-  const sorted = [...notes.keys()].sort()
-  for (const p of sorted) {
+  // 先登记所有目录——空目录 / 只含原文件的目录也要出现
+  for (const d of [...dirs].sort()) ensureDir(d)
+
+  for (const p of [...notes.keys()].sort()) {
     const dir = p.split(sep).slice(0, -1).join(sep)
     ensureDir(dir).push({ name: basename(p, '.md'), path: p })
   }

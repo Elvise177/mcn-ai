@@ -115,8 +115,12 @@ function InboxPanel({ events, running, onClose }: { events: InboxEvent[]; runnin
                 <span className="truncate">收到 {ev.file}</span>
               ) : (
                 <span className="truncate">
-                  {STAGE_ZH[ev.stage ?? ''] ?? ev.stage}
-                  {ev.status === 'skipped' && <span className="text-muted">（跳过）</span>}
+                  {ev.stage?.startsWith('route_')
+                    ? `外部资料转换 · ${ev.stage.slice(6)}`
+                    : (STAGE_ZH[ev.stage ?? ''] ?? ev.stage)}
+                  {ev.status === 'skipped' && (
+                    <span className="text-muted">（{ev.stage === 'convert' ? '本批已在分流完成' : '跳过'}）</span>
+                  )}
                   {ev.status === 'error' && <span className="text-red-600"> 失败：{ev.message}</span>}
                   {ev.stage === 'init' && ev.pending != null && <span className="text-muted"> · {ev.pending} 个文件</span>}
                 </span>

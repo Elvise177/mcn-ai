@@ -84,6 +84,14 @@ try {
   if (await chatInput.count()) {
     await chatInput.fill('灰太太最近的数据怎么样？')
     await snap('01c-工作台-输入态', 400)
+    // 回归 2026-07-24：长句自动折行时输入框要跟着长高（旧版 rows 只数 \n，折行后上一行被顶没）
+    const h1 = await chatInput.evaluate((el) => el.clientHeight)
+    await chatInput.fill('这是一段很长的输入用来测试自动折行时输入框会不会自动长高'.repeat(4))
+    await win.waitForTimeout(300)
+    const h2 = await chatInput.evaluate((el) => el.clientHeight)
+    if (h2 <= h1) throw new Error(`输入框折行未长高：${h1} → ${h2}`)
+    await snap('01c2-输入框折行自动长高', 300)
+    await chatInput.fill('灰太太最近的数据怎么样？')
     if (process.env.E2E_CHAT === '1') {
       await chatInput.press('Enter')
       await snap('01d-工作台-流式中', 6000)
@@ -170,6 +178,36 @@ try {
           const extMd = join(settings.vaultPath, '70_外部资料', 'e2e参考书籍.md')
           if (!existsSync(extMd)) throw new Error('外部资料分流失败：' + extMd + ' 未生成')
           console.log('外部资料分流 ✓ →', extMd)
+
+          // 回归 2026-07-23：文件树必须显示真实文件夹（含无 md 的文件夹）
+          // 客户报障——外部资料文件夹在磁盘上有、app 里看不到，因为旧版树只由 md 建
+          // 2026-07-24 0号用户：原件不进树（太多太乱），只显示文件夹和笔记
+          const { writeFileSync } = await import('fs')
+          const noMdDir = join(settings.vaultPath, '70_外部资料', 'e2e视频课')
+          const { mkdirSync } = await import('fs')
+          mkdirSync(noMdDir, { recursive: true })
+          writeFileSync(join(noMdDir, 'e2e某老师直播.mp4'), Buffer.alloc(2048))
+          await win.waitForTimeout(1500) // 等 watcher addDir 冒泡刷新树
+          const treeHasExt = await win.evaluate(async () => {
+            const t = await window.api.vault.tree()
+            const flat = []
+            const walk = (ns) => ns.forEach((n) => { flat.push(n); if (n.children) walk(n.children) })
+            walk(t)
+            const extNode = flat.find((n) => n.name.includes('外部资料') && n.children)
+            const videoDir = flat.find((n) => n.name === 'e2e视频课' && n.children)
+            const originals = flat.filter((n) => !n.children && /\.(docx|pptx|xlsx|pdf|mp4|jsonl)$/i.test(n.name)).map((n) => n.name)
+            const hidden = flat.filter((n) => n.name.startsWith('.')).map((n) => n.name)
+            return { ext: !!extNode, videoDir: !!videoDir, originals, hidden }
+          })
+          if (!treeHasExt.ext) throw new Error('文件树未显示 外部资料 文件夹')
+          if (!treeHasExt.videoDir) throw new Error('文件树未显示 无md的子文件夹 e2e视频课')
+          if (treeHasExt.originals.length) throw new Error('文件树不应显示原件：' + treeHasExt.originals.slice(0, 5).join(', '))
+          if (treeHasExt.hidden.length) throw new Error('文件树混入隐藏文件：' + treeHasExt.hidden.join(', '))
+          // 树里展开外部资料并截图，人工复核
+          const extBtn = win.locator('button:has-text("外部资料")').first()
+          if (await extBtn.count()) await extBtn.click()
+          await snap('06c-文件树显示外部资料文件夹', 600)
+          console.log('文件树 ✓（外部资料/无md子文件夹可见；原件与隐藏文件不显示）')
         }
         break
       }
