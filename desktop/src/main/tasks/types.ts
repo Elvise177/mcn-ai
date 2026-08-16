@@ -6,7 +6,7 @@
  *  - Condition 长期存在、没有终态，只有"当前是什么样"（云端连接状态）
  */
 
-export type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync'
+export type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
 /** 投递箱 pipeline 的阶段事件（原来定义在 orchestrator，搬来这里给任务对象共用） */
@@ -74,7 +74,17 @@ export interface SyncTask extends TaskBase {
   nextRetryAt?: number
 }
 
-export type Task = InboxTask | AgentTask | IngestTask | SyncTask
+/**
+ * 密钥落盘（M-29）。safeStorage 的首次调用会同步冻住主进程数秒到一分钟，
+ * 所以写 key 不能挡在登录/保存按钮前面——它变成一条任务，界面照常可交互。
+ */
+export interface SecretTask extends TaskBase {
+  kind: 'secret'
+  /** 落盘字段名（encryptedApiKey / encryptedSession …） */
+  field: string
+}
+
+export type Task = InboxTask | AgentTask | IngestTask | SyncTask | SecretTask
 
 /** Condition：云端状况。不是任务，没有终态 */
 export interface CloudState {

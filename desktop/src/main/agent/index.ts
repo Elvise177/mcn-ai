@@ -4,7 +4,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { app, type BrowserWindow } from 'electron'
 import { z } from 'zod'
-import { store, getApiKey } from '../store'
+import { agentEnv, resolveForRequest } from '../ai/provider'
 import { vaultManager } from '../vault'
 import { searchCloud } from '../knowledge/client'
 import { pipelineBin } from '../lib/pipeline'
@@ -19,6 +19,9 @@ export interface AgentStreamPayload {
   tool?: string
   sdkSessionId?: string
   costUsd?: number
+  /** 实际服务这轮的模型名（来自 result.modelUsage）。
+      DeepSeek 官方端点遇到不认识的模型名会静默降级，只有这里能看出真相 */
+  models?: string[]
 }
 
 /** SDK 的 CLI 是平台二进制；打包后 asar 内路径无法 spawn（ENOTDIR），显式指到真实位置 */
@@ -101,7 +104,8 @@ export class AgentManager {
 3. 用户要"做成PPT/课件"时：先检索资料，再构造 outline JSON 调 render_pptx 工具；要 Word/Excel/PDF 时：先检索资料，构造 spec JSON 调 render_document 工具（format 选 docx/xlsx/pdf）。用户要求生成文件时必须真的调用渲染工具产出文件，不许只在回答里给内容。${PPT_GUIDE}
 4. 写文件只允许写入 90_产物/ 目录。用户指名要 PPT/Word/Excel/PDF 时，必须调用对应渲染工具（render_pptx / render_document）产出该格式的文件，禁止用 Write 写 markdown 代替。
 5. 回答简洁直接，重要结论在前。
-6. 重要：每轮只调用一个工具，严禁在同一轮里并行调用多个工具（网关不支持并行 tool_use，会直接报错）。需要多次检索就分多轮串行进行。`
+6. 重要：每轮只调用一个工具，严禁在同一轮里并行调用多个工具（网关不支持并行 tool_use，会直接报错）。需要多次检索就分多轮串行进行。
+7. 检索够用即止：同一个任务里 search_knowledge 最多调 3 次。素材够写就立刻动手产出（该调 render_pptx / render_document 就调），不要为了"再全一点"反复检索——轮次是有上限的，耗光了文件就产不出来。库里确实没有的内容，直接说明缺口，不要靠反复换词再搜。`
   }
 
   /** 发送一轮对话；流式事件经 agent:stream 下行 */
@@ -111,9 +115,14 @@ export class AgentManager {
       this.emit({ sessionId, kind: 'error', text: '请先在「个人知识库」打开一个库' })
       return
     }
-    const apiKey = getApiKey() || process.env.ANTHROPIC_AUTH_TOKEN
-    if (!apiKey) {
-      this.emit({ sessionId, kind: 'error', text: '请先在「设置」里配置 API Key' })
+    // provider 层给出地址/模型/key：模型显式指定，绝不依赖端点的自动映射（见 ai/provider.ts）
+    const provider = resolveForRequest()
+    if (!provider.apiKey) {
+      this.emit({ sessionId, kind: 'error', text: `请先在「设置」里配置 ${provider.label} 的 API Key` })
+      return
+    }
+    if (!provider.baseUrl) {
+      this.emit({ sessionId, kind: 'error', text: '请先在「设置」里填写自定义线路的 base URL' })
       return
     }
 
@@ -232,6 +241,7 @@ export class AgentManager {
           abortController: abort,
           cwd: root,
           resume: resumeSdkSessionId,
+          model: provider.model,
           systemPrompt: this.buildSystemPrompt(),
           allowedTools: [
             'Read', 'Grep', 'Glob',
@@ -251,23 +261,29 @@ export class AgentManager {
             return { behavior: 'deny' as const, message: `工具 ${toolName} 未开放` }
           },
           mcpServers: { knowledge },
-          maxTurns: 30,
+          // 30 轮做 PPT 偶尔不够（deepseek-v4-pro 爱反复检索，实测 4 轮冒烟里挂过 1 次
+          // 「Reached maximum number of turns」，产物直接没生成）。提到 40 留余量，
+          // 另配系统提示词第 7 条「检索最多 3 次」压住反复检索——两手一起才不容易再撞
+          maxTurns: 40,
           includePartialMessages: true,
           pathToClaudeCodeExecutable: claudeCliBin(),
           executable: process.execPath as never,
-          env: {
-            ...process.env,
-            ELECTRON_RUN_AS_NODE: '1',
-            ANTHROPIC_BASE_URL: store.get('relayBaseUrl'),
-            ANTHROPIC_AUTH_TOKEN: apiKey,
-          },
+          env: agentEnv({
+            baseUrl: provider.baseUrl,
+            apiKey: provider.apiKey,
+            model: provider.model,
+            fastModel: provider.fastModel,
+          }),
         },
       })
 
       for await (const message of q) {
         if (message.type === 'system' && message.subtype === 'init') {
           const tools = (message as { tools?: string[] }).tools ?? []
-          console.log('[agent] 可用工具:', tools.filter((t) => t.includes('knowledge')).join(', ') || tools.length)
+          console.log(
+            `[agent] provider=${provider.id} model=${provider.model} 可用工具:`,
+            tools.filter((t) => t.includes('knowledge')).join(', ') || tools.length
+          )
           continue
         }
         if (message.type === 'stream_event') {
@@ -283,6 +299,11 @@ export class AgentManager {
         }
         if (message.type === 'result') {
           const text = message.subtype === 'success' ? message.result : `出错：${message.subtype}`
+          // 服务端实际用的模型：对不上就是被端点静默换掉了（诊断日志里留一行）
+          const models = Object.keys((message as { modelUsage?: Record<string, unknown> }).modelUsage ?? {})
+          if (models.length && !models.includes(provider.model)) {
+            log('warn', 'agent', `模型被服务端替换：要的是 ${provider.model}，实际 ${models.join('/')}`)
+          }
           // 正文已经作为一条完整消息落进对话，草稿使命结束
           tasks.patch(taskId, { draft: '', toolLine: undefined, sdkSessionId: message.session_id } as Partial<AgentTask>)
           this.emit({
@@ -291,6 +312,7 @@ export class AgentManager {
             text,
             sdkSessionId: message.session_id,
             costUsd: 'total_cost_usd' in message ? message.total_cost_usd : undefined,
+            models,
           })
         }
       }

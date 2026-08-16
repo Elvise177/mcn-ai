@@ -13,6 +13,7 @@ export default defineConfig({
           'smoke-vault': resolve(__dirname, 'src/main/smoke-vault.ts'),
           'search-worker': resolve(__dirname, 'src/main/vault/search-worker.ts'),
           'smoke-chat': resolve(__dirname, 'src/main/smoke-chat.ts'),
+          'smoke-provider': resolve(__dirname, 'src/main/smoke-provider.ts'),
         },
       },
     },

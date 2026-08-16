@@ -46,17 +46,19 @@ try {
   await win.screenshot({ path: join(shots, '00b-登录门.png') })
   await win.fill('input[placeholder="邮箱"]', 'mcnai-test-a@example.com')
   await win.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
+  const tLogin = Date.now()
   await win.click('button:has-text("登录")')
-  // 登录后应直接落在对话页（＋新对话可见 + 空态问候）
-  // 登录后 provisionKeys 写 key 会撞上 M-29（safeStorage 首次写入冻主进程数分钟），
-  // 界面因此迟迟不出来——不是登录失败
-  await win.waitForSelector('button[title="新对话"]', { timeout: 600000 }).catch(() => fail('登录后未进入主界面'))
+  // 登录后应直接落在对话页（＋新对话可见 + 空态问候）。
+  // M-29 修好之后（会话与 key 的落盘都转成后台任务），这里不该再等几分钟——
+  // 90s 还进不去就是回归：写入又跑回登录这条同步路径上了
+  await win.waitForSelector('button[title="新对话"]', { timeout: 90000 }).catch(() => fail('登录后未进入主界面'))
+  console.log(`登录到进主界面 ${Date.now() - tLogin}ms`)
   const chatHome = await win.locator('text=问你的库，或直接说要做什么').count()
   if (!chatHome) await fail('登录后没有落在对话页')
   console.log('✅ 登录门登录成功，直接落在对话页')
 
-  // 2. 等下发落库：safeStorage 写 Keychain 在 macOS 上要好几秒（实测 ~6s），
-  // 固定等 4s 会偶发误判成"没下发"，改成轮询
+  // 2. 等下发落库：key 现在是先进内存（立刻可用）、再后台加密落盘，
+  // 而落盘那一下的耗时随系统缓存冷热在 8ms~60s 之间跳，所以只能轮询
   for (let i = 0; i < 30; i++) {
     s = await win.evaluate(() => window.api.settings.get())
     if (s.hasApiKey && s.hasLlmKey) break

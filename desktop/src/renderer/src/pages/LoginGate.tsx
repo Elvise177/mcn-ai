@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import logo from '../assets/logo.png'
+import { useTask } from '../hooks/useTasks'
 
 /** 启动登录门（Claude Desktop 式）：登录后自动下发 AI 配置；可跳过进入纯本地模式 */
 export default function LoginGate({
@@ -13,6 +14,10 @@ export default function LoginGate({
   const [pwd, setPwd] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
+  // M-29：登录成功后要把会话与 AI key 加密落盘，首次会很慢（系统校验应用签名）。
+  // 现在这一步是后台任务、不再挡住登录，但得让用户看见"在干嘛"，别以为卡死了
+  const secretTask = useTask('secret')
+  const saving = !!secretTask && (secretTask.status === 'running' || secretTask.status === 'queued')
 
   const submit = async (): Promise<void> => {
     if (!email.trim() || !pwd || busy) return
@@ -47,6 +52,11 @@ export default function LoginGate({
           className="w-full rounded-input border border-line bg-card px-4 py-3 text-md outline-none focus:border-accent"
         />
         {err && <div className="text-sm text-danger">{err}</div>}
+        {(busy || saving) && (
+          <div data-testid="login-saving" className="text-sm leading-5 text-muted">
+            {saving ? '正在安全保存密钥，首次可能需要较长时间（系统会校验应用签名）' : '正在登录…'}
+          </div>
+        )}
         <button
           onClick={submit}
           disabled={busy}

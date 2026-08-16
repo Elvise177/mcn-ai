@@ -9,7 +9,7 @@ import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
 import { errText } from './lib/err'
-import { startTaskSync } from './hooks/useTasks'
+import { startTaskSync, useTask } from './hooks/useTasks'
 import { TaskDock } from './components/TaskDock'
 import { OfflineBar } from './components/OfflineBar'
 
@@ -321,6 +321,116 @@ export default function App() {
   )
 }
 
+/**
+ * 模型线路（provider）：inferera 中转站 / DeepSeek 官方 / 自定义 base URL。
+ * 模型名显式可见可改——DeepSeek 官方端点对不认识的模型名是**静默降级到 flash**，
+ * 不显示出来用户永远不知道自己在用哪个模型。
+ */
+function ProviderCard({ onChanged, tick }: { onChanged: () => void; tick: number }) {
+  const [current, setCurrent] = useState<ProviderId>('inferera')
+  const [providers, setProviders] = useState<AiProvider[]>([])
+  const [draft, setDraft] = useState({ baseUrl: '', model: '', fastModel: '' })
+
+  const load = useCallback((): void => {
+    void window.api.ai.providers().then((r) => {
+      setCurrent(r.current)
+      setProviders(r.providers)
+      const active = r.providers.find((p) => p.id === r.current)
+      if (active) setDraft({ baseUrl: active.baseUrl, model: active.model, fastModel: active.fastModel })
+    })
+  }, [])
+  // tick 由设置页在「保存 key / 重新获取配置」之后 +1：否则卡片上的「未配置 key」
+  // 会一直停在挂载那一刻的状态，跟上面那行「已就绪 ✓」自相矛盾
+  useEffect(load, [load, tick])
+
+  const active = providers.find((p) => p.id === current)
+
+  const switchTo = async (id: ProviderId): Promise<void> => {
+    const r = await window.api.ai.setProvider(id)
+    setCurrent(id)
+    setDraft({ baseUrl: r.provider.baseUrl, model: r.provider.model, fastModel: r.provider.fastModel })
+    load()
+    onChanged()
+    ui.toast(`已切换到「${r.provider.label}」`)
+  }
+
+  const saveConfig = async (): Promise<void> => {
+    const r = await window.api.ai.setProviderConfig(current, draft)
+    setDraft({ baseUrl: r.provider.baseUrl, model: r.provider.model, fastModel: r.provider.fastModel })
+    load()
+  }
+
+  return (
+    <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6" data-testid="provider-card">
+      <div className="text-md font-medium">模型线路</div>
+      <div className="space-y-1.5">
+        {providers.map((p) => (
+          <button
+            key={p.id}
+            data-testid={`provider-${p.id}`}
+            onClick={() => void switchTo(p.id)}
+            className={`flex w-full items-start gap-2.5 rounded-md border px-3 py-2 text-left ${
+              p.id === current ? 'border-accent bg-accent-soft' : 'border-line bg-bg hover:bg-hover'
+            }`}
+          >
+            <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: p.id === current ? 'var(--color-accent)' : 'var(--color-line)' }} />
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-2 text-base font-medium">
+                {p.label}
+                {p.hasKey ? (
+                  <span className="text-xs text-muted">key 已配置</span>
+                ) : (
+                  <span className="text-xs text-warn">未配置 key</span>
+                )}
+              </span>
+              <span className="block text-sm leading-5 text-muted">{p.hint}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      {active && (
+        <div className="space-y-2 border-t border-line pt-3">
+          <div className="flex items-center gap-2 text-md">
+            <span className="w-20 shrink-0 text-muted">base URL</span>
+            <input
+              data-testid="provider-baseurl"
+              value={draft.baseUrl}
+              onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
+              onBlur={() => void saveConfig()}
+              placeholder="https://…"
+              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+            />
+          </div>
+          <div className="flex items-center gap-2 text-md">
+            <span className="w-20 shrink-0 text-muted">主模型</span>
+            <input
+              data-testid="provider-model"
+              value={draft.model}
+              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
+              onBlur={() => void saveConfig()}
+              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+            />
+          </div>
+          <div className="flex items-center gap-2 text-md">
+            <span className="w-20 shrink-0 text-muted">轻量模型</span>
+            <input
+              data-testid="provider-fastmodel"
+              value={draft.fastModel}
+              onChange={(e) => setDraft({ ...draft, fastModel: e.target.value })}
+              onBlur={() => void saveConfig()}
+              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+            />
+          </div>
+          <div className="text-sm leading-5 text-muted">
+            模型名会显式发给服务端，不依赖线路的自动映射（DeepSeek 官方端点遇到不认识的模型名会静默降级到
+            deepseek-v4-flash）。留空则回到该线路的默认值。
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** 知识入库设置：AI 产物是否自动送入投递箱转为可检索知识 */
 function IngestCard() {
   const [auto, setAuto] = useState(false)
@@ -446,16 +556,41 @@ function SettingsPage({
   const [nick, setNickDraft] = useState(nickname ?? '')
   const [keyDraft, setKeyDraft] = useState('')
   const [provisioning, setProvisioning] = useState(false)
-  // safeStorage 写 Keychain 在 macOS 上要几秒、期间主进程是卡住的，不给忙态用户会连点
-  const [savingKey, setSavingKey] = useState(false)
-
+  // 「已就绪」必须看**当前线路那把 key**，不能只看中转站那把——切到 DeepSeek 官方却显示
+  // 中转站的状态，用户会以为配好了
+  const [active, setActive] = useState<AiProvider | undefined>()
+  // M-29：写 key 不再挡在这颗按钮后面（明文先进内存，落盘转后台任务），
+  // 但落盘期间主进程会被 safeStorage 冻住，界面必须说清楚"在干嘛、可能要多久"
+  const secretTask = useTask('secret')
+  const writing = !!secretTask && (secretTask.status === 'running' || secretTask.status === 'queued')
+  // 落盘可能只要几十毫秒（系统缓存热），也可能几十秒（冷）。只在"进行中"显示的话，
+  // 快的那次是一闪而过、用户什么都没看清，所以成功后再留 3 秒收尾文案
+  const [justSaved, setJustSaved] = useState(false)
   useEffect(() => {
-    window.api.settings.get().then((s) => {
-      setHasKey(s.hasApiKey)
-      setManualKey(s.manualApiKey)
+    if (secretTask?.status !== 'succeeded') return
+    setJustSaved(true)
+    const t = setTimeout(() => setJustSaved(false), 3000)
+    return () => clearTimeout(t)
+  }, [secretTask?.status, secretTask?.endedAt])
+
+  // 每次 refresh 都 +1，用来把「模型线路」卡片一起刷新（key 状态两处显示，不能各说各话）
+  const [tick, setTick] = useState(0)
+  const refresh = useCallback(() => {
+    setTick((n) => n + 1)
+    void window.api.settings.get().then((s) => {
+      const cur = s.providers.find((p) => p.id === s.aiProvider)
+      setActive(cur)
+      setHasKey(!!cur?.hasKey)
+      // 「手动填写」这个标记只对中转站那把 key 有意义（服务端也只下发它）
+      setManualKey(s.manualApiKey && s.aiProvider === 'inferera')
       setApiBase(s.apiBaseUrl)
     })
   }, [])
+  useEffect(refresh, [refresh])
+  // 后台落盘完成后把「已就绪 ✓」刷新出来（写入期间 hasApiKey 已经是 true，这里是终态对账）
+  useEffect(() => {
+    if (!writing) refresh()
+  }, [writing, refresh])
 
   return (
     <div className="h-full overflow-auto p-10">
@@ -502,7 +637,7 @@ function SettingsPage({
         <div className="space-y-2">
           <div className="flex items-center justify-between text-md">
             <span>
-              AI 服务：
+              AI 服务{active && `（${active.label}）`}：
               {hasKey ? (
                 <span className="text-accent">已就绪 ✓（{manualKey ? '手动填写' : '随账号自动配置'}）</span>
               ) : (
@@ -514,10 +649,8 @@ function SettingsPage({
                 setProvisioning(true)
                 const r = await window.api.auth.provision()
                 setProvisioning(false)
-                const s = await window.api.settings.get()
-                setHasKey(s.hasApiKey)
-                setManualKey(s.manualApiKey)
-                if (r.ok) ui.toast('已重新获取服务端配置')
+                refresh()
+                if (r.ok) ui.toast(r.wrote?.length ? '已重新获取服务端配置' : '服务端配置无变化，未重复写入密钥')
                 else ui.toast(`获取失败：${r.error ?? '未知原因'}`, 'error')
               }}
               disabled={provisioning}
@@ -538,31 +671,45 @@ function SettingsPage({
             />
             <button
               data-testid="apikey-save"
-              disabled={savingKey}
               onClick={async () => {
                 const k = keyDraft.trim()
                 if (!k) return ui.toast('请先填写 API Key', 'error')
-                setSavingKey(true)
                 try {
-                  await window.api.settings.setKey(k)
+                  const r = await window.api.settings.setKey(k)
                   setKeyDraft('')
-                  const s = await window.api.settings.get()
-                  setHasKey(s.hasApiKey)
-                  setManualKey(s.manualApiKey)
-                  ui.toast('API Key 已保存（系统加密存储）')
+                  refresh()
+                  ui.toast(
+                    r.outcome === 'unchanged'
+                      ? 'Key 与当前值相同，未重复写入'
+                      : 'Key 已生效，正在后台安全保存'
+                  )
                 } catch (e) {
                   ui.toast(`保存失败：${errText(e)}`, 'error')
-                } finally {
-                  setSavingKey(false)
                 }
               }}
               className="shrink-0 rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover disabled:opacity-60"
             >
-              {savingKey ? '保存中…' : '保存'}
+              保存
             </button>
           </div>
+          {/* 三态：进行中 / 刚存好 / 失败。失败那条不自动消失——它意味着重启后 key 会丢 */}
+          {writing && (
+            <div data-testid="key-writing" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-muted">
+              正在安全保存密钥，首次可能需要较长时间（系统会校验应用签名）。Key 已经可以使用，无需等待。
+            </div>
+          )}
+          {!writing && justSaved && (
+            <div data-testid="key-saved" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-muted">
+              密钥已安全保存 ✓（macOS Keychain 加密，重启不丢）
+            </div>
+          )}
+          {secretTask?.status === 'failed' && (
+            <div data-testid="key-write-failed" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-danger">
+              密钥没能加密落盘：{secretTask.error ?? '未知原因'}。本次仍可正常使用，但重启后需要重新填写。
+            </div>
+          )}
           <div className="text-sm leading-5 text-muted">
-            手动填写的 Key 用 macOS Keychain 加密存储，且不会被服务端下发的配置覆盖。
+            手动填写的 Key 用 macOS Keychain 加密存储，且不会被服务端下发的配置覆盖；填的是上方所选线路的 Key。
           </div>
         </div>
         <div className="flex items-center gap-2 text-md">
@@ -575,6 +722,8 @@ function SettingsPage({
           />
         </div>
       </div>
+
+      <ProviderCard onChanged={refresh} tick={tick} />
 
       <IngestCard />
 

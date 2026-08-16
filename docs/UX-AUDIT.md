@@ -196,11 +196,28 @@ watcher 触发时会重新 `read` 并 `setNote`（[VaultPage.tsx:355](desktop/sr
 **M-28 未登录（本地模式）时，云端相关入口没有降级说明**
 产物「入库」照常可点、`cloud_sync` 阶段只在日志里写一行「跳过」（[orchestrator.ts:145](desktop/src/main/inbox/orchestrator.ts:145)），AI 检索会静默从云端三层回退到本地全文（[agent/index.ts:126](desktop/src/main/agent/index.ts:126)–138），检索质量变化用户完全不知情。**建议**：本地模式在工作台顶部给一条常驻说明条。
 
-**M-29 进程内第一次写 key 会把主进程冻住 6–35 秒（2026-08-16 实测，一期走查复测后加严）** ⏳ 待办
-`setSecret` 里的 `safeStorage.encryptString`（[store.ts:42](desktop/src/main/store.ts:42)–47）是同步调用，macOS 上要访问 Keychain。**同一进程内第一次调用最贵，实测 6 秒 ~ 35 秒（多次测量差异极大）；之后的调用只要 10–30 毫秒。** 期间主进程完全阻塞——窗口不响应、所有 IPC 排队，连 Playwright 的 CDP 都跟着停（走查里这一步 30s / 120s 超时各撞过一次，最后只能把这一次点击的超时单独放宽到 300s）。
-怀疑与 ad-hoc 签名有关：每次启动对 Keychain 而言都像一个"新应用"，ACL 校验因此很贵；拿到开发者签名后应复测一次。
-**真正影响用户的是登录那条路径**：`provisionKeys` 下发 key 时会走同一个调用（[auth/index.ts:107](desktop/src/main/auth/index.ts:107)–115），所以**用户点完登录会看到应用整体冻住几十秒**，体感就是"卡死了"。设置页手填 key 已加忙态按钮，但那只是遮羞，根因没解。
-**建议**：把 `setApiKey`/`setLlmKey` 移出主进程主线程（safeStorage 是 main-only，不能进 worker_thread，需要另想办法：拆独立 utilityProcess，或改用别的加密落盘方案）；**切换模型 provider 时一并处理**——那次改动会重写这条读写链路。在那之前，登录流程至少要给一个"正在配置 AI 服务…"的明确等待态，别让用户以为死机。
+**M-29 safeStorage 首次调用冻住主进程（2026-08-16 定位并修复，随模型 provider 解耦一并做）** ✅ 已修
+**根因不是 `encryptString`，而是"一个进程里对 safeStorage 的第一次调用"**——它要去 Keychain 取「mcn-ai-desktop Safe Storage」那把 key，securityd 要校验调用方的代码签名（ad-hoc 签名的大 bundle 尤其贵），结果被系统缓存，缓存冷热决定耗时。用 Electron 30.5.1 实测（探针见 git log）：
+
+| 首次调用的是谁 | 耗时 |
+|---|---|
+| `isEncryptionAvailable()` | 8.7s |
+| `encryptString()`（系统缓存冷） | 60.4s |
+| `decryptString()`（另一次冷启动） | 4.3s |
+| 任意首调（系统缓存热） | 8ms |
+| 首调之后的同进程调用 | 0–2ms |
+
+也就是说 `isEncryptionAvailable`／`decryptString`／`encryptString` 谁先被调用谁付钱，**读也一样贵**——原来的 `settings:get` 每次都 `!!getApiKey()`（解密一次）就足以触发它。这笔调用是同步的，主进程一冻 IPC、窗口、CDP 全停。
+
+**utilityProcess 这条路走不通（已实测）**：utilityProcess 里 `require('electron')` 只暴露 `net` 与 `systemPreferences`，没有 `safeStorage`，所以「把加密整个挪进 worker」在 Electron 30.5.1 下不成立。理论上还能起一个**长驻的第二个 Electron 实例**当加密助手（同一个二进制、`app.dock.hide()`、stdio 通信），它会在自己的进程里付这笔冷调用、主进程完全不受影响；代价是常驻多一个 Electron 主进程（内存约 100MB）＋ 打包/公证时多一条启动路径。**结论：一期不做**，因为下面三条缓解已经把用户能感知的冻结基本清零，而根因（ad-hoc 签名）本来就在「买开发者签名」那条路上；如果签名后复测仍然慢，再上助手进程。
+
+一期落地（`src/main/secrets.ts` 是新的唯一入口）：
+1. **写前判重用指纹，不用解密**：`HMAC-SHA256(每安装一份随机盐, 明文)` 存在 store 里，比对零 Keychain 触碰。`provisionKeys` 每次启动/登录都会重跑，值没变就一次都不写——**老用户的登录/启动冻结归零**
+2. **读也不再乱触发**：`settings:get` 改用「密文在不在」回答 `hasApiKey`；明文有进程内内存缓存，一次进程最多解密一次
+3. **首次写入不挡路**：明文先进内存（key 立刻可用），落盘登记成 `kind: 'secret'` 的任务并让出一次事件循环，再做那次同步加密。登录页/设置页因此有明确文案「正在安全保存密钥，首次可能需要较长时间」，TaskDock 上也看得见
+4. 启动时的 `provisionKeys`/`probeCloud` 移到 `did-finish-load` 之后：真要冻，也得先把界面画出来
+
+**残留**：一个进程里总还有"第一次真的要用明文"的那一刻——恢复登录会话（`getSession`）、发第一条消息（`resolveForRequest`）、投递箱起 pipeline（`getLlmKey`）——那次解密仍可能是冷调用。区别是：现在**一个进程最多一次**（有内存缓存）、发生在界面已经画出来之后、且都在用户明确发起某个动作的时候；不再有"什么都没干却冻住"的情况。要彻底消灭它，就是上面说的助手进程或开发者签名。
 
 ---
 
@@ -243,7 +260,7 @@ watcher 触发时会重新 `read` 并 `setNote`（[VaultPage.tsx:355](desktop/sr
 | P0（一天内） | H-01、H-02、H-03、H-04、H-05 | 丢数据 / 炸应用 / 回不去，全是一次点击就触发 |
 | P1（本轮迭代） | H-06 ~ H-13 + M-01 ~ M-09 | 异步三态与跨页面状态出口，建议与"产物入库反馈断裂"的既定方案合并做一次「全局任务状态层」 |
 | P2 | M-10 ~ M-28 | 状态覆盖与一致性，可随各页面改动顺手带上 |
-| 挂靠 | M-29（safeStorage 阻塞主进程 ~6s） | 不单独开轮次，**切换模型 provider 时一并异步化** |
+| 挂靠 | ~~M-29（safeStorage 阻塞主进程）~~ ✅ 2026-08-16 随模型 provider 解耦一并做掉（指纹判重 + 只读不解密 + 写入转后台任务） |
 | P3 | L-01 ~ L-12 | 打磨 |
 
 > 提醒：以上任何一条落地都属于 GUI 改动，按 `desktop/CLAUDE.md` 的验收铁律，必须 `npm run build && node e2e/walkthrough.mjs` 并逐张看截图后才能交付；新增交互（如取消投递、全局任务条）要往 `walkthrough.mjs` 里加对应步骤。

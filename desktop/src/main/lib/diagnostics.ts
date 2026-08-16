@@ -1,7 +1,9 @@
 import { app, shell } from 'electron'
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { store, getApiKey, getLlmKey } from '../store'
+// 诊断报告只报"配没配"，绝不解密——decryptString 的首调同样会冻住主进程（M-29）
+import { store, hasLlmKey } from '../store'
+import { describeProvider } from '../ai/provider'
 import { vaultManager } from '../vault'
 import { logFilePath } from './logger'
 
@@ -35,8 +37,9 @@ export async function exportDiagnostics(): Promise<string> {
 配置状态（不含任何密钥明文）:
 - 知识库: ${store.get('vaultPath') ?? '(未设置)'}（当前${vaultManager.currentRoot ? '已' : '未'}打开）
 - 服务器: ${store.get('apiBaseUrl')}
-- 中转站: ${store.get('relayBaseUrl')}（key ${getApiKey() ? '已配置' : '未配置'}${store.get('manualApiKey') ? '·手动' : '·下发'}）
-- 打标模型: ${store.get('llmBaseUrl')} ${store.get('llmModel')}（key ${getLlmKey() ? '已配置' : '未配置'}）
+- 对话线路: ${describeProvider().label} ${describeProvider().baseUrl}
+  主模型 ${describeProvider().model} ／ 轻量 ${describeProvider().fastModel}（key ${describeProvider().hasKey ? '已配置' : '未配置'}${store.get('manualApiKey') ? '·手动' : '·下发'}）
+- 打标模型: ${store.get('llmBaseUrl')} ${store.get('llmModel')}（key ${hasLlmKey() ? '已配置' : '未配置'}）
 
 最近日志（末 300 行，已脱敏）:
 --------------------------------------------------

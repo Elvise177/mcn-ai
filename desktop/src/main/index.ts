@@ -49,6 +49,14 @@ function createWindow(): void {
     win.reload()
   })
 
+  // 云端与密钥相关的启动动作**等界面画出来再做**：恢复会话要解密，
+  // 而 safeStorage 在一个进程里的首次调用是同步的、可能几十秒（M-29）。
+  // 在 did-finish-load 之前触发它，用户看到的就是一扇白窗
+  win.webContents.once('did-finish-load', () => {
+    void provisionKeys() // 已登录用户启动时刷新服务端下发的 AI 配置（值没变则零写入）
+    void probeCloud() // 云端可达性：探测有超时，Supabase 被暂停时不会把启动拖住
+  })
+
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -109,8 +117,6 @@ app.whenReady().then(() => {
   registerIpc()
   createWindow()
   void openStoredVault() // 启动即加载上次的库，工作台首页直接可问
-  void provisionKeys() // 已登录用户启动时刷新服务端下发的 AI 配置
-  void probeCloud() // 云端可达性：探测有超时，Supabase 被暂停时不会把启动拖住
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

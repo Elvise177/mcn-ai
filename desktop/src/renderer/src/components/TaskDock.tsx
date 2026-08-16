@@ -16,6 +16,7 @@ const PAGE_OF: Record<TaskKind, 'workbench' | 'vault' | 'settings'> = {
   ingest: 'vault',
   agent: 'workbench',
   sync: 'settings',
+  secret: 'settings',
 }
 
 function Bar({ t }: { t: Task }) {

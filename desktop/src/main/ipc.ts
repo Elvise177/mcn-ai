@@ -1,5 +1,13 @@
 import { ipcMain, dialog } from 'electron'
-import { store, setApiKey, getApiKey, setLlmKey, getLlmKey } from './store'
+import { store, setLlmKey, hasApiKey, hasLlmKey, setSecretLater, isSecretPending } from './store'
+import {
+  currentProviderId,
+  describeProvider,
+  listProviders,
+  setProvider,
+  setProviderOverrides,
+  type ProviderId,
+} from './ai/provider'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
 import { login, logout, authState, provisionKeys, getProvisionError } from './auth'
@@ -17,13 +25,18 @@ import { tasks } from './tasks/registry'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
+  // 注意：这里一律不解密。`hasApiKey` 用密文存在性回答，否则每次打开设置页都可能
+  // 触发一次 safeStorage 冷调用，把主进程冻住几十秒（M-29）
   ipcMain.handle('settings:get', () => ({
     vaultPath: process.env.MCNAI_VAULT || store.get('vaultPath') || null,
     relayBaseUrl: store.get('relayBaseUrl'),
-    hasApiKey: !!getApiKey(),
+    hasApiKey: hasApiKey(),
     manualApiKey: store.get('manualApiKey') === true,
     llmBaseUrl: store.get('llmBaseUrl'),
-    hasLlmKey: !!getLlmKey(),
+    hasLlmKey: hasLlmKey(),
+    aiProvider: currentProviderId(),
+    providers: listProviders(),
+    keyWritePending: isSecretPending(describeProvider().keyField),
     apiBaseUrl: store.get('apiBaseUrl'),
     dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
     dingtalkSecret: store.get('dingtalkSecret') ?? '',
@@ -53,16 +66,37 @@ export function registerIpc(): void {
   )
 
   ipcMain.handle('settings:setLlmKey', (_e: Electron.IpcMainInvokeEvent, key: string) => {
-    setLlmKey(key.trim())
+    const outcome = setLlmKey(key.trim())
     store.set('manualLlmKey', true)
-    return { ok: true }
+    return { ok: true, outcome }
   })
 
+  /**
+   * 手填 key：写进**当前 provider 那把槽位**。
+   * 立刻返回（明文已进内存缓存，马上能发消息），落盘是后台任务——safeStorage 首次调用
+   * 会同步冻住主进程几十秒，不能挡在这颗保存按钮后面（M-29）
+   */
   ipcMain.handle('settings:setKey', (_e: Electron.IpcMainInvokeEvent, key: string) => {
-    setApiKey(key.trim())
-    store.set('manualApiKey', true)
-    return { ok: true }
+    const field = describeProvider().keyField
+    const outcome = setSecretLater(field, key.trim())
+    if (field === 'encryptedApiKey') store.set('manualApiKey', true)
+    if (field === 'encryptedLlmKey') store.set('manualLlmKey', true)
+    return { ok: true, outcome }
   })
+
+  // ---- 模型 provider（inferera / DeepSeek 官方 / 自定义）----
+  ipcMain.handle('ai:providers', () => ({ current: currentProviderId(), providers: listProviders() }))
+  ipcMain.handle('ai:setProvider', (_e, id: ProviderId) => {
+    setProvider(id)
+    return { ok: true, provider: describeProvider(id) }
+  })
+  ipcMain.handle(
+    'ai:setProviderConfig',
+    (_e, id: ProviderId, cfg: { baseUrl?: string; model?: string; fastModel?: string }) => {
+      setProviderOverrides(id, cfg)
+      return { ok: true, provider: describeProvider(id) }
+    }
+  )
 
   // ---- vault ----
   ipcMain.handle('vault:pickExisting', async () => {

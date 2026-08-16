@@ -217,11 +217,13 @@ try {
   if (CHAT) {
     await win.fill('input[placeholder="邮箱"]', E2E_EMAIL)
     await win.fill('input[placeholder="密码"]', E2E_PASSWORD)
+    const tLogin = Date.now()
     await win.click('button:has-text("登录")')
-    // 登录成功后 provisionKeys 会写 key → 撞上 M-29 的 safeStorage 首次写入，
-    // 主进程连同 IPC 一起冻住好几分钟，登录后的界面因此迟迟不出来。
-    // 这不是登录失败，是 M-29；修掉它之后这里该改回 30s
-    await win.locator('button[title="新对话"]').waitFor({ timeout: 600000 })
+    // M-29 修复后：会话与 key 的加密落盘都转成后台任务，登录不再被 safeStorage 冻住。
+    // 以前这里要给到 10 分钟（主进程一冻，CDP 跟着停，界面迟迟不出来），现在 90s 足够，
+    // 超了就是回归——写入又跑回登录这条同步路径上了
+    await win.locator('button[title="新对话"]').waitFor({ timeout: 90000 })
+    console.log(`登录到进主界面 ${Date.now() - tLogin}ms`)
     // 等服务端下发 key 落库：safeStorage 写 Keychain 要好几秒（实测 ~6s），固定等会误判
     let s = await win.evaluate(() => window.api.settings.get())
     for (let i = 0; i < 30 && !s.hasApiKey; i++) {
@@ -230,6 +232,13 @@ try {
     }
     if (!s.hasApiKey) throw new Error('登录后没拿到 AI key，E2E_CHAT 跑不了（检查中转站/账号）')
     console.log('登录 ✓ key 已下发')
+    // M-29 的正主：老用户每次启动/登录都会重跑 provision。同一把 key 必须一次都不写
+    const p1 = await win.evaluate(() => window.api.auth.provision())
+    const p2 = await win.evaluate(() => window.api.auth.provision())
+    if (!p2.ok) throw new Error('第二次 provision 失败：' + p2.error)
+    if (p2.wrote?.length)
+      throw new Error(`同一份服务端配置重复下发时又写了 key：${JSON.stringify(p2.wrote)}`)
+    console.log('M-29 重复下发零写入 ✓', JSON.stringify({ 第一次: p1.wrote, 第二次: p2.wrote }))
   } else {
     const skip = win.locator('text=暂不登录')
     if (await skip.count()) {
@@ -898,23 +907,102 @@ try {
     if (!(await keyInput.count())) throw new Error('设置页没有手填 API Key 的输入框')
     if (!(await win.locator('button:has-text("重新获取服务端配置")').count()))
       throw new Error('设置页没有「重新获取服务端配置」按钮')
-    await keyInput.fill('sk-e2e-manual-key-0123456789')
-    // 进程内第一次 safeStorage 写 Keychain 会把主进程整个冻住（审计 M-29）。
-    // 实测同一台机器上反复跑，这个耗时还在往上涨：6s → 35s → 68s（怀疑 ad-hoc 签名
-    // 每次启动都被 Keychain 当成新身份，ACL 条目越积越多）。主进程一卡 CDP 也跟着停，
-    // 默认超时会误判成"点不动"，所以这一次点击单独给到 10 分钟。
-    // 这不是走查的问题，是 M-29 本身——修掉它之后这里应该改回默认超时。
-    await win.click('[data-testid="apikey-save"]', { timeout: 600000 })
-    await win.locator('text=API Key 已保存').waitFor({ timeout: 60000 })
+    const E2E_KEY = 'sk-e2e-manual-key-0123456789'
+    await keyInput.fill(E2E_KEY)
+    // ---- M-29：保存 key 不再挡路 ----
+    // 旧版这颗按钮的 invoke 里同步调 safeStorage，进程内首次调用会把主进程冻住
+    // （实测 6s→35s→68s，主进程一卡 CDP 也跟着停），当时只能把这次点击的超时放宽到 10 分钟。
+    // 现在写入转成后台任务，点击必须秒回——这里就用它当断言：超过 20s 视为回归。
+    const tClick = Date.now()
+    await win.click('[data-testid="apikey-save"]', { timeout: 20000 })
+    const clickMs = Date.now() - tClick
+    // toast 的等待要给足：点击返回后主进程才开始那次同步加密，冷调用最长实测 60s，
+    // 期间 CDP 也停（Playwright 走主进程），所以这里不能拿来当"快不快"的证据——
+    // 证据是上面那次 click 的耗时（旧版这里要 10 分钟超时才点得动）
+    await win.locator('text=/Key 已生效|未重复写入/').first().waitFor({ timeout: 180000 })
+    // 等待态：写入进行中要有明确文案。冷调用有时只要几毫秒（系统缓存热），
+    // 那种情况下文案一闪而过，所以「看到文案」与「任务层留下了这条 secret 任务」二选一即可
+    // 系统缓存热的时候整个落盘只要几十毫秒，「正在保存」会一闪而过，所以界面在成功后
+    // 还会留 3 秒的「已安全保存 ✓」——两态都算数，截图截到哪一态都行
+    let hintState = ''
+    for (let i = 0; i < 40 && !hintState; i++) {
+      if (await win.locator('[data-testid="key-writing"]').count()) hintState = 'writing'
+      else if (await win.locator('[data-testid="key-saved"]').count()) hintState = 'saved'
+      else await win.waitForTimeout(200)
+    }
+    const sawHint = !!hintState
+    if (sawHint) await rawShot(cdp, '10d-设置页-密钥保存状态')
+    else await snap('10d-设置页-密钥保存状态', 100)
+    if (await win.locator('[data-testid="key-write-failed"]').count())
+      throw new Error('密钥落盘失败（界面出了失败提示）')
+    // 落盘任务必须走完（写入期间主进程是冻的，evaluate 会一直等，等到了就说明已经解冻）
+    const secretTasks = await win.evaluate(async () => {
+      const s = await window.api.tasks.list()
+      return s.tasks.filter((t) => t.kind === 'secret').map((t) => ({ id: t.id, status: t.status, title: t.title }))
+    })
+    if (!secretTasks.length) throw new Error('写 key 没有登记 secret 任务（渲染层就没有等待态可显示）')
+    if (secretTasks.some((t) => t.status === 'failed'))
+      throw new Error('密钥落盘任务失败：' + JSON.stringify(secretTasks))
+    console.log('M-29 保存不挡路 ✓', JSON.stringify({ clickMs, 状态提示: hintState || '(没赶上)', tasks: secretTasks }))
+    if (!sawHint) throw new Error('保存 key 期间界面没有任何状态提示（等待态/已保存都没出现）')
+
     const afterKey = await win.evaluate(() => window.api.settings.get())
     if (!afterKey.hasApiKey) throw new Error('手填 key 保存后 hasApiKey 仍为 false')
     await snap('10b-设置页-手填key已保存', 300)
+
+    // ---- M-29 写前判重：同一把 key 再存一次，必须零写入 ----
+    // 这条就是"老用户重复登录不再冻结"的核心——provisionKeys 每次启动都会走同一条路
+    const repeat = await win.evaluate((k) => window.api.settings.setKey(k), E2E_KEY)
+    if (repeat.outcome !== 'unchanged')
+      throw new Error(`重复保存同一把 key 竟然又写了一次：outcome=${repeat.outcome}`)
+    const afterRepeat = await win.evaluate(async () => {
+      const s = await window.api.tasks.list()
+      return s.tasks.filter((t) => t.kind === 'secret').length
+    })
+    if (afterRepeat !== secretTasks.length)
+      throw new Error(`重复保存新增了 secret 任务：${secretTasks.length} → ${afterRepeat}`)
+    console.log('M-29 写前判重 ✓ 同 key 重复保存零写入')
     // 「重新获取」真点：本地模式会失败（未登录），登录态会成功，两种都必须有可见反馈
     await win.click('button:has-text("重新获取服务端配置")')
-    await win.locator('text=/已重新获取服务端配置|获取失败/').first().waitFor({ timeout: 15000 })
-    const provText = await win.locator('text=/已重新获取服务端配置|获取失败/').first().innerText()
+    // 三种反馈都算数：本地模式=获取失败；登录且配置有变=已重新获取；登录且配置没变=无变化
+    // （最后这条是 M-29 判重的直接体现，E2E_CHAT 跑到的就是它）
+    await win.locator('text=/已重新获取服务端配置|获取失败|无变化/').first().waitFor({ timeout: 15000 })
+    const provText = await win.locator('text=/已重新获取服务端配置|获取失败|无变化/').first().innerText()
     await snap('10c-设置页-重新获取反馈', 200)
     console.log('H-06 手填 key + 重新获取 ✓', JSON.stringify({ 反馈: provText.trim() }))
+  }
+
+  // ---- 模型线路（provider 解耦）：三条线路可切，模型名显式可见可改 ----
+  {
+    const card = win.locator('[data-testid="provider-card"]')
+    if (!(await card.count())) throw new Error('设置页没有「模型线路」卡片')
+    for (const id of ['inferera', 'deepseek', 'custom']) {
+      if (!(await win.locator(`[data-testid="provider-${id}"]`).count()))
+        throw new Error(`模型线路里缺少 ${id}`)
+    }
+    await snap('10e-设置页-模型线路', 300)
+    // 真切一次到 DeepSeek 官方：地址与模型必须跟着变，且主进程认账
+    await win.click('[data-testid="provider-deepseek"]')
+    await win.locator('text=已切换到').waitFor({ timeout: 8000 })
+    await win.waitForTimeout(400)
+    const shown = {
+      baseUrl: await win.locator('[data-testid="provider-baseurl"]').inputValue(),
+      model: await win.locator('[data-testid="provider-model"]').inputValue(),
+      fastModel: await win.locator('[data-testid="provider-fastmodel"]').inputValue(),
+    }
+    if (shown.baseUrl !== 'https://api.deepseek.com/anthropic')
+      throw new Error(`切到 DeepSeek 官方后 base URL 不对：${shown.baseUrl}`)
+    if (shown.model !== 'deepseek-v4-pro') throw new Error(`主模型没钉死成 deepseek-v4-pro：${shown.model}`)
+    if (shown.fastModel !== 'deepseek-v4-flash') throw new Error(`轻量模型不对：${shown.fastModel}`)
+    const inMain = await win.evaluate(() => window.api.settings.get())
+    if (inMain.aiProvider !== 'deepseek') throw new Error('主进程没记住切换后的 provider')
+    await snap('10f-模型线路-切到DeepSeek官方', 300)
+    console.log('模型线路切换 ✓', JSON.stringify(shown))
+    // 切回默认线路，别把后面的步骤带偏
+    await win.click('[data-testid="provider-inferera"]')
+    await win.waitForTimeout(600)
+    const back = await win.evaluate(() => window.api.settings.get())
+    if (back.aiProvider !== 'inferera') throw new Error('切回 inferera 失败')
   }
 
   // ---- 首页「最近对话」卡片区：造两条历史会话，重载后应同时出现在侧栏和首页卡片区 ----

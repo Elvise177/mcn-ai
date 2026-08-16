@@ -10,6 +10,12 @@ const api = {
       ipcRenderer.invoke('settings:setDingtalk', cfg),
     setArtifactAutoIngest: (v: boolean) => ipcRenderer.invoke('settings:setArtifactAutoIngest', v),
   },
+  ai: {
+    providers: () => ipcRenderer.invoke('ai:providers'),
+    setProvider: (id: string) => ipcRenderer.invoke('ai:setProvider', id),
+    setProviderConfig: (id: string, cfg: { baseUrl?: string; model?: string; fastModel?: string }) =>
+      ipcRenderer.invoke('ai:setProviderConfig', id, cfg),
+  },
   vault: {
     pickExisting: () => ipcRenderer.invoke('vault:pickExisting'),
     createNew: () => ipcRenderer.invoke('vault:createNew'),

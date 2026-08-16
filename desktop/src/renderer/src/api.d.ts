@@ -1,3 +1,18 @@
+type ProviderId = 'inferera' | 'deepseek' | 'custom'
+
+interface AiProvider {
+  id: ProviderId
+  label: string
+  baseUrl: string
+  /** 主模型（显式指定，不依赖端点自动映射） */
+  model: string
+  /** 轻量子任务模型 */
+  fastModel: string
+  keyField: string
+  hint: string
+  hasKey: boolean
+}
+
 interface DesktopSettings {
   vaultPath: string | null
   relayBaseUrl: string
@@ -6,6 +21,10 @@ interface DesktopSettings {
   manualApiKey: boolean
   llmBaseUrl: string
   hasLlmKey: boolean
+  aiProvider: ProviderId
+  providers: AiProvider[]
+  /** 当前 provider 的 key 正在后台加密落盘（M-29 等待态） */
+  keyWritePending: boolean
   apiBaseUrl: string
   dingtalkWebhook: string
   dingtalkSecret: string
@@ -14,7 +33,7 @@ interface DesktopSettings {
   artifactAutoIngest: boolean
 }
 
-type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync'
+type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'
 type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
 
 interface TaskBase {
@@ -55,7 +74,12 @@ interface SyncTask extends TaskBase {
   tries: number
   nextRetryAt?: number
 }
-type Task = InboxTask | AgentTask | IngestTask | SyncTask
+/** 密钥加密落盘（M-29）：safeStorage 首调会冻主进程，所以它是一条任务而不是一次同步调用 */
+interface SecretTask extends TaskBase {
+  kind: 'secret'
+  field: string
+}
+type Task = InboxTask | AgentTask | IngestTask | SyncTask | SecretTask
 
 interface CloudState {
   reachable: boolean | null
@@ -124,6 +148,8 @@ interface AgentStreamPayload {
   tool?: string
   sdkSessionId?: string
   costUsd?: number
+  /** 实际服务这轮的模型名（result.modelUsage 的 key），用来发现端点的静默降级 */
+  models?: string[]
 }
 
 interface ArtifactInfo {
@@ -145,8 +171,9 @@ interface Window {
   api: {
     settings: {
       get: () => Promise<DesktopSettings>
-      setKey: (key: string) => Promise<{ ok: boolean }>
-      setLlmKey: (key: string) => Promise<{ ok: boolean }>
+      /** outcome=unchanged 表示值没变、一次 Keychain 都没碰（M-29 写前判重） */
+      setKey: (key: string) => Promise<{ ok: boolean; outcome: 'unchanged' | 'written' | 'queued' }>
+      setLlmKey: (key: string) => Promise<{ ok: boolean; outcome: 'unchanged' | 'written' | 'queued' }>
       setApiBase: (url: string) => Promise<{ ok: boolean }>
       setDingtalk: (cfg: {
         webhook: string
@@ -155,6 +182,14 @@ interface Window {
         notifyArtifact: boolean
       }) => Promise<{ ok: boolean }>
       setArtifactAutoIngest: (v: boolean) => Promise<{ ok: boolean }>
+    }
+    ai: {
+      providers: () => Promise<{ current: ProviderId; providers: AiProvider[] }>
+      setProvider: (id: ProviderId) => Promise<{ ok: boolean; provider: AiProvider }>
+      setProviderConfig: (
+        id: ProviderId,
+        cfg: { baseUrl?: string; model?: string; fastModel?: string }
+      ) => Promise<{ ok: boolean; provider: AiProvider }>
     }
     dingtalk: {
       test: () => Promise<{ ok: boolean; error?: string }>
@@ -198,7 +233,7 @@ interface Window {
       login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>
       logout: () => Promise<void>
       state: () => Promise<{ loggedIn: boolean; email?: string }>
-      provision: () => Promise<{ ok: boolean; error?: string }>
+      provision: () => Promise<{ ok: boolean; error?: string; wrote?: string[] }>
       provisionError: () => Promise<string | null>
       onProvisionFailed: (cb: (msg: string) => void) => () => void
     }

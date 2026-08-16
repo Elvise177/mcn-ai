@@ -11,7 +11,9 @@ npm run build && node e2e/walkthrough.mjs   # 截图在 e2e/shots/，AI 必须 R
 - 走查完全隔离：独立 userData（/tmp/mcnai-e2e-userdata）+ maggie-vault 副本（/tmp/mcnai-e2e-vault），不碰真实数据
 - **截图只证明"长这样"，不证明"能用"**：每个可点击的核心控件（新对话/发送/切换/删除…）必须在走查里真点一次并断言结果状态（2026-07-16 ＋新对话失效教训——截图全绿但按钮点了丢对话）
 - 新功能必须往 walkthrough.mjs 里加对应步骤（新页面/新交互 = 新截图点）
-- 引擎层改动跑对应 smoke：`smoke-vault.js <vault>`（索引/图谱/检索）、`smoke:agent`（AI 链路）
+- 引擎层改动跑对应 smoke：`smoke-vault.js <vault>`（索引/图谱/检索）、`smoke:agent`（AI 链路打包冒烟）、
+  `smoke:provider`（**改模型/线路必跑**：逐个 provider 跑单轮/多轮 resume/abort/工具调用/流式/make-ppt，
+  并断言服务端实际用的模型就是钉死的那个；需 `SMOKE_INFERERA_KEY` / `SMOKE_DEEPSEEK_KEY`）
 - 截图里发现的问题先修完再交付，不许把 GUI 验收留给用户
 
 ## 常用命令
