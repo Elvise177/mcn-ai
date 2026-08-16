@@ -14,8 +14,8 @@ Electron App（macOS arm64，v0.1.0）
 ├ 渲染进程：React 18 + TypeScript + Tailwind（Claude Desktop 风暖米白主题）
 │   三大界面：对话工作台（默认）｜ 个人知识库（含投递箱二级入口）｜ 设置
 ├ preload/contextBridge = 唯一 IPC 边界（渲染进程零 Node 能力）
-│   请求响应：ipcMain.handle（vault:* / inbox:* / auth:* …）
-│   流式下行：webContents.send（agent:stream:{id} / inbox:progress / artifact:created）
+│   请求响应：ipcMain.handle（vault:* / inbox:* / auth:* / tasks:list …）
+│   流式下行：webContents.send（agent:stream / task:event / vault:changed / artifact:created）
 └ 主进程（Node）
     ├ agent/      Claude Agent SDK：query() 会话管理（resume 多轮/abort），流式转 IPC
     ├ vault/      本地 md 库：fast-glob 扫描 + gray-matter frontmatter + chokidar 增量
@@ -48,7 +48,7 @@ Electron App（macOS arm64，v0.1.0）
 
 - 私人知识层**不直调 Supabase RPC**，走 webpage 的 API：`webpage/app/api/v1/knowledge/personal/{ingest,search}/route.ts`，`Authorization: Bearer <supabase access_token>` → 服务端 `admin.auth.getUser(token)` 拿可信 user_id → 复用 `ingestKnowledge/searchKnowledge`（layers=['platform','org','private']）
 - 迁移 010（personal knowledge 层）+ 011（knowledge_chunks 加 file_path/content_hash，去重=同 owner+file_path 先删后插）均已执行
-- 聊天记录：主进程 authenticated supabase-js 直写 conversations/messages（RLS 已配）。**同步失败当前是静默丢弃**（`knowledge/client.ts` 的 `syncConversation` 整个 try 包空 catch，本地 electron-store 是权威副本，云端那份就少了这次）；**重试队列尚未实现，属 v2 待办**（连同本地 SQLite 聊天库一起）。UX 审计 M-03 记的就是这条
+- 聊天记录：主进程 authenticated supabase-js 直写 conversations/messages（RLS 已配）。**同步失败当前是静默丢弃**（`knowledge/client.ts` 的 `syncConversation` 整个 try 包空 catch，本地 electron-store 是权威副本，云端那份就少了这次）；**一期已把失败落进 `tasks.json` 的 `syncQueue`（退避 1m/5m/30m→转手动）、条数上全局条，但真正的重试定时器仍在二期**（本地 SQLite 聊天库另属 v2）。UX 审计 M-03 记的就是这条
 - 桌面登录与网页版同账号，会话在网页版列表可见
 
 ---
@@ -65,7 +65,11 @@ Electron App（macOS arm64，v0.1.0）
 8. **视觉重构第二轮（2026-08-16 用户验收后返工）**：截图基线清理（删掉 7 月残留，走查收尾会列出「本次未刷新」的 png 报警；`00b/11/12` 归 login-provision.mjs，脚本里有归属表）；走查统一注入 `prefers-reduced-motion:reduce`（此前截图糊在淡入中间帧，看着像对比度坏了）；建库两张卡片改中性同款、hover 才高亮；笔记头部只留「编辑」，重命名/删除进 ··· 菜单，删除二次确认弹窗显示文件路径 + 删除后 toast 提示可在废纸篓找回；搜索摘要在 search-worker 里做纯文本清洗（跳过 frontmatter、剥双链括号/表格竖线与分隔行）；首页产物面板默认收起（与「最近产物」卡片区去重），仅对话中产生新产物才自动展开；笔记空值渲染（frontmatter 与正文空字段给「—」，只有表头的表格折叠成「暂无数据（列名…）」）；分区投递两个区静态同款，只有文件悬停在哪个区才高亮那个区；登录门「暂不登录」与建库「暂时跳过」改成可识别的按钮/链接样式
 9. **UI 精修第二轮（2026-08-16，只动样式层）**：① 关系图配色融入主题——节点色换成以主玫瑰为起点的暖调谱系（玫瑰/陶土橙/赭黄/暖棕/灰绿/藕紫/砖红），边线换低饱和暖灰，取色仍走 `theme.ts` 读 CSS 变量；② 右侧产物面板卡片减重为无框列表项（图标+文件名+时间一行，hover 才出「打开/入库/预览」），与首页「最近产物」同一种轻量观感；③ 知识库三栏：文件树默认宽 288→220px，栏与栏之间加可拖拽分隔线（5px 命中区/1px 视觉线），宽度记忆到 localStorage `vault.treeWidth` / `vault.graphWidth`；④ 文件树顶部整理：搜索框独占一行，下一行「N 篇」居左、投递箱/新建/图谱/换库居右（按钮加了 title，e2e 用 `button[title="新建笔记"]` 选中，「＋新建」文案改「新建」）；⑤ markdown 表格与卡片风格统一：圆角外框（`border-collapse: separate` + `width: max-content` 贴列收边）、表头暖灰底 `--color-table-head`（笔记属性卡片的键列共用它）、行 hover 微高亮；⑥ 首页问候语 34→38px。**踩坑记录**：`font-weight: 500` 对中文衬线（Songti SC / Noto Serif SC）完全无效——无 medium 字面、系统也不合成，只有拉丁昵称吃得到，问候语"轻飘"只能靠字号解决（探针验证过 400/500/600 三档中文字形完全一致）
 10. **UX 审计 P0 修复批次（2026-08-16，见 `docs/UX-AUDIT.md` 的 H-01~H-06）**：① **H-01 拖文件炸应用**——主进程 `will-navigate` 拦截（同 URL 放行，不挡 reload）＋ `main.tsx` 全局 `dragover/drop` preventDefault，工作台页拖入改走 `inbox.enqueue`（与知识库页同一条链路）并给「松手即入库」覆盖层；② **H-02 换库回不去**——`VaultPage` 加 `switching` 态（原库留在 state，主进程 currentRoot 本来就没变），向导传 `onSkip` + `skipLabel="返回当前库"`，换库前二次确认并显示当前库路径；③ **H-03 对话删除**——`ui.confirm`（带对话标题）+ 删除后 toast，与笔记删除对齐；④ **H-04 未保存丢改动**——`dirty` 从 `NoteView` 提到 `Explorer`（`NoteView` 是 `key={current}` 挂载的，换笔记就整个销毁），`openNote`/关笔记/换库前统一走 `confirmDiscard()`；⑤ **H-05 保存静默**——`save()` 加 try/catch，成功轻 toast、失败保留编辑态与草稿；⑥ **H-06 key 下发失败=死路**——设置页 AI 卡片补手填 API Key 输入框（复用 `settings.setKey`，safeStorage 存）＋「重新获取服务端配置」按钮（新 IPC `auth:provision` / `auth:provisionError` / `auth:provision-failed` 事件），`provisionKeys` 不再静默 catch。**踩坑记录**：macOS 上 `safeStorage.encryptString` 会阻塞主进程好几秒（实测 ~6s，走查里 Playwright 的 click 因此超时——主进程一卡 CDP 也跟着停），所以手填 key 的保存按钮必须有忙态，e2e 里这一步也单独放宽超时；`login-provision.mjs` 原来固定等 4s 判断 key 是否下发，同样因为这个改成了轮询
-11. **验收基线**：Maggie vault 全量数据「批量导入→问库→生成PPT→回看产物」闭环通过；e2e 走查脚本 `desktop/e2e/walkthrough.mjs` + 截图基线 `desktop/e2e/shots/`（GUI 改动必须跑走查看截图再交付——用户铁律）。2026-08-16 新增走查步骤：空库引导（独立空库实例）＋首页卡片区＋chips 填充＋输入框 60px/附件位＋流式光标（E2E_CHAT=1 真实流式时截行尾光标）＋投递箱六阶段进度条＋产物卡片 hover/打开/入库/预览＋最近对话卡片点开＋建库卡片 hover＋笔记 ··· 菜单/删除二次确认/新建→删除全链路＋搜索摘要洁净度＋空值与空表格＋分区投递静态同款与悬停高亮＋首页产物面板默认收起；UI 精修第二轮再加：文件树默认宽 220 断言＋三栏分隔线真拖（tree +90 / graph +80，断言宽度变化与 localStorage 落盘，重载后复查记忆）＋关系图配色特写（扫 canvas 像素定位节点团中心 → 滚轮放大 → 裁中间一块，配色需人工看这张确认）＋markdown 表格样式（临时造一篇带表格的笔记，断言圆角与行 hover 变色）。**跑法**：`node e2e/walkthrough.mjs`（本地模式）或 `E2E_CHAT=1 node e2e/walkthrough.mjs`（用测试账号登录跑真实 AI，01d/01d3/01e 只有这样才刷得到）；再跑 `node e2e/login-provision.mjs` 刷 00b/11/12，跑完看收尾那段「未刷新」清单。UX 审计 P0 批次新增走查步骤：笔记编辑→保存成功 toast＋落盘断言（20/20b）、编辑中切笔记的未保存确认（取消留在原地且草稿不丢 / 放弃后磁盘内容不变，21/21b/21c）、换库二次确认＋向导「返回当前库」（22/22b/22c）、设置页手填 key 保存＋「重新获取服务端配置」反馈（10b/10c）、侧栏删除对话的二次确认＋toast（23/23b）、**真拖一个文件到工作台页**（合成带真实 `File.path` 的 DragEvent，断言覆盖层出现、没发生导航、侧栏与输入框还在、文件确实进了投递箱目录，24/24b）
+11. **全局任务状态层 · 一期（2026-08-16，设计见 `docs/DESIGN-task-state.md`）**：把「跨越时间的操作」的状态从渲染层搬到主进程，渲染层退化成纯投影。新增 `src/main/tasks/{types,registry,persist}.ts`（Task=有终态的任务：inbox/agent/ingest/sync；Condition=没有终态的云端状况）＋ 统一推送通道 `task:event` ＋ 权威快照 `tasks:list`；渲染层 `hooks/useTasks.ts` 用 `useSyncExternalStore`（React 18 内置，未引入状态库）在 App 层订阅一次，`components/TaskDock.tsx` 侧栏底部全局条 ＋ `components/OfflineBar.tsx` 云端离线条。**解决**：H-07（投递跑着切页面看得见）、H-08（切回来运行态不丢）、产物入库三态（未入库/入库中/已入库✓，已入库落盘、可点开落位笔记）、M-03 可见性（同步失败进 `syncQueue`，退避 1m/5m/30m→转手动，条数上全局条）、bug#1（云端连不上照常开窗＋顶部降级说明条）、H-10 的"看得见在跑"部分（agent draft 上移主进程，切走再切回半截正文接得上）。
+    **一期的边界**：只上报不改行为——不含取消、H-09 停止留半截、H-10 主进程拒绝重复发送、M-27 冲突检测、M-01 登录超时、syncQueue 真重试，这些是二期。legacy `inbox:event`/`inbox:lastRun` 一期继续转发（只增不减，新 UI 出问题旧路径仍可用），二期删。
+    **关键约定**（改这层前必读）：① 主进程 registry 是唯一真相源，页面组件不得自己 setState 维护任务态，唯一例外是 Workbench 的逐字 draft 允许本地累积但每次挂载先用 `task.draft` 做基线；② **「进行中」永不落盘**，落盘的只有终态结果与待办队列（`tasks.json` 三张表），否则重启后必然出现永不结束的幽灵任务；③ push 尽力而为、snapshot 才是权威——`webContents.send` 在窗口 reload 期间会静默丢事件，所以渲染层每次挂载都先 `tasks:list` 打底，`seq` 用来丢弃迟到事件；④ 高频 delta 不进 `task:event`，仍走 `agent:stream`，任务里的 draft 每 500ms 节流推一次
+    **踩坑记录**：① 「已入库」要指向落位笔记，**不能按原文件名 `resolveLink` 去猜**——开了智能打标时 pipeline 会按内容给笔记重新命名，按文件名找必然扑空（本地模式没 LLM key 走 `--skip-llm` 不改名，所以只有 `E2E_CHAT=1` 那轮才暴露出来）。现在改成"入库前拍一次笔记全集快照、跑完做差集"，名字对得上的优先、本批只有一个产物且只新增一篇时就认那篇；② TaskDock 的进度条一开始复用了 `.inbox-bar-fill` 类名，导致走查里 `.inbox-bar-fill` 同时命中两根条、strict mode 直接报错——全局条改用 `.task-bar-fill`，`.inbox-bar-fill` 仍然只指投递箱面板那一根；③ 两轮 pipeline 之间有 3 秒去抖窗口，那一刻确实没有活跃任务、Dock 本就该收起，所以走查里凡是断言 Dock 的地方都必须轮询而不是采样一次
+12. **验收基线**：Maggie vault 全量数据「批量导入→问库→生成PPT→回看产物」闭环通过；e2e 走查脚本 `desktop/e2e/walkthrough.mjs` + 截图基线 `desktop/e2e/shots/`（GUI 改动必须跑走查看截图再交付——用户铁律）。2026-08-16 新增走查步骤：空库引导（独立空库实例）＋首页卡片区＋chips 填充＋输入框 60px/附件位＋流式光标（E2E_CHAT=1 真实流式时截行尾光标）＋投递箱六阶段进度条＋产物卡片 hover/打开/入库/预览＋最近对话卡片点开＋建库卡片 hover＋笔记 ··· 菜单/删除二次确认/新建→删除全链路＋搜索摘要洁净度＋空值与空表格＋分区投递静态同款与悬停高亮＋首页产物面板默认收起；UI 精修第二轮再加：文件树默认宽 220 断言＋三栏分隔线真拖（tree +90 / graph +80，断言宽度变化与 localStorage 落盘，重载后复查记忆）＋关系图配色特写（扫 canvas 像素定位节点团中心 → 滚轮放大 → 裁中间一块，配色需人工看这张确认）＋markdown 表格样式（临时造一篇带表格的笔记，断言圆角与行 hover 变色）。**跑法**：`node e2e/walkthrough.mjs`（本地模式）或 `E2E_CHAT=1 node e2e/walkthrough.mjs`（用测试账号登录跑真实 AI，01d/01d3/01e 只有这样才刷得到）；再跑 `node e2e/login-provision.mjs` 刷 00b/11/12，跑完看收尾那段「未刷新」清单。UX 审计 P0 批次新增走查步骤：笔记编辑→保存成功 toast＋落盘断言（20/20b）、编辑中切笔记的未保存确认（取消留在原地且草稿不丢 / 放弃后磁盘内容不变，21/21b/21c）、换库二次确认＋向导「返回当前库」（22/22b/22c）、设置页手填 key 保存＋「重新获取服务端配置」反馈（10b/10c）、侧栏删除对话的二次确认＋toast（23/23b）、**真拖一个文件到工作台页**（合成带真实 `File.path` 的 DragEvent，断言覆盖层出现、没发生导航、侧栏与输入框还在、文件确实进了投递箱目录，24/24b）。**任务层一期再加**：投递跑着切到工作台断言全局条仍在（25）、切回知识库断言运行态与进度条还在（26）、**趁任务活着 reload** 断言主进程快照与 Dock 都还在（27——必须在任务活跃那一刻刷新，等它跑完再刷测到的是"收起"那条分支）、Dock 高度过渡属性、Dock 条数与 `tasks:list` 活跃数一致（**两轮 pipeline 之间有 3 秒去抖窗口，那一刻确实没有活跃任务、Dock 本就该收起，所以这两条必须轮询、不能采样一次**）、产物入库三态 29/30/31/32（含 reload 后「已入库」仍在、点「已入库」跳落位笔记）、云端离线降级 33（独立实例把服务器地址指到 127.0.0.1:9 再重启，断言照常开窗+离线条+知识库可用）、E2E_CHAT 下的 H-10 切走切回（28，断言半截正文接得上）
 
 ---
 
@@ -136,12 +140,14 @@ desktop/
 │   │   ├ inbox/       orchestrator（队列/进度/落位/分区投递）
 │   │   ├ ai/          provider（从 webpage 平移）
 │   │   ├ knowledge/   云端 ingest/search 客户端
+│   │   ├ tasks/       registry.ts(任务真相源) types.ts persist.ts(tasks.json 三张表)
 │   │   └ auth/        index.ts（supabase-js、anon key 三级来源：env > electron-store > 内置默认）
 │   ├ preload/         contextBridge：全部 IPC 通道定义
 │   └ renderer/src/
 │       ├ pages/       VaultPage / 对话 / 设置
-│       ├ components/  聊天四组件（直搬）+ 产物面板 + 图谱
-│       └ hooks/useChatSession.ts   聊天状态机
+│       ├ components/  聊天四组件（直搬）+ 产物面板 + 图谱 + TaskDock/OfflineBar
+│       ├ hooks/useChatSession.ts   聊天状态机
+│       └ hooks/useTasks.ts         任务层渲染镜像（useSyncExternalStore）
 ├ resources/
 │   ├ pipeline/        PyInstaller 冻结的 mcn-ingest（extraResources 分发）
 │   └ skills/          make-ppt / make-docx

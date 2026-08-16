@@ -9,6 +9,8 @@ import { vaultManager } from '../vault'
 import { searchCloud } from '../knowledge/client'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
+import { tasks } from '../tasks/registry'
+import type { AgentTask } from '../tasks/types'
 
 export interface AgentStreamPayload {
   sessionId: string
@@ -74,9 +76,16 @@ export class AgentManager {
     this.win?.webContents.send('agent:stream', payload)
   }
 
+  /** AbortController 不能序列化，所以留在 live 里；任务对象只承载可观测状态 */
+  private taskId(sessionId: string): string {
+    return `agent:${sessionId}`
+  }
+
   stop(sessionId: string): void {
     this.live.get(sessionId)?.abort.abort()
     this.live.delete(sessionId)
+    // 二期在这里把 draft 落成一条「（已停止）」的 assistant 消息（H-09）
+    tasks.finish(this.taskId(sessionId), 'canceled')
   }
 
   private buildSystemPrompt(): string {
@@ -196,6 +205,25 @@ export class AgentManager {
 
     const abort = new AbortController()
     this.live.set(sessionId, { abort })
+    // draft 上移主进程：切走再切回来能补齐这段时间流出的字（H-08 的对话版），
+    // 也是二期「停止生成保留半截」「同一会话拒绝重复发送」的前提
+    const taskId = this.taskId(sessionId)
+    tasks.start({
+      id: taskId,
+      kind: 'agent',
+      key: sessionId,
+      title: 'AI 正在回答',
+      cancelable: true,
+      conversationId: sessionId,
+      draft: '',
+    })
+    const appendDraft = (text: string): void => {
+      const t = tasks.get(taskId) as AgentTask | undefined
+      if (!t) return
+      // 长回答别把整坨正文塞进每次 snapshot：只留尾部，渲染层自己有完整副本
+      const next = (t.draft + text).slice(-20_000)
+      tasks.patch(taskId, { draft: next, toolLine: undefined } as Partial<AgentTask>, true)
+    }
 
     try {
       const q = query({
@@ -245,14 +273,18 @@ export class AgentManager {
         if (message.type === 'stream_event') {
           const ev = message.event as { type?: string; delta?: { type?: string; text?: string }; content_block?: { type?: string; name?: string } }
           if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+            appendDraft(ev.delta.text)
             this.emit({ sessionId, kind: 'delta', text: ev.delta.text })
           } else if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
+            tasks.patch(taskId, { toolLine: ev.content_block.name } as Partial<AgentTask>)
             this.emit({ sessionId, kind: 'tool', tool: ev.content_block.name })
           }
           continue
         }
         if (message.type === 'result') {
           const text = message.subtype === 'success' ? message.result : `出错：${message.subtype}`
+          // 正文已经作为一条完整消息落进对话，草稿使命结束
+          tasks.patch(taskId, { draft: '', toolLine: undefined, sdkSessionId: message.session_id } as Partial<AgentTask>)
           this.emit({
             sessionId,
             kind: 'assistant',
@@ -262,12 +294,16 @@ export class AgentManager {
           })
         }
       }
+      tasks.finish(taskId, 'succeeded')
       this.emit({ sessionId, kind: 'done' })
     } catch (err) {
       if (!abort.signal.aborted) {
         log('error', 'agent', err instanceof Error ? err : String(err))
+        tasks.patch(taskId, { title: 'AI 回答出错' } as Partial<AgentTask>)
+        tasks.finish(taskId, 'failed', err instanceof Error ? err.message : String(err))
         this.emit({ sessionId, kind: 'error', text: String(err) })
       } else {
+        tasks.finish(taskId, 'canceled')
         this.emit({ sessionId, kind: 'done' })
       }
     } finally {

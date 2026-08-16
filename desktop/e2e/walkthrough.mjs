@@ -44,6 +44,12 @@ for (const [name, body] of process.env.E2E_VAULT ? [] : (mkdirSync(artifactDir, 
   writeFileSync(join(artifactDir, name), body)
 }
 
+// 产物入库三态（未入库→入库中→已入库）要一个 pipeline 真能转换的产物：
+// 上面那几个是 'x'.repeat() 造的假文件，转换阶段必然失败，测不到「已入库」
+if (!process.env.E2E_VAULT && existsSync(join(root, 'e2e', 'sample.docx'))) {
+  copyFileSync(join(root, 'e2e', 'sample.docx'), join(artifactDir, 'e2e产物样例.docx'))
+}
+
 // MCNAI_APP_BIN 指向打包后的二进制时 = 打包形态回归；否则 dev 形态
 const packagedBin = process.env.MCNAI_APP_BIN
 
@@ -147,6 +153,42 @@ const rawShot = async (cdp, name) => {
   await app3.close()
 }
 
+// ---- 云端离线降级：把服务器地址指到一个连不上的端口，重启后应「照常开窗 + 顶部离线条」----
+// （HANDOFF bug#1 的正确行为；这条只能靠独立实例验，主实例是在线的）
+{
+  const offlineUser = '/tmp/mcnai-e2e-offline'
+  rmSync(offlineUser, { recursive: true, force: true })
+  const envOff = { ...process.env, MCNAI_USER_DATA: offlineUser, MCNAI_VAULT: vaultCopy }
+
+  // 第一次启动只为把服务器地址改成不可达的（127.0.0.1:9 = discard 端口，必然连不上）
+  const a1 = await launch(envOff)
+  const w1 = await a1.firstWindow()
+  await w1.waitForTimeout(1500)
+  await w1.evaluate(() => window.api.settings.setApiBase('http://127.0.0.1:9'))
+  await a1.close()
+
+  // 第二次启动：probeCloud 探测失败 → 窗口照常出现、本地功能可用、顶部挂离线条
+  const a2 = await launch(envOff)
+  const w2b = await a2.firstWindow()
+  await prepWindow(a2, w2b)
+  await w2b.waitForTimeout(2000)
+  const skipOff = w2b.locator('text=暂不登录')
+  if (await skipOff.count()) await skipOff.click()
+  await w2b.locator('[data-testid="offline-bar"]').waitFor({ timeout: 20000 })
+  const offText = await w2b.locator('[data-testid="offline-bar"]').innerText()
+  if (!/云端离线/.test(offText)) throw new Error(`离线条文案不对：「${offText}」`)
+  // 本地功能必须照常可用（这是 bug#1 的关键：不是"打不开"，是"云端那部分不可用"）
+  await w2b.click('text=个人知识库')
+  await w2b.waitForTimeout(2500)
+  if (!(await w2b.locator('[data-testid="tree-col"]').count()))
+    throw new Error('离线时知识库打不开了（bug#1 降级不成立）')
+  await w2b.waitForTimeout(500)
+  await w2b.screenshot({ path: join(shots, '33-云端离线-降级说明条.png') })
+  record('33-云端离线-降级说明条')
+  console.log('bug#1 离线降级 ✓', JSON.stringify(offText.replace(/\s+/g, ' ')))
+  await a2.close()
+}
+
 const app = await launch({
   ...process.env,
   MCNAI_USER_DATA: userData,
@@ -176,7 +218,10 @@ try {
     await win.fill('input[placeholder="邮箱"]', E2E_EMAIL)
     await win.fill('input[placeholder="密码"]', E2E_PASSWORD)
     await win.click('button:has-text("登录")')
-    await win.locator('button[title="新对话"]').waitFor({ timeout: 30000 })
+    // 登录成功后 provisionKeys 会写 key → 撞上 M-29 的 safeStorage 首次写入，
+    // 主进程连同 IPC 一起冻住好几分钟，登录后的界面因此迟迟不出来。
+    // 这不是登录失败，是 M-29；修掉它之后这里该改回 30s
+    await win.locator('button[title="新对话"]').waitFor({ timeout: 600000 })
     // 等服务端下发 key 落库：safeStorage 写 Keychain 要好几秒（实测 ~6s），固定等会误判
     let s = await win.evaluate(() => window.api.settings.get())
     for (let i = 0; i < 30 && !s.hasApiKey; i++) {
@@ -268,6 +313,29 @@ try {
       })
       if (caretLive) await snap('01d3-流式输出-行尾光标', 100)
       console.log('流式光标（真实流式中）：', JSON.stringify(caretLive))
+      // ---- H-10：生成中切走对话再切回来，进行中状态与半截正文都要还在 ----
+      {
+        const bodyNow = await win.locator('.streaming-body').first().innerText().catch(() => '')
+        if (bodyNow.trim()) {
+          const convTitle = (await win.locator('aside div.group button').first().innerText()).trim()
+          await win.locator('button[title="新对话"]').click() // 切走
+          await win.waitForTimeout(800)
+          if (await win.locator('button[title="停止生成"]').count())
+            throw new Error('切到新对话后仍显示上一个会话的停止按钮')
+          await win.locator(`aside button:has-text("${convTitle.slice(0, 8)}")`).first().click() // 切回
+          await win.waitForTimeout(1200)
+          if (!(await win.locator('button[title="停止生成"]').count()))
+            throw new Error('切回生成中的对话后没有"进行中"状态（H-10）')
+          const bodyBack = await win.locator('.streaming-body').first().innerText().catch(() => '')
+          const head = bodyNow.trim().slice(0, 12)
+          if (!bodyBack.includes(head))
+            throw new Error(`切回后半截正文没接上（draft 基线失效）：期望含「${head}」，实得「${bodyBack.slice(0, 40)}」`)
+          await snap('28-切回生成中的对话', 200)
+          console.log('H-10 切走切回 ✓', JSON.stringify({ 切走前: head, 切回后长度: bodyBack.length }))
+        } else {
+          console.log('⚠️ 流式正文还没吐出来，跳过 H-10 切走切回断言')
+        }
+      }
       await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 300000 }).catch(() => {})
       await snap('01e-工作台-回答完成', 1200)
       const answered = await win.locator('.md-article').count()
@@ -443,6 +511,107 @@ try {
           if (!/\d\/\d/.test(stageText)) throw new Error(`进度条没有阶段计数：「${stageText}」`)
           await snap('08-投递箱-处理中', 0)
           console.log('投递箱进度条 ✓', JSON.stringify(stageText.replace(/\s+/g, ' ')))
+
+          // ---- 全局任务状态层：投递跑着的时候切页面 / 刷新，状态都不能丢 ----
+          {
+            const dockBox = win.locator('[data-testid="task-dock"]')
+            const dockText = () => win.locator('[data-testid="task-dock-btn"]').innerText()
+            const dockOpen = async () =>
+              (await dockBox.evaluate((el) => getComputedStyle(el).maxHeight)) !== '0px'
+
+            // 上一轮可能已经跑完了（任务进终态、Dock 收起），所以这里自己再投一个文件，
+            // 保证接下来的断言有一个确定处于活跃态的任务可看
+            await win.evaluate((pth) => window.api.inbox.enqueue([pth]), sample)
+            let live = false
+            for (let i = 0; i < 120 && !live; i++) {
+              live = await dockOpen()
+              if (!live) await win.waitForTimeout(500)
+            }
+            if (!live) throw new Error('投了文件之后 TaskDock 仍然没出现')
+
+            // 渲染层刷新后状态照样在（主进程内存是真相源，reload 只是重拉一次 snapshot）。
+            // 必须趁任务刚活起来这一刻 reload——等它跑完再 reload 测的就是"收起"那条分支了
+            await win.reload()
+            await win.waitForTimeout(2500)
+            const after = await win.evaluate(async () => {
+              const st = await window.api.tasks.list()
+              const act = st.tasks.filter((t) => t.status === 'queued' || t.status === 'running')
+              const dock = document.querySelector('[data-testid="task-dock"]')
+              return {
+                active: act.length,
+                titles: act.map((t) => t.title),
+                dockOpen: dock ? getComputedStyle(dock).maxHeight !== '0px' : false,
+              }
+            })
+            if (!after.active) throw new Error('reload 后主进程的活跃任务没了（任务层没扛住刷新）')
+            if (!after.dockOpen) throw new Error('reload 后仍有活跃任务，但 Dock 没显示出来')
+            await snap('27-reload后-任务状态恢复', 200)
+            console.log('reload 恢复 ✓', JSON.stringify(after))
+
+            // Dock 出现/消失走高度过渡（批注 2）：走查开着 reduced-motion，所以只断言
+            // 过渡属性接上了 + 展开态高度不为 0（duration 在降级块里被归零，不影响这两条）
+            const tp = await dockBox.evaluate((el) => getComputedStyle(el).transitionProperty)
+            if (!tp.includes('max-height')) throw new Error('TaskDock 没有接高度过渡：' + tp)
+            console.log('Dock 高度过渡 ✓', tp)
+
+            // H-07：切到对话工作台，全局条必须还在（旧代码切走就没有任何在处理中的痕迹）。
+            // 注意两轮 pipeline 之间有 3 秒去抖窗口，那一刻确实没有活跃任务、Dock 本就该收起，
+            // 所以这里轮询而不是采样一次——采样会偶发落进那个窗口里
+            await win.locator('button[title="新对话"]').click() // 侧栏没有"工作台"条目，新对话即入口
+            let onWorkbench = ''
+            for (let i = 0; i < 80; i++) {
+              if (await dockOpen()) {
+                onWorkbench = await dockText()
+                if (/投递箱/.test(onWorkbench)) break
+              }
+              onWorkbench = ''
+              await win.waitForTimeout(500)
+            }
+            if (!onWorkbench)
+              throw new Error('切到工作台后一直看不到投递任务的全局条（H-07）')
+            await snap('25-工作台-全局任务条', 200)
+            console.log('H-07 跨页面出口 ✓', JSON.stringify(onWorkbench.replace(/\s+/g, ' ')))
+
+            // 真相源一致：Dock 显示的条数必须等于主进程 tasks:list 里的活跃任务数
+            // 任务随时可能结束，一次采样撞上跃迁很正常；连续对得上才算数
+            let cmp = null
+            let uiCount = -1
+            for (let i = 0; i < 20; i++) {
+              cmp = await win.evaluate(async () => {
+                const st = await window.api.tasks.list()
+                const act = st.tasks.filter((t) => t.status === 'queued' || t.status === 'running')
+                return { active: act.length, titles: act.map((t) => t.title) }
+              })
+              if (!(await dockOpen())) {
+                uiCount = 0
+              } else {
+                const dockNow = await dockText()
+                const many = /(\d+) 项进行中/.exec(dockNow)
+                uiCount = many ? Number(many[1]) : 1
+              }
+              if (uiCount === cmp.active) break
+              await win.waitForTimeout(300)
+            }
+            if (uiCount !== cmp.active)
+              throw new Error(`Dock 与 tasks:list 始终对不上：UI=${uiCount} 主进程=${cmp.active} ${JSON.stringify(cmp.titles)}`)
+            console.log('真相源一致 ✓', JSON.stringify({ ...cmp, uiCount }))
+
+            // H-08：切回知识库页，运行态与进度条必须还在（旧代码回来是空白或上一轮的静态日志）
+            await win.click('text=个人知识库')
+            await win.waitForTimeout(2000)
+            if (!(await win.locator('.inbox-bar-fill').count())) {
+              const btn = win.locator('button[title="投递箱"]')
+              if (await btn.count()) await btn.click()
+              await win.waitForTimeout(600)
+            }
+            if (!(await win.locator('.inbox-bar-fill').count()))
+              throw new Error('切回知识库页后进度条不见了（H-08）')
+            const backText = await win.locator('.inbox-bar-fill').locator('xpath=../..').innerText()
+            if (!/\d\/\d/.test(backText)) throw new Error(`切回后进度条没有阶段计数：「${backText}」`)
+            await snap('26-切回知识库-运行态还在', 200)
+            console.log('H-08 运行态不丢 ✓', JSON.stringify(backText.replace(/\s+/g, ' ')))
+          }
+
           // 完成态：等「处理中…」消失但面板还在（run-end 后面板还留 4 秒），趁这个窗口截
           for (let i = 0; i < 200; i++) {
             const panelUp = (await win.locator('.inbox-bar-fill').count()) > 0
@@ -730,9 +899,12 @@ try {
     if (!(await win.locator('button:has-text("重新获取服务端配置")').count()))
       throw new Error('设置页没有「重新获取服务端配置」按钮')
     await keyInput.fill('sk-e2e-manual-key-0123456789')
-    // safeStorage 写 Keychain 会把主进程卡住几秒（实测 ~6s，偶发更久），
-    // 主进程一卡 CDP 也跟着停，默认 30s 超时会误判成"点不动"，这里单独放宽
-    await win.click('[data-testid="apikey-save"]', { timeout: 120000 })
+    // 进程内第一次 safeStorage 写 Keychain 会把主进程整个冻住（审计 M-29）。
+    // 实测同一台机器上反复跑，这个耗时还在往上涨：6s → 35s → 68s（怀疑 ad-hoc 签名
+    // 每次启动都被 Keychain 当成新身份，ACL 条目越积越多）。主进程一卡 CDP 也跟着停，
+    // 默认超时会误判成"点不动"，所以这一次点击单独给到 10 分钟。
+    // 这不是走查的问题，是 M-29 本身——修掉它之后这里应该改回默认超时。
+    await win.click('[data-testid="apikey-save"]', { timeout: 600000 })
     await win.locator('text=API Key 已保存').waitFor({ timeout: 60000 })
     const afterKey = await win.evaluate(() => window.api.settings.get())
     if (!afterKey.hasApiKey) throw new Error('手填 key 保存后 hasApiKey 仍为 false')
@@ -811,10 +983,68 @@ try {
   await snapHover('13-产物卡片-hover操作')
   console.log('产物卡片 hover ✓（静态隐藏 → hover 出「打开/入库」）')
 
-  // 「入库」真点：应弹 toast 并把产物送进投递箱队列
-  await ingestBtn.click()
-  await win.locator('text=已送入投递箱').waitFor({ timeout: 5000 })
-  await snap('14-产物卡片-入库toast', 200)
+  // ---- 产物入库三态：未入库 →（点）入库中 → 已入库 ✓，并能点开落位笔记 ----
+  {
+    // 用真 docx（假 pptx 转换必失败，测不到「已入库」）
+    const cardDoc = win.locator('div.group:has([title="e2e产物样例.docx"])').first()
+    if (!(await cardDoc.count())) throw new Error('产物面板没有 e2e产物样例.docx 卡片')
+    await cardDoc.hover()
+    await win.waitForTimeout(200)
+    if (await cardDoc.locator('[data-testid="ingest-done"]').count())
+      throw new Error('还没入库就显示「已入库」')
+    await cardDoc.locator('button:has-text("入库")').click()
+    await win.locator('text=已送入投递箱').waitFor({ timeout: 5000 })
+    await snap('14-产物卡片-入库toast', 200)
+
+    // 入库中：任务层驱动的忙态（切页面回来也还在，因为状态不在这个组件里）
+    await cardDoc.hover()
+    await win.locator('[data-testid="ingest-busy"]').first().waitFor({ timeout: 20000 })
+    await snapHover('29-产物入库-入库中')
+    console.log('入库三态 · 入库中 ✓')
+
+    // 已入库：等本轮 pipeline 跑完（真 docx 应当转换成功）
+    let done = false
+    for (let i = 0; i < 160 && !done; i++) {
+      done = (await win.locator('[data-testid="ingest-done"]').count()) > 0
+      if (!done) await win.waitForTimeout(2000)
+    }
+    if (!done) {
+      const t = await win.evaluate(async () => {
+        const s = await window.api.tasks.list()
+        return s.tasks.filter((x) => x.kind === 'ingest').map((x) => ({ t: x.title, s: x.status, e: x.error }))
+      })
+      throw new Error('产物入库没有走到「已入库」：' + JSON.stringify(t))
+    }
+    await cardDoc.hover()
+    await snapHover('30-产物入库-已入库')
+
+    // 落盘表：重载后仍然认得「已入库」（不是内存里的一次性状态）
+    await win.reload()
+    await win.waitForTimeout(2500)
+    await win.click('button[title="打开产物面板"]').catch(() => {})
+    await win.waitForTimeout(600)
+    const card2 = win.locator('div.group:has([title="e2e产物样例.docx"])').first()
+    await card2.hover()
+    await win.waitForTimeout(300)
+    if (!(await card2.locator('[data-testid="ingest-done"]').count()))
+      throw new Error('reload 后「已入库」状态没了（ingested 表没落盘）')
+    await snapHover('31-已入库状态-重载后仍在')
+    // 点「已入库」应跳到知识库页并打开落位笔记
+    const ing = await win.evaluate(() => window.api.artifacts.ingested())
+    if (!ing['e2e产物样例.docx']?.noteRel)
+      throw new Error('已入库表里没有落位笔记路径：' + JSON.stringify(ing['e2e产物样例.docx']))
+    await card2.locator('[data-testid="ingest-done"]').click()
+    await win.waitForTimeout(2500)
+    if (!(await win.locator('[data-testid="tree-col"]').count()))
+      throw new Error('点「已入库」没有跳到知识库页（noteRel=' + ing['e2e产物样例.docx'].noteRel + '）')
+    await snap('32-已入库-点开落位笔记', 400)
+    console.log('入库三态 ✓（未入库 → 入库中 → 已入库，且重载后仍在）')
+    // 回工作台并把产物面板重新展开：后面还有 md 预览要测
+    await win.locator('button[title="新对话"]').click()
+    await win.waitForTimeout(600)
+    await win.click('button[title="打开产物面板"]').catch(() => {})
+    await win.waitForTimeout(400)
+  }
 
   // md 产物的「预览」真点：卡片内应渲染出正文
   const cardMd = win.locator('div.group:has([title="e2e说明.md"])').first()

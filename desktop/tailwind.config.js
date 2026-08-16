@@ -23,6 +23,8 @@ module.exports = {
         'on-solid': 'var(--color-on-solid)',
         danger: 'var(--color-danger)',
         ok: 'var(--color-ok)',
+        warn: 'var(--color-warn)',
+        'warn-soft': 'var(--color-warn-soft)',
         'file-ppt': 'var(--color-file-ppt)',
         'file-doc': 'var(--color-file-doc)',
         'file-xls': 'var(--color-file-xls)',

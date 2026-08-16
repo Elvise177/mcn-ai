@@ -69,7 +69,10 @@ textarea {
 }
 
 /* 投递箱进度条：宽度变化走过渡，未完成段用斜纹缓慢流动表示"在跑" */
-.inbox-bar-fill {
+/* 全局任务条的进度条用单独类名 —— 两根条同时在屏上时，
+   走查里的 `.inbox-bar-fill` 选择器必须仍然只指投递箱面板那一根 */
+.inbox-bar-fill,
+.task-bar-fill {
   transition: width var(--dur-slow) var(--ease-out);
 }
 .inbox-bar-running {
@@ -83,10 +86,26 @@ textarea {
 
 button { transition: background-color var(--dur-fast) ease, color var(--dur-fast) ease, opacity var(--dur-fast) ease, border-color var(--dur-fast) ease; }
 
+/* 全局任务条：出现/消失走高度过渡，避免侧栏底部"跳"一下把身份行顶上去又落回来。
+   降级块里只把 duration 归零而不是 transition:none —— 这样走查仍能断言过渡是接上的 */
+.task-dock {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height var(--dur-base) var(--ease-out), opacity var(--dur-base) var(--ease-out);
+}
+.task-dock-open {
+  max-height: 160px;
+  opacity: 1;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .fade-up, .slide-in-right, .page-enter, .inbox-bar-running, .thinking-dots span,
   .streaming-body .md-article > *:last-child::after {
     animation: none;
+  }
+  .task-dock {
+    transition-duration: 0s;
   }
 }
 

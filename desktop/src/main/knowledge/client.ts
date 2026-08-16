@@ -2,7 +2,9 @@ import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
 import { join } from 'path'
 import { store } from '../store'
-import { getAccessToken, getSupabase, getSession } from '../auth'
+import { getAccessToken, getSupabase, getSession, markCloudReachable, markCloudUnreachable } from '../auth'
+import { tasks } from '../tasks/registry'
+import { dropSyncFailure, getSyncQueue, pushSyncFailure } from '../tasks/persist'
 import { vaultManager } from '../vault'
 
 export interface CloudMatch {
@@ -20,11 +22,18 @@ function apiBase(): string {
 async function authedFetch(path: string, body: unknown): Promise<Response | null> {
   const token = await getAccessToken()
   if (!token) return null
-  return fetch(`${apiBase()}${path}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    body: JSON.stringify(body),
-  })
+  try {
+    const res = await fetch(`${apiBase()}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    })
+    markCloudReachable() // 拿到任何响应都说明够得着云端，不必额外发探测
+    return res
+  } catch (e) {
+    markCloudUnreachable(e)
+    throw e
+  }
 }
 
 /** 单篇笔记上云（私人层）：内容哈希去重，未变更服务端直接跳过 */
@@ -64,33 +73,63 @@ export async function searchCloud(query: string, matchCount = 6): Promise<CloudM
   }
 }
 
-/** 聊天记录直写 Supabase（RLS=仅本人）；失败静默，本地 electron-store 仍是权威副本 */
+const syncPending = (): void => {
+  tasks.setCloud({ pendingSync: getSyncQueue().length })
+}
+
+/**
+ * 聊天记录直写 Supabase（RLS=仅本人）。本地 electron-store 仍是权威副本。
+ *
+ * 失败不再静默蒸发（审计 M-03）：落进 syncQueue（退避 1m/5m/30m→转手动，见设计 §3.5），
+ * 条数经 CloudState 暴露到全局条。一期只做入队与计数，真正的重试定时器在二期。
+ */
 export async function syncConversation(conv: {
   id: string
   title: string
   messages: { role: 'user' | 'assistant'; text: string }[]
 }): Promise<void> {
   const sb = getSupabase()
-  const session = await getSession()
-  if (!sb || !session) return
+  const session = await getSession().catch(() => null)
+  if (!sb || !session) return // 未登录 = 本来就不同步，不是失败
+  const id = `sync:${conv.id}`
+  tasks.start({
+    id,
+    kind: 'sync',
+    key: conv.id,
+    title: '同步聊天记录',
+    cancelable: false,
+    scope: 'conversation',
+    tries: 0,
+  })
   try {
-    await sb.from('conversations').upsert({
+    const up = await sb.from('conversations').upsert({
       id: conv.id,
       user_id: session.user.id,
       title: conv.title,
       metadata: { source: 'desktop' },
       updated_at: new Date().toISOString(),
     })
+    if (up.error) throw new Error(up.error.message)
     const last = conv.messages.slice(-2)
     for (const m of last) {
-      await sb.from('messages').insert({
+      const ins = await sb.from('messages').insert({
         conversation_id: conv.id,
         role: m.role,
         content: m.text,
         metadata: { source: 'desktop' },
       })
+      if (ins.error) throw new Error(ins.error.message)
     }
-  } catch {
-    /* 离线/网络错误：忽略，云端同步尽力而为 */
+    markCloudReachable()
+    dropSyncFailure(conv.id)
+    tasks.finish(id, 'succeeded')
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    const item = pushSyncFailure(conv.id, msg)
+    markCloudUnreachable(e)
+    tasks.patch(id, { tries: item.tries, nextRetryAt: item.nextRetryAt })
+    tasks.finish(id, 'failed', msg)
+  } finally {
+    syncPending()
   }
 }

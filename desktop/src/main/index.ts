@@ -6,11 +6,12 @@ process.on('uncaughtException', (e) => log('error', 'main-uncaught', e))
 process.on('unhandledRejection', (r) => log('error', 'main-rejection', r instanceof Error ? r : String(r)))
 import { join } from 'path'
 import { registerIpc, openStoredVault } from './ipc'
-import { provisionKeys } from './auth'
+import { probeCloud, provisionKeys } from './auth'
 import { vaultManager } from './vault'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
 import { artifactsWatcher } from './agent/artifacts'
+import { tasks } from './tasks/registry'
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -32,6 +33,7 @@ function createWindow(): void {
   inboxOrchestrator.attachWindow(win)
   agentManager.attachWindow(win)
   artifactsWatcher.attachWindow(win)
+  tasks.attachWindow(win)
 
   // 兜底：拖文件进窗口时 Electron 默认导航到 file://，整个应用被那个文件替换、只能退出重开。
   // 渲染层已在 main.tsx 全局 preventDefault，这里再拦一层（同 URL 放行，别挡住 reload）
@@ -108,6 +110,7 @@ app.whenReady().then(() => {
   createWindow()
   void openStoredVault() // 启动即加载上次的库，工作台首页直接可问
   void provisionKeys() // 已登录用户启动时刷新服务端下发的 AI 配置
+  void probeCloud() // 云端可达性：探测有超时，Supabase 被暂停时不会把启动拖住
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

@@ -184,6 +184,11 @@ export class VaultManager {
   }
 
   /** wiki 链接目标 → 相对路径（全路径/后缀/短名三级解析，与图谱共用一套规则） */
+  /** 当前索引里的全部笔记路径。产物入库靠"跑完前后的差集"找落位笔记 */
+  notePaths(): string[] {
+    return [...this.notes.keys()]
+  }
+
   resolveLink(target: string): string | null {
     return makeResolver(this.notes)(target)
   }

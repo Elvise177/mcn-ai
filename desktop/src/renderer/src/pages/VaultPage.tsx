@@ -11,6 +11,7 @@ import { pendingNote } from '../lib/bus'
 import { GRAPH_GROUP_TOKENS, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
 import { errText } from '../lib/err'
+import { useTask } from '../hooks/useTasks'
 
 const colorOf = (group: string): string => {
   let h = 0
@@ -132,64 +133,39 @@ const STAGE_ZH: Record<string, string> = {
   cloud_sync: '上云', // 缺这条时日志里会直接漏出英文 stage id
 }
 
+/**
+ * 投递箱状态**不再由本页面持有**——它挂在 App 层的任务状态层里，切页面不会丢（H-07/H-08）。
+ * 这里只做两件事：把任务投影成面板需要的形状，以及在"活跃→终态"这个边沿上触发回调。
+ */
 function useInbox(onDone?: (files: string[]) => void, onEnd?: (ok: boolean) => void) {
-  const [events, setEvents] = useState<InboxEvent[]>([])
-  const [running, setRunning] = useState(false)
-  const received = useRef<string[]>([])
+  const task = useTask('inbox')
   const onDoneRef = useRef(onDone)
   onDoneRef.current = onDone
   const onEndRef = useRef(onEnd)
   onEndRef.current = onEnd
+
+  const status = task?.status
+  const prevStatus = useRef<TaskStatus | undefined>(undefined)
   useEffect(() => {
-    window.api.inbox.lastRun().then(setEvents)
-    return window.api.inbox.onEvent((ev) => {
-      if (ev.type === 'run-start') {
-        setRunning(true)
-        setEvents([])
-      } else if (ev.type === 'run-end') {
-        setRunning(false)
-        if (ev.ok && received.current.length) onDoneRef.current?.(received.current)
-        received.current = []
-        onEndRef.current?.(!!ev.ok)
-      } else {
-        if (ev.type === 'file-added' && ev.file) received.current.push(ev.file)
-        setEvents((es) => [...es.slice(-30), ev])
-      }
-    })
-  }, [])
-  return { events, running }
+    const was = prevStatus.current
+    prevStatus.current = status
+    if (!status || !was) return // 首次观察到（含重启后 seed 进来的终态）不触发
+    const wasLive = was === 'queued' || was === 'running'
+    const nowDone = status === 'succeeded' || status === 'failed' || status === 'canceled'
+    if (!wasLive || !nowDone) return
+    if (status === 'succeeded' && task?.files.length) onDoneRef.current?.(task.files)
+    onEndRef.current?.(status === 'succeeded')
+  }, [status, task])
+
+  return { task, running: status === 'running' || status === 'queued' }
 }
 
-/** 进度条用的主流程阶段（末尾"上云"是 M4 追加的第 6 段，未登录时会 skipped） */
-const FLOW: Array<[string, string]> = [
-  ['convert', '转换'],
-  ['pii_guard', 'PII守卫'],
-  ['tag_llm', '智能打标'],
-  ['sensitive_enrich', '实体建链'],
-  ['gen_moc', '索引重建'],
-  ['cloud_sync', '上云'],
-]
-
-/** 从事件流推出「第几段 / 共几段」——阶段来一条推一格，宽度变化交给 CSS 过渡 */
-function flowProgress(events: InboxEvent[]): { done: number; total: number; label: string; failed: boolean } {
-  const total = FLOW.length
-  let done = 0
-  let label = ''
-  let failed = false
-  for (const ev of events) {
-    if (ev.type !== 'stage' || !ev.stage) continue
-    const i = FLOW.findIndex(([k]) => k === ev.stage)
-    if (i < 0) continue
-    if (ev.status === 'error') failed = true
-    done = Math.max(done, i + 1)
-    label = FLOW[i][1]
-  }
-  return { done, total, label, failed }
-}
-
-function InboxPanel({ events, running, onClose }: { events: InboxEvent[]; running: boolean; onClose: () => void }) {
+/** 阶段进度（done/total/label）由主进程算好放在 task.progress 里，这里只负责画 */
+function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boolean; onClose: () => void }) {
   const dot = (s?: string): string => (s === 'ok' ? 'bg-ok' : s === 'error' ? 'bg-danger' : 'bg-line')
-  const { done, total, label, failed } = flowProgress(events)
+  const events = task?.stages ?? []
+  const { done, total, label } = task?.progress ?? { done: 0, total: 6, label: '' }
+  const failed = !!task?.error
   const pct = running || done > 0 ? Math.round((done / total) * 100) : 0
   // 日志区跟着最新一条走：不然跑到一半新阶段全在折叠线以下，看着像卡住不动
   const logRef = useRef<HTMLDivElement>(null)
@@ -314,7 +290,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
       return next
     })
   }, [])
-  const { events: inboxEvents, running: inboxRunning } = useInbox(async (files) => {
+  const { task: inboxTask, running: inboxRunning } = useInbox(async (files) => {
     // 入库完成：自动打开第一个新笔记，并在左侧树中展开定位
     const base = files[0]?.replace(/\.[^.]+$/, '')
     if (!base) return
@@ -540,7 +516,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         </div>
       )}
       {(showInbox || inboxRunning) && (
-        <InboxPanel events={inboxEvents} running={inboxRunning} onClose={() => setShowInbox(false)} />
+        <InboxPanel task={inboxTask} running={inboxRunning} onClose={() => setShowInbox(false)} />
       )}
       {/* 分区树（宽度可拖，右侧分隔线兼作分栏线） */}
       <div data-testid="tree-col" style={{ width: treeW }} className="flex shrink-0 flex-col">

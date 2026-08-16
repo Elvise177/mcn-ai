@@ -3,6 +3,8 @@ import { createClient, type SupabaseClient, type Session } from '@supabase/supab
 import WebSocket from 'ws'
 import { BrowserWindow, safeStorage } from 'electron'
 import Store from 'electron-store'
+import { tasks } from '../tasks/registry'
+import { clearSyncQueue, getSyncQueue } from '../tasks/persist'
 
 /** Supabase 公开配置（anon key 设计上可公开，RLS 才是安全边界）；从 webpage 同项目取 */
 const SUPABASE_URL = 'https://yqozqfrmdddmfrpavrsn.supabase.co'
@@ -61,6 +63,7 @@ export async function login(email: string, password: string): Promise<{ ok: bool
   const { error } = await sb.auth.signInWithPassword({ email, password })
   if (error) return { ok: false, error: error.message }
   void provisionKeys() // 登录即用：服务端下发 AI key（不阻塞登录返回）
+  void probeCloud()
   return { ok: true }
 }
 
@@ -127,6 +130,39 @@ export async function provisionKeys(): Promise<ProvisionResult> {
 
 export async function logout(): Promise<void> {
   await getSupabase()?.auth.signOut()
+  // 队列里的记录属于上一个账号，不能带到下一个账号的 Supabase 里去
+  clearSyncQueue()
+  tasks.setCloud({ loggedIn: false, email: undefined, pendingSync: 0 })
+}
+
+/**
+ * 云端状况探测（Condition，不是 Task——它没有终态）。
+ * 探测本身要有超时，否则 Supabase 被暂停（域名 NXDOMAIN）时这里会挂很久。
+ */
+export async function probeCloud(): Promise<void> {
+  const { store } = await import('../store')
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(), 6000)
+  try {
+    // HEAD 根路径就够回答"云端够不够得着"，不依赖任何具体业务端点
+    await fetch(store.get('apiBaseUrl'), { method: 'HEAD', signal: ctl.signal })
+    markCloudReachable()
+  } catch (e) {
+    markCloudUnreachable(e)
+  } finally {
+    clearTimeout(timer)
+  }
+  const s = await getSession().catch(() => null)
+  tasks.setCloud({ loggedIn: !!s, email: s?.user.email ?? undefined, pendingSync: getSyncQueue().length })
+}
+
+/** 任何一次真实请求成功都顺带证明云端可达，不必额外发探测请求 */
+export function markCloudReachable(): void {
+  tasks.setCloud({ reachable: true, lastError: undefined })
+}
+
+export function markCloudUnreachable(e: unknown): void {
+  tasks.setCloud({ reachable: false, lastError: e instanceof Error ? e.message : String(e) })
 }
 
 export async function getSession(): Promise<Session | null> {

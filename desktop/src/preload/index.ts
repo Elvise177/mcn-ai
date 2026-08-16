@@ -72,10 +72,20 @@ const artifacts = {
   list: () => ipcRenderer.invoke('artifacts:list'),
   open: (relPath: string) => ipcRenderer.invoke('artifacts:open', relPath),
   readText: (relPath: string) => ipcRenderer.invoke('artifacts:readText', relPath),
+  ingest: (relPath: string) => ipcRenderer.invoke('artifacts:ingest', relPath),
+  ingested: () => ipcRenderer.invoke('artifacts:ingested'),
   onCreated: (cb: (a: unknown) => void) => {
     const listener = (_e: unknown, a: unknown): void => cb(a)
     ipcRenderer.on('artifact:created', listener)
     return () => ipcRenderer.removeListener('artifact:created', listener)
+  },
+}
+const tasksApi = {
+  list: () => ipcRenderer.invoke('tasks:list'),
+  onEvent: (cb: (p: unknown) => void) => {
+    const listener = (_e: unknown, p: unknown): void => cb(p)
+    ipcRenderer.on('task:event', listener)
+    return () => ipcRenderer.removeListener('task:event', listener)
   },
 }
 const shortcut = {
@@ -96,7 +106,7 @@ const routes = {
 const dingtalk = {
   test: () => ipcRenderer.invoke('dingtalk:test'),
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes }
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes, tasks: tasksApi }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi

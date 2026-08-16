@@ -28,6 +28,9 @@
   /* ===== 颜色：状态 ===== */
   --color-danger: #dc4c4c;
   --color-ok: #2f9e6e;
+  /* 提醒（云端离线条）：取暖调赭黄，与关系图 group-3 同一支，别引入蓝灰系的"系统提示"感 */
+  --color-warn: #a8762f;
+  --color-warn-soft: #f8f1e2;
 
   /* ===== 颜色：文件类型（产物卡片图标区分） ===== */
   --color-file-ppt: #cf6a3c;

@@ -14,6 +14,64 @@ interface DesktopSettings {
   artifactAutoIngest: boolean
 }
 
+type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync'
+type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+
+interface TaskBase {
+  id: string
+  kind: TaskKind
+  key: string
+  status: TaskStatus
+  /** 主进程生成的一句话，渲染层直接显示、不再拼文案 */
+  title: string
+  startedAt: number
+  endedAt?: number
+  progress?: { done: number; total: number; label: string }
+  error?: string
+  cancelable: boolean
+  seq: number
+}
+interface InboxTask extends TaskBase {
+  kind: 'inbox'
+  files: string[]
+  stages: InboxEvent[]
+  pid?: number
+}
+interface AgentTask extends TaskBase {
+  kind: 'agent'
+  conversationId: string
+  draft: string
+  toolLine?: string
+  sdkSessionId?: string
+}
+interface IngestTask extends TaskBase {
+  kind: 'ingest'
+  artifactPath: string
+  noteRel?: string
+}
+interface SyncTask extends TaskBase {
+  kind: 'sync'
+  scope: 'conversation' | 'note'
+  tries: number
+  nextRetryAt?: number
+}
+type Task = InboxTask | AgentTask | IngestTask | SyncTask
+
+interface CloudState {
+  reachable: boolean | null
+  loggedIn: boolean
+  email?: string
+  lastError?: string
+  checkedAt: number
+  pendingSync: number
+}
+
+type TaskEventPayload =
+  | { type: 'snapshot'; tasks: Task[]; cloud: CloudState }
+  | { type: 'upsert'; task: Task }
+  | { type: 'remove'; id: string }
+  | { type: 'cloud'; cloud: CloudState }
+
 interface InboxEvent {
   type: 'file-added' | 'run-start' | 'stage' | 'run-end'
   stage?: string
@@ -144,6 +202,10 @@ interface Window {
       provisionError: () => Promise<string | null>
       onProvisionFailed: (cb: (msg: string) => void) => () => void
     }
+    tasks: {
+      list: () => Promise<{ tasks: Task[]; cloud: CloudState }>
+      onEvent: (cb: (p: TaskEventPayload) => void) => () => void
+    }
     shortcut: {
       on: (cb: (name: string) => void) => () => void
     }
@@ -155,6 +217,8 @@ interface Window {
       list: () => Promise<ArtifactInfo[]>
       open: (relPath: string) => Promise<void>
       readText: (relPath: string) => Promise<string>
+      ingest: (relPath: string) => Promise<{ ok: boolean; error?: string }>
+      ingested: () => Promise<Record<string, { at: number; noteRel?: string }>>
       onCreated: (cb: (a: { path: string; name: string }) => void) => () => void
     }
   }

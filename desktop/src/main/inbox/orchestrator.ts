@@ -9,16 +9,11 @@ import { getAccessToken } from '../auth'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { notifyDingtalk } from '../lib/dingtalk'
+import { tasks } from '../tasks/registry'
+import { INBOX_FLOW, type InboxEvent, type InboxTask } from '../tasks/types'
+import { getLastInboxRun, setLastInboxRun } from '../tasks/persist'
 
-export interface InboxEvent {
-  type: 'file-added' | 'run-start' | 'stage' | 'run-end'
-  stage?: string
-  status?: string
-  message?: string
-  pending?: number
-  file?: string
-  ok?: boolean
-}
+export type { InboxEvent }
 
 /** 投递箱编排：监听 inbox 目录 → 去抖合并 → 串行 spawn 冻结版 pipeline → 进度转 IPC */
 export class InboxOrchestrator {
@@ -44,7 +39,117 @@ export class InboxOrchestrator {
       this.lastRun.push(ev)
       if (ev.status === 'error') log('error', 'inbox', `${ev.stage}: ${ev.message}`)
     }
+    this.toTask(ev)
+    // legacy 通道：一期继续转发（只增不减，新 UI 出问题旧路径仍然工作），二期删
     this.win?.webContents.send('inbox:event', ev)
+  }
+
+  private get taskId(): string {
+    return `inbox:${this.vaultRoot ?? ''}`
+  }
+
+  /** 进度分母在主进程算，渲染层不再自己拼（同一句话要在全局条和面板里一致） */
+  private computeProgress(): { done: number; total: number; label: string } {
+    let done = 0
+    let label = ''
+    for (const ev of this.lastRun) {
+      if (ev.type !== 'stage' || !ev.stage) continue
+      const i = INBOX_FLOW.findIndex(([k]) => k === ev.stage)
+      if (i < 0) continue
+      done = Math.max(done, i + 1)
+      label = INBOX_FLOW[i][1]
+    }
+    return { done, total: INBOX_FLOW.length, label: label || '准备中' }
+  }
+
+  /** 把阶段事件翻译成任务状态。任务是唯一真相源，legacy 事件只是它的副本 */
+  private toTask(ev: InboxEvent): void {
+    const id = this.taskId
+    const cur = tasks.get(id)
+    const live = cur && (cur.status === 'queued' || cur.status === 'running')
+
+    if (ev.type === 'file-added') {
+      // watcher 收到文件 → 3 秒去抖窗口内先挂一个 queued，用户立刻看得见"收下了"
+      if (!live) {
+        tasks.start({
+          id,
+          kind: 'inbox',
+          key: this.vaultRoot ?? '',
+          status: 'queued',
+          title: '投递箱已收到文件',
+          cancelable: false,
+          files: ev.file ? [ev.file] : [],
+          stages: [],
+        })
+      } else {
+        const files = [...(cur as InboxTask).files, ev.file ?? ''].filter(Boolean)
+        tasks.patch(id, { files, title: `投递箱已收到 ${files.length} 个文件` } as Partial<InboxTask>)
+      }
+      return
+    }
+
+    if (ev.type === 'run-start') {
+      const files = live ? (cur as InboxTask).files : []
+      tasks.start({
+        id,
+        kind: 'inbox',
+        key: this.vaultRoot ?? '',
+        status: 'running',
+        title: '投递箱处理中',
+        cancelable: false,
+        files,
+        stages: [],
+        progress: { done: 0, total: INBOX_FLOW.length, label: '准备中' },
+      })
+      return
+    }
+
+    if (ev.type === 'stage') {
+      if (!live) return
+      tasks.patch(id, {
+        stages: [...this.lastRun],
+        progress: this.computeProgress(),
+        ...(ev.status === 'error' ? { error: `${ev.stage}: ${ev.message ?? '失败'}` } : {}),
+      } as Partial<InboxTask>)
+      return
+    }
+
+    if (ev.type === 'run-end') {
+      tasks.patch(id, {
+        stages: [...this.lastRun],
+        progress: this.computeProgress(),
+        title: ev.ok ? '投递箱处理完成' : '投递箱处理失败',
+      } as Partial<InboxTask>)
+      tasks.finish(id, ev.ok ? 'succeeded' : 'failed')
+      // 「进行中」永不落盘，落的只有这一条终态结果（重启后面板仍能看到上次结果）
+      setLastInboxRun({
+        endedAt: Date.now(),
+        ok: !!ev.ok,
+        files: [...((tasks.get(id) as InboxTask | undefined)?.files ?? [])],
+        stages: [...this.lastRun],
+      })
+    }
+  }
+
+  /** 重启后把上一轮结果塞回 recent —— 面板上仍能看到「上次 6/6 完成」 */
+  private seedFromDisk(): void {
+    const r = getLastInboxRun()
+    if (!r) return
+    this.lastRun = r.stages
+    tasks.seedRecent({
+      id: this.taskId,
+      kind: 'inbox',
+      key: this.vaultRoot ?? '',
+      status: r.ok ? 'succeeded' : 'failed',
+      title: r.ok ? '上次投递处理完成' : '上次投递处理失败',
+      startedAt: r.endedAt,
+      endedAt: r.endedAt,
+      cancelable: false,
+      seq: 0,
+      files: r.files,
+      stages: r.stages,
+      progress: this.computeProgress(),
+    })
   }
 
   private configuring: Promise<string> | null = null
@@ -62,9 +167,15 @@ export class InboxOrchestrator {
     return this.configuring
   }
 
+  private seeded = false
+
   private async doConfigure(vaultRoot: string): Promise<string> {
     await this.stop()
     this.vaultRoot = vaultRoot
+    if (!this.seeded) {
+      this.seeded = true
+      this.seedFromDisk()
+    }
     let inboxName = '00_投递箱'
     try {
       const layout = JSON.parse(await fs.readFile(join(vaultRoot, '.mcnai', 'layout.json'), 'utf-8'))
@@ -130,6 +241,12 @@ export class InboxOrchestrator {
       }
     }
     return n
+  }
+
+  /** 本轮跑完的回调（产物入库任务靠它知道自己成没成——ingest 的 running 阶段由某个 inbox run 承载） */
+  private runEndCbs: Array<(ok: boolean) => void> = []
+  onRunEnd(cb: (ok: boolean) => void): void {
+    this.runEndCbs.push(cb)
   }
 
   /** 多文件拖入 3 秒内合并为一次 pipeline 运行 */
@@ -221,6 +338,13 @@ export class InboxOrchestrator {
     if (ok) await this.cloudSync(runStart)
 
     this.send({ type: 'run-end', ok })
+    for (const cb of this.runEndCbs) {
+      try {
+        cb(ok)
+      } catch (e) {
+        log('error', 'inbox', `run-end 回调失败: ${e}`)
+      }
+    }
     {
       const files = this.runFiles.splice(0)
       const fileLine = files.length ? `\n\n处理文件：${files.slice(0, 8).join('、')}${files.length > 8 ? ` 等${files.length}个` : ''}` : ''

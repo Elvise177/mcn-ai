@@ -196,9 +196,11 @@ watcher 触发时会重新 `read` 并 `setNote`（[VaultPage.tsx:355](desktop/sr
 **M-28 未登录（本地模式）时，云端相关入口没有降级说明**
 产物「入库」照常可点、`cloud_sync` 阶段只在日志里写一行「跳过」（[orchestrator.ts:145](desktop/src/main/inbox/orchestrator.ts:145)），AI 检索会静默从云端三层回退到本地全文（[agent/index.ts:126](desktop/src/main/agent/index.ts:126)–138），检索质量变化用户完全不知情。**建议**：本地模式在工作台顶部给一条常驻说明条。
 
-**M-29 写 key 会把主进程整个卡住约 6 秒（2026-08-16 修 H-06 时实测）** ⏳ 待办
-`setSecret` 里的 `safeStorage.encryptString`（[store.ts:42](desktop/src/main/store.ts:42)–47）是同步调用，macOS 上要访问 Keychain，实测单次 **~6 秒**，期间主进程完全阻塞——窗口不响应、所有 IPC 排队，走查里连 Playwright 的 CDP 都跟着停（click 直接 30s 超时）。触发点有三个：设置页手填 key（已加忙态按钮兜住观感）、登录后的 `provisionKeys` 下发（[auth/index.ts:84](desktop/src/main/auth/index.ts:84)–92，用户看到的是登录后卡一下）、以及后续任何写 key 的地方。忙态只是遮羞，根因没解。
-**建议**：把 `setApiKey`/`setLlmKey` 改成异步（丢进 worker 或至少 `setImmediate` + 回调，别在 IPC handler 里同步等），**切换模型 provider 时一并异步化**——那次改动会重写这条读写链路，顺手做成本最低，单独为它开一轮不划算。
+**M-29 进程内第一次写 key 会把主进程冻住 6–35 秒（2026-08-16 实测，一期走查复测后加严）** ⏳ 待办
+`setSecret` 里的 `safeStorage.encryptString`（[store.ts:42](desktop/src/main/store.ts:42)–47）是同步调用，macOS 上要访问 Keychain。**同一进程内第一次调用最贵，实测 6 秒 ~ 35 秒（多次测量差异极大）；之后的调用只要 10–30 毫秒。** 期间主进程完全阻塞——窗口不响应、所有 IPC 排队，连 Playwright 的 CDP 都跟着停（走查里这一步 30s / 120s 超时各撞过一次，最后只能把这一次点击的超时单独放宽到 300s）。
+怀疑与 ad-hoc 签名有关：每次启动对 Keychain 而言都像一个"新应用"，ACL 校验因此很贵；拿到开发者签名后应复测一次。
+**真正影响用户的是登录那条路径**：`provisionKeys` 下发 key 时会走同一个调用（[auth/index.ts:107](desktop/src/main/auth/index.ts:107)–115），所以**用户点完登录会看到应用整体冻住几十秒**，体感就是"卡死了"。设置页手填 key 已加忙态按钮，但那只是遮羞，根因没解。
+**建议**：把 `setApiKey`/`setLlmKey` 移出主进程主线程（safeStorage 是 main-only，不能进 worker_thread，需要另想办法：拆独立 utilityProcess，或改用别的加密落盘方案）；**切换模型 provider 时一并处理**——那次改动会重写这条读写链路。在那之前，登录流程至少要给一个"正在配置 AI 服务…"的明确等待态，别让用户以为死机。
 
 ---
 

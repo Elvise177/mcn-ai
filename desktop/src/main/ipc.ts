@@ -13,6 +13,7 @@ import { createVault } from './vault/wizard'
 import { sendDingtalk } from './lib/dingtalk'
 import { startBizSync } from './knowledge/bizdata'
 import { getRoutes, setRoutes, ensureRouteFolders } from './lib/routes'
+import { tasks } from './tasks/registry'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
@@ -124,6 +125,13 @@ export function registerIpc(): void {
   ipcMain.handle('artifacts:list', () => artifactsWatcher.list())
   ipcMain.handle('artifacts:open', (_e, relPath: string) => artifactsWatcher.open(relPath))
   ipcMain.handle('artifacts:readText', (_e, relPath: string) => artifactsWatcher.readText(relPath))
+  // 显式入库（带任务身份），取代过去借道 inbox:enqueue 的发射后不管
+  ipcMain.handle('artifacts:ingest', (_e, relPath: string) => artifactsWatcher.ingest(relPath))
+  ipcMain.handle('artifacts:ingested', () => artifactsWatcher.ingested())
+
+  // ---- 全局任务状态层 ----
+  // push（task:event）尽力而为，这个 invoke 才是权威：渲染层每次挂载都先拉一次打底
+  ipcMain.handle('tasks:list', () => tasks.snapshot())
 
   // ---- 诊断与日志 ----
   ipcMain.handle('diag:export', () => exportDiagnostics())

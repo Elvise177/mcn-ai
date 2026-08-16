@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox } from 'lucide-react'
+import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check } from 'lucide-react'
 import { FastMarkdown } from '../components/Markdown'
 import { FileIcon } from '../components/FileIcon'
 import { ui } from '../components/ui'
 import { CHIPS } from '../config/chips'
 import { greetingLine } from '../lib/profile'
 import { errText } from '../lib/err'
+import { useTask } from '../hooks/useTasks'
 
 const TOOL_ZH: Record<string, string> = {
   search_knowledge: '检索知识库',
@@ -39,19 +40,34 @@ export default function Workbench({
   // 消息以 conv prop 为准（App 统一持久化）；这里只管流式草稿/工具行/输入框
   const messages = conv.messages
   const [input, setInput] = useState('')
-  const [streaming, setStreaming] = useState(false)
+  const [sending, setSending] = useState(false)
   const [draft, setDraft] = useState('')
   const [toolLine, setToolLine] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const convRef = useRef(conv)
   convRef.current = conv
 
+  // 「这个会话在不在生成」的真相在主进程，不再是本组件的局部量——
+  // 切走再切回来、甚至 reload，状态都还在（H-10 的"看得见在跑"）
+  const task = useTask('agent', conv.id)
+  const taskRunning = task?.status === 'running'
+  // sending 只是"刚点了发送、任务事件还没回来"的这几十毫秒的乐观态
+  const streaming = sending || taskRunning
+
   useEffect(() => {
     setInput('')
     setDraft('')
     setToolLine(null)
-    setStreaming(false)
+    setSending(false)
   }, [conv.id])
+
+  // 切回一个正在生成的会话：用主进程累积的 draft 补齐切走那段时间流出的字，
+  // 之后继续听 agent:stream 逐字追加。只在本地为空时采纳，别把更新的本地内容盖回旧快照
+  useEffect(() => {
+    if (!taskRunning || !task) return
+    setDraft((d) => d || task.draft)
+    setToolLine((l) => l ?? (task.toolLine ? (TOOL_ZH[task.toolLine.replace(/^mcp__\w+__/, '')] ?? task.toolLine) : null))
+  }, [taskRunning, task])
 
   useEffect(() => {
     return window.api.chat.onStream((p) => {
@@ -66,7 +82,7 @@ export default function Workbench({
         setDraft('')
       } else if (p.kind === 'done' || p.kind === 'error') {
         setDraft('')
-        setStreaming(false)
+        setSending(false)
         setToolLine(null)
       }
     })
@@ -79,9 +95,9 @@ export default function Workbench({
   const send = useCallback(
     (text: string) => {
       const t = text.trim()
-      if (!t || streaming) return
+      if (!t || streaming) return // 同一会话已经在跑就不再发（二期主进程也会拒一次）
       setInput('')
-      setStreaming(true)
+      setSending(true)
       setDraft('')
       onSend(t)
     },
@@ -228,7 +244,7 @@ export default function Workbench({
         )}
       </div>
       {/* 首页已经有「最近产物」卡片区，这里默认收起，避免同屏两份一样的内容 */}
-      <ArtifactPanel homeEmpty={empty} />
+      <ArtifactPanel homeEmpty={empty} onOpenNote={onOpenNote} />
     </div>
   )
 }
@@ -365,8 +381,77 @@ function InputBox({
   )
 }
 
-function ArtifactPanel({ homeEmpty }: { homeEmpty: boolean }) {
+/**
+ * 入库按钮三态（未入库 / 入库中 / 已入库 ✓）。
+ * 「入库中」来自全局任务层，所以切页面再回来仍然是转圈的；
+ * 「已入库」来自落盘表，重开应用也还在——这两条正是过去缺的反馈。
+ */
+function IngestButton({
+  artifact,
+  ingested,
+  onDone,
+  onOpenNote,
+}: {
+  artifact: ArtifactInfo
+  ingested?: { at: number; noteRel?: string }
+  onDone: () => void
+  onOpenNote: (t: string) => void
+}) {
+  const task = useTask('ingest', artifact.path)
+  const busy = task?.status === 'queued' || task?.status === 'running'
+  const prev = useRef<TaskStatus | undefined>(undefined)
+  useEffect(() => {
+    const was = prev.current
+    prev.current = task?.status
+    if (was && was !== task?.status && task?.status === 'succeeded') onDone()
+  }, [task?.status, onDone])
+
+  if (busy) {
+    return (
+      <span
+        data-testid="ingest-busy"
+        className="flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-muted"
+      >
+        <Loader2 size={11} className="animate-spin" /> 入库中
+      </span>
+    )
+  }
+  if (ingested) {
+    return (
+      <button
+        data-testid="ingest-done"
+        title={ingested.noteRel ? `已入库 · 打开「${ingested.noteRel}」` : '已入库'}
+        onClick={() => {
+          if (!ingested.noteRel) return ui.toast('已入库（未找到对应笔记）')
+          onOpenNote(ingested.noteRel.replace(/\.md$/, '').split('/').pop() ?? ingested.noteRel)
+        }}
+        className="flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-ok hover:bg-hover"
+      >
+        <Check size={11} /> 已入库
+      </button>
+    )
+  }
+  return (
+    <button
+      onClick={async () => {
+        const r = await window.api.artifacts.ingest(artifact.path)
+        if (r.ok) ui.toast('已送入投递箱，处理完成后可被 AI 检索')
+        else ui.toast(r.error ?? '入库失败', 'error')
+      }}
+      className="rounded-full border border-line px-2.5 py-0.5 hover:bg-hover"
+    >
+      入库
+    </button>
+  )
+}
+
+function ArtifactPanel({ homeEmpty, onOpenNote }: { homeEmpty: boolean; onOpenNote: (t: string) => void }) {
   const [items, setItems] = useState<ArtifactInfo[]>([])
+  // 「已入库」是持久化的（复合键 路径+内容哈希，主进程校验后给结论），重开应用照样认得
+  const [ingested, setIngested] = useState<Record<string, { at: number; noteRel?: string }>>({})
+  const refreshIngested = useCallback(() => {
+    void window.api.artifacts.ingested().then(setIngested)
+  }, [])
   const [fresh, setFresh] = useState<string | null>(null)
   const [preview, setPreview] = useState<{ path: string; text: string } | null>(null)
   const prefersOpen = (): boolean => localStorage.getItem('chat.artifacts') !== '0'
@@ -388,12 +473,13 @@ function ArtifactPanel({ homeEmpty }: { homeEmpty: boolean }) {
 
   useEffect(() => {
     refresh()
+    refreshIngested()
     return window.api.artifacts.onCreated((a) => {
       setFresh(a.path)
       refresh()
       setVisible(true) // 新产物生成时自动弹出
     })
-  }, [refresh]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [refresh, refreshIngested]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (items.length === 0) return null
 
@@ -453,17 +539,12 @@ function ArtifactPanel({ homeEmpty }: { homeEmpty: boolean }) {
               >
                 打开
               </button>
-              <button
-                onClick={async () => {
-                  const s = await window.api.settings.get()
-                  if (!s.vaultPath) return ui.toast('请先打开知识库', 'error')
-                  await window.api.inbox.enqueue([s.vaultPath + '/90_产物/' + a.path])
-                  ui.toast('已送入投递箱，处理完成后可被 AI 检索')
-                }}
-                className="rounded-full border border-line px-2.5 py-0.5 hover:bg-hover"
-              >
-                入库
-              </button>
+              <IngestButton
+                artifact={a}
+                ingested={ingested[a.path]}
+                onDone={refreshIngested}
+                onOpenNote={onOpenNote}
+              />
               {a.name.endsWith('.md') && (
                 <button
                   onClick={async () => setPreview({ path: a.path, text: await window.api.artifacts.readText(a.path) })}

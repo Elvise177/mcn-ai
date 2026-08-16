@@ -1,3 +1,4 @@
+import { createHash } from 'crypto'
 import { promises as fs } from 'fs'
 import { join, relative, basename } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
@@ -5,6 +6,10 @@ import { shell, type BrowserWindow } from 'electron'
 import { notifyDingtalk } from '../lib/dingtalk'
 import { store } from '../store'
 import { inboxOrchestrator } from '../inbox/orchestrator'
+import { vaultManager } from '../vault'
+import { tasks } from '../tasks/registry'
+import { getIngested, markIngested, type IngestedEntry } from '../tasks/persist'
+import { log } from '../lib/logger'
 
 export interface Artifact {
   path: string
@@ -13,11 +18,29 @@ export interface Artifact {
   size: number
 }
 
+/** 产物卡片要的「已入库」判定结果（渲染层没有 Node，哈希校验只能在这边做完再给它） */
+export interface IngestedInfo {
+  at: number
+  noteRel?: string
+}
+
+const sha256 = async (abs: string): Promise<string> =>
+  createHash('sha256').update(await fs.readFile(abs)).digest('hex')
+
 /** 监听 vault/90_产物：新产物推事件给产物面板 */
 export class ArtifactsWatcher {
   private win: BrowserWindow | null = null
   private watcher: FSWatcher | null = null
   private dir: string | null = null
+  /** 已 enqueue、等本轮 pipeline 跑完才知道成没成的产物 */
+  private pending = new Set<string>()
+  /** 入库前的笔记全集快照：跑完做差集就知道新落位了哪些笔记 */
+  private beforeNotes: Set<string> | null = null
+
+  constructor() {
+    // ingest 的 running 阶段由某个 inbox run 承载，所以结果也跟着那一轮走
+    inboxOrchestrator.onRunEnd((ok) => void this.resolvePending(ok))
+  }
 
   attachWindow(win: BrowserWindow): void {
     this.win = win
@@ -33,8 +56,9 @@ export class ArtifactsWatcher {
       awaitWriteFinish: { stabilityThreshold: 1200, pollInterval: 200 },
     })
     this.watcher.on('add', (p: string) => {
-      this.win?.webContents.send('artifact:created', { path: relative(this.dir!, p), name: basename(p) })
-      if (store.get('artifactAutoIngest')) void inboxOrchestrator.enqueue([p])
+      const rel = relative(this.dir!, p)
+      this.win?.webContents.send('artifact:created', { path: rel, name: basename(p) })
+      if (store.get('artifactAutoIngest')) void this.ingest(rel)
       notifyDingtalk('artifact', 'mcn-ai 产物', `### 新产物生成 📄\n\n**${basename(p)}**\n\n> ${new Date().toLocaleString('zh-CN')} · mcn-ai 自动化`)
     })
   }
@@ -59,6 +83,109 @@ export class ArtifactsWatcher {
       /* 目录不存在等 */
     }
     return out.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 30)
+  }
+
+  /**
+   * 显式入库：建一个 ingest 任务再送进投递箱。
+   * 以前是 `void enqueue(...)` 发射后不管，用户点完只有一句 toast、之后再无音讯。
+   */
+  async ingest(relPath: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.dir) return { ok: false, error: '请先打开知识库' }
+    const id = `ingest:${relPath}`
+    tasks.start({
+      id,
+      kind: 'ingest',
+      key: relPath,
+      status: 'queued',
+      title: `入库「${basename(relPath)}」`,
+      cancelable: false,
+      artifactPath: relPath,
+    })
+    try {
+      // 差集基线只在本批第一个入库任务时拍一次
+      if (!this.pending.size) this.beforeNotes = new Set(vaultManager.notePaths())
+      await inboxOrchestrator.enqueue([join(this.dir, relPath)])
+      this.pending.add(relPath)
+      return { ok: true }
+    } catch (e) {
+      tasks.finish(id, 'failed', e instanceof Error ? e.message : String(e))
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+
+  /** 本轮 pipeline 跑完：把等着的 ingest 任务一并结掉，并把「已入库」写进落盘表 */
+  private async resolvePending(ok: boolean): Promise<void> {
+    for (const rel of [...this.pending]) {
+      this.pending.delete(rel)
+      const id = `ingest:${rel}`
+      if (!ok) {
+        tasks.patch(id, { title: `入库失败「${basename(rel)}」` })
+        tasks.finish(id, 'failed', '投递箱本轮处理失败')
+        continue
+      }
+      try {
+        const abs = join(this.dir!, rel)
+        const st = await fs.stat(abs)
+        const base = basename(rel).replace(/\.[^.]+$/, '')
+        // 找落位笔记。**不能只按文件名猜**：开了智能打标时 pipeline 会按内容给笔记重新命名，
+        // 按原文件名 resolveLink 必然扑空。所以先按名字试，再退回"本轮新增的笔记"差集。
+        // 另外 pipeline 刚写完 md、vault watcher（awaitWriteFinish 800ms）还没收进索引，
+        // 两条路都要给几次重试
+        let noteRel: string | undefined
+        for (let i = 0; i < 6 && !noteRel; i++) {
+          if (i) await new Promise((r) => setTimeout(r, 1200))
+          noteRel = (await vaultManager.resolveLink(base)) ?? undefined
+          if (noteRel) break
+          const added = vaultManager.notePaths().filter((p) => !this.beforeNotes?.has(p))
+          // 名字对得上的优先；本批只有一个产物且只新增了一篇时，那篇就是它
+          noteRel =
+            added.find((p) => basename(p).replace(/\.md$/, '') === base) ??
+            (added.length === 1 ? added[0] : undefined)
+        }
+        markIngested(rel, {
+          contentHash: await sha256(abs),
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+          at: Date.now(),
+          noteRel,
+        })
+        tasks.patch(id, { noteRel, title: `已入库「${basename(rel)}」` })
+        tasks.finish(id, 'succeeded')
+      } catch (e) {
+        log('error', 'ingest', `${rel}: ${e}`)
+        tasks.finish(id, 'failed', e instanceof Error ? e.message : String(e))
+      }
+    }
+    this.beforeNotes = null
+  }
+
+  /**
+   * 已入库表（复合主键 artifactRel + contentHash，见设计 §3.4）。
+   * 快速门：mtime+size 与存量一致就直接信任存量哈希，不重算——产物面板一次列 30 个，
+   * pptx 动辄几 MB，每次开面板全量 sha256 是纯浪费。
+   */
+  async ingested(): Promise<Record<string, IngestedInfo>> {
+    if (!this.dir) return {}
+    const table = getIngested()
+    const out: Record<string, IngestedInfo> = {}
+    for (const [rel, e] of Object.entries(table)) {
+      try {
+        const abs = join(this.dir, rel)
+        const st = await fs.stat(abs)
+        let entry: IngestedEntry = e
+        if (st.mtimeMs !== e.mtimeMs || st.size !== e.size) {
+          // 动过了才真去算哈希：内容没变（只是被 touch）仍算已入库，内容变了就放行重新入库
+          const hash = await sha256(abs)
+          if (hash !== e.contentHash) continue
+          entry = { ...e, mtimeMs: st.mtimeMs, size: st.size }
+          markIngested(rel, entry)
+        }
+        out[rel] = { at: entry.at, noteRel: entry.noteRel }
+      } catch {
+        /* 产物被删了：不再算已入库 */
+      }
+    }
+    return out
   }
 
   async open(relPath: string): Promise<void> {

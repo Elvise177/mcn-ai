@@ -9,6 +9,9 @@ import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
 import { errText } from './lib/err'
+import { startTaskSync } from './hooks/useTasks'
+import { TaskDock } from './components/TaskDock'
+import { OfflineBar } from './components/OfflineBar'
 
 type Page = 'workbench' | 'vault' | 'settings'
 
@@ -30,7 +33,9 @@ export default function App() {
   const [page, setPage] = useState<Page>('workbench')
   const [convs, setConvs] = useState<Conversation[]>([])
   const [active, setActive] = useState<Conversation>(newConv)
-  const [account, setAccount] = useState<{ loggedIn: boolean; email?: string } | null>(null)
+  // degraded = 云端探测超时，还不知道登没登录。此时**不能**弹登录门（那等于把离线用户
+  // 挡在门外，正是 bug#1 的"打不开"体感），而是照常进主界面 + 顶部挂云端离线条
+  const [account, setAccount] = useState<{ loggedIn: boolean; email?: string; degraded?: boolean } | null>(null)
   const [localMode, setLocalMode] = useState(() => localStorage.getItem('localMode') === '1')
   const [vaultState, setVaultState] = useState<'loading' | 'none' | 'ready'>('loading')
   const [vaultSkipped, setVaultSkipped] = useState(() => localStorage.getItem('vaultSkipped') === '1')
@@ -74,7 +79,14 @@ export default function App() {
       convsRef.current = list
       setConvs(list)
     })
-    window.api.auth.state().then(setAccount)
+    // 云端连不上时 getSession 可能长时间挂起（Supabase 被暂停时域名直接 NXDOMAIN），
+    // 8 秒还没答案就先按"降级"开界面，真答案回来了再覆盖
+    const authTimer = setTimeout(() => setAccount((a) => a ?? { loggedIn: false, degraded: true }), 8000)
+    window.api.auth.state().then((s) => {
+      clearTimeout(authTimer)
+      // 已经降级进主界面了就别再把人踢回登录门；用户可以在设置页主动去登录
+      setAccount((prev) => (prev?.degraded && !s.loggedIn ? prev : s))
+    })
     window.api.settings.get().then((s) => setVaultState(s.vaultPath ? 'ready' : 'none'))
     const offShortcut = window.api.shortcut.on((name) => {
       if (name === 'new-chat') {
@@ -90,6 +102,7 @@ export default function App() {
       }
     })
     return () => {
+      clearTimeout(authTimer)
       offShortcut()
       offStream()
     }
@@ -99,7 +112,7 @@ export default function App() {
   // 主 UI（含 UiHost）挂上之后再报：启动那次 provision 早于渲染层，所以还要补查一次原因
   const mainVisible =
     account !== null &&
-    (account.loggedIn || localMode) &&
+    (account.loggedIn || localMode || !!account.degraded) &&
     vaultState !== 'loading' &&
     !(vaultState === 'none' && !vaultSkipped)
   useEffect(() => {
@@ -108,6 +121,10 @@ export default function App() {
     void window.api.auth.provisionError().then((msg) => msg && say(msg))
     return window.api.auth.onProvisionFailed(say)
   }, [mainVisible])
+
+  // 全局任务状态层：全应用唯一订阅点。挂在 App 而不是各页面里，
+  // 页面切换时它一直在——这就是"投递跑着切走再回来状态还在"的全部实现
+  useEffect(() => startTaskSync(), [])
 
   const handleLogout = useCallback(async () => {
     await window.api.auth.logout()
@@ -147,7 +164,7 @@ export default function App() {
       </div>
     )
   }
-  if (!account.loggedIn && !localMode) {
+  if (!account.loggedIn && !localMode && !account.degraded) {
     return (
       <LoginGate
         onLoggedIn={async () => setAccount(await window.api.auth.state())}
@@ -262,15 +279,17 @@ export default function App() {
             </>
           )}
         </div>
+        <TaskDock onOpen={setPage} />
         {/* 身份行：昵称优先，其次完整邮箱（不再截前缀露出 QQ 号），再拼版本号 */}
         <div className="truncate border-t border-line px-5 py-4 text-xs text-muted">
           {[identityLabel(nickname, account.email), APP_VERSION].filter(Boolean).join(' · ')}
         </div>
       </aside>
 
-      <main className="flex-1 overflow-hidden">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <OfflineBar />
         {/* key 换页触发一次淡入，避免页面切换硬切 */}
-        <div key={page} className="page-enter h-full">
+        <div key={page} className="page-enter min-h-0 flex-1">
           {page === 'workbench' && (
             <Workbench
               conv={active}
