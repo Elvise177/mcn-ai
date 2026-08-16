@@ -61,7 +61,9 @@ Electron App（macOS arm64，v0.1.0）
 4. **M3 对话工作台**：问库带引用（search_knowledge 工具，云端语义检索）；make-ppt/make-docx skills（"把X做成PPT"→产物面板出卡片→Keynote 打开）；可停止；多会话不串台；产物面板监听 90_产物
 5. **M4 云端**：登录（网页同账号）、私人层入库/检索（RLS 隔离验证过：admin 可见、他人不可见）、聊天记录云端同步；投递编排追加"上云"第 6 阶段
 6. **增补**：对话内 Word/Excel/PDF 生成工具；知识入库设置（产物自动入库开关 + 产物卡片入库按钮）；经营数据自动入库（同步默认关闭）
-7. **验收基线**：Maggie vault 全量数据「批量导入→问库→生成PPT→回看产物」闭环通过；e2e 走查脚本 `desktop/e2e/walkthrough.mjs` + 截图基线 `desktop/e2e/shots/`（GUI 改动必须跑走查看截图再交付——用户铁律）
+7. **渲染层视觉重构（2026-08-16）**：只动样式/文案/渲染层组件，未碰业务逻辑、IPC、主进程。十项改动：问候语去用户 ID（昵称在设置页填，存 localStorage）＋侧栏身份行改「昵称/邮箱 · 版本号」；主色降级（粉色只留发送键/光标/选中态，新对话改描边、登录键改深色实心）；字体统一系统黑体栈+行高 1.65，衬线只留首页问候语（拉丁字体排最前，数字英文不落衬线）；侧栏导航加 lucide 图标+8px 圆角 hover，「最近对话」分组标题降级；问候区上移到 `--home-top`(22vh)＋输入框下方「最近产物/最近对话」卡片区（各最多 6，无数据不出现）；输入框 14px 圆角/60px 高/左侧附件占位；chips 抽到 `config/chips.ts`（为任务模板系统留位）；知识库空态引导「拖入你的第一份资料试试」＋指向投递箱入口；产物卡片重做（文件类型分色图标、hover 出打开/入库、`source_draft_id` 占位注释「v2 产物回流用」）；等待态巡检（流式光标、投递箱六阶段进度条+日志自动滚底+跑完面板不再瞬间消失、页面切换淡入、`cloud_sync` 中文化）。design tokens 全部集中在 `desktop/src/renderer/src/styles/theme.css`，Tailwind 只做语义类名映射，canvas 取色走 `src/renderer/src/theme.ts`，组件里已无硬编码色值
+8. **视觉重构第二轮（2026-08-16 用户验收后返工）**：截图基线清理（删掉 7 月残留，走查收尾会列出「本次未刷新」的 png 报警；`00b/11/12` 归 login-provision.mjs，脚本里有归属表）；走查统一注入 `prefers-reduced-motion:reduce`（此前截图糊在淡入中间帧，看着像对比度坏了）；建库两张卡片改中性同款、hover 才高亮；笔记头部只留「编辑」，重命名/删除进 ··· 菜单，删除二次确认弹窗显示文件路径 + 删除后 toast 提示可在废纸篓找回；搜索摘要在 search-worker 里做纯文本清洗（跳过 frontmatter、剥双链括号/表格竖线与分隔行）；首页产物面板默认收起（与「最近产物」卡片区去重），仅对话中产生新产物才自动展开；笔记空值渲染（frontmatter 与正文空字段给「—」，只有表头的表格折叠成「暂无数据（列名…）」）；分区投递两个区静态同款，只有文件悬停在哪个区才高亮那个区；登录门「暂不登录」与建库「暂时跳过」改成可识别的按钮/链接样式
+9. **验收基线**：Maggie vault 全量数据「批量导入→问库→生成PPT→回看产物」闭环通过；e2e 走查脚本 `desktop/e2e/walkthrough.mjs` + 截图基线 `desktop/e2e/shots/`（GUI 改动必须跑走查看截图再交付——用户铁律）。2026-08-16 新增走查步骤：空库引导（独立空库实例）＋首页卡片区＋chips 填充＋输入框 60px/附件位＋流式光标（E2E_CHAT=1 真实流式时截行尾光标）＋投递箱六阶段进度条＋产物卡片 hover/打开/入库/预览＋最近对话卡片点开＋建库卡片 hover＋笔记 ··· 菜单/删除二次确认/新建→删除全链路＋搜索摘要洁净度＋空值与空表格＋分区投递静态同款与悬停高亮＋首页产物面板默认收起。**跑法**：`node e2e/walkthrough.mjs`（本地模式）或 `E2E_CHAT=1 node e2e/walkthrough.mjs`（用测试账号登录跑真实 AI，01d/01d3/01e 只有这样才刷得到）；再跑 `node e2e/login-provision.mjs` 刷 00b/11/12，跑完看收尾那段「未刷新」清单
 
 ---
 
@@ -80,7 +82,7 @@ Electron App（macOS arm64，v0.1.0）
 - **Windows 版**：未做（首发 macOS-only 是拍板项）
 - **本地 SQLite 聊天库**：v2；当前聊天记录只在云端
 - **仓库卫生**：`desktop/` 有一批未提交的工作区改动（vault/index.ts、reader.ts、VaultPage.tsx、e2e 截图等，属分区投递之后的迭代），接手先 `git status` 看一眼，该提交提交
-- **client.ts 死代码**：`webpage/lib/automation/dingtalk/client.ts` 现在只有 `listRecords` 有调用方（vault-notes），`listSheets/insertRecords/updateRecords/deleteRecords/sendGroupMessage` 全部无人调用（钉钉剥离的遗留，见 §4-13）。留着无害，后续收拾
+- **client.ts 死代码**：`webpage/lib/automation/dingtalk/client.ts` 现在只有 `listRecords` 有调用方（vault-notes），`listSheets/insertRecords/updateRecords/deleteRecords/sendGroupMessage` 全部无人调用（钉钉剥离的遗留，见 §4-16）。留着无害，后续收拾
 - **客户机兼容预检**：发新客户前用 yara 本机预检 Electron 是否会被 XProtect 误杀；老 macOS 的 pyexpat 坑已用 lxml 修掉（docx2md），但同类"编译目标过新"问题在 pipeline 其他依赖上仍可能出现
 
 ---
@@ -99,7 +101,10 @@ Electron App（macOS arm64，v0.1.0）
 10. **视频线选型（未开工，已拍板）**：剪映草稿 + VectCutAPI；worker 部署国内服务器
 11. **嵌入模型 text-embedding-3-small**：成本敏感（用户明确要求），效果对个人知识库够用
 12. **聊天组件直搬 webpage**：ChatMain/ChatInput/MessageBubble/RoleSelector 零耦合平移，状态机提炼为 `useChatSession.ts`（SSE fetch 换 IPC 订阅，乐观更新/AbortController 保留）
-13. **钉钉自动化 webpage 侧剥离收尾（2026-08-16 完成）**：钉钉每日同步 2026-07-24 已分叉到独立仓库 `~/Documents/AI/omg-dingtalk-automation`（国内服务器 crontab：`run.js` 每日 03:00 ＋ `hourly.js` 每小时，已确认在跑、run.log 到 8/16 每日成功），并持续演进到"任务驱动"新口径。webpage 侧那份停在 07-20 的占位实现和 Vercel Cron 一直没摘，会在同一时间点按旧口径往同一张「执行明细」表建行 → 已删除 `app/api/v1/automation/dingtalk/route.ts` 与 `lib/automation/dingtalk/sync.ts`、清空 `vercel.json` 的 crons（commit a477591）。**保留** `dingtalk/vault-notes/route.ts` 和 `lib/automation/dingtalk/client.ts`——桌面端经营数据自动入库（`desktop/src/main/knowledge/bizdata.ts`）在用，别顺手删。独立仓库本身按禁令未触碰
+13. **样式只走 design token（2026-08-16）**：数值真相源是 `desktop/src/renderer/src/styles/theme.css` 的 CSS 变量，`tailwind.config.js` 只做「语义类名 → var(--token)」映射，组件里不再出现色值/px 字面量；canvas（关系图）这类没法用 class 的地方走 `src/renderer/src/theme.ts` 的 `token()` 读同一份变量。注意 Tailwind 的透明度修饰符（`bg-x/60`）对 `var()` 颜色无效，要淡色就另开一个 token
+14. **首页问候语的衬线栈把拉丁字体排在最前**（`--font-serif` = Helvetica Neue → Noto Serif SC → Songti SC）：字体是按字符 fallback 的，这样中文才落衬线、数字与英文仍是无衬线，避免"英文突然变衬线"的廉价感
+15. **e2e 截 hover 态必须走 CDP 抓屏**：Playwright 的 `page.screenshot()` 会把 `:hover` 清掉（截出来永远是非 hover 态，之后对 hover 才出现的按钮点击也会失败）。`walkthrough.mjs` 里的 `snapHover()` 用 `Page.captureScreenshot` 绕开，产物卡片 hover 操作就靠它验收
+16. **钉钉自动化 webpage 侧剥离收尾（2026-08-16 完成）**：钉钉每日同步 2026-07-24 已分叉到独立仓库 `~/Documents/AI/omg-dingtalk-automation`（国内服务器 crontab：`run.js` 每日 03:00 ＋ `hourly.js` 每小时，已确认在跑、run.log 到 8/16 每日成功），并持续演进到"任务驱动"新口径。webpage 侧那份停在 07-20 的占位实现和 Vercel Cron 一直没摘，会在同一时间点按旧口径往同一张「执行明细」表建行 → 已删除 `app/api/v1/automation/dingtalk/route.ts` 与 `lib/automation/dingtalk/sync.ts`、清空 `vercel.json` 的 crons（commit a477591）。**保留** `dingtalk/vault-notes/route.ts` 和 `lib/automation/dingtalk/client.ts`——桌面端经营数据自动入库（`desktop/src/main/knowledge/bizdata.ts`）在用，别顺手删。独立仓库本身按禁令未触碰
 
 ---
 

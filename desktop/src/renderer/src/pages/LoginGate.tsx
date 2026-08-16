@@ -56,9 +56,13 @@ export default function LoginGate({
         </button>
       </div>
 
-      <div className="mt-6 text-sm text-muted">
-        账号由管理员发放 ·{' '}
-        <button onClick={onSkip} className="hover:text-accent hover:underline">
+      <div className="mt-6 flex flex-col items-center gap-3 text-sm text-muted">
+        <span>账号由管理员发放</span>
+        {/* 这是真入口，不是说明文字：给描边按钮样式，别让人以为只是一句话 */}
+        <button
+          onClick={onSkip}
+          className="rounded-full border border-line bg-card px-4 py-1.5 text-base text-ink hover:bg-hover"
+        >
           暂不登录，仅本地使用
         </button>
       </div>

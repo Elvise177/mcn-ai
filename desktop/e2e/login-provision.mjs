@@ -48,7 +48,7 @@ try {
   await win.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
   await win.click('button:has-text("登录")')
   // 登录后应直接落在对话页（＋新对话可见 + 空态问候）
-  await win.waitForSelector('text=＋ 新对话', { timeout: 20000 }).catch(() => fail('登录后未进入主界面'))
+  await win.waitForSelector('button[title="新对话"]', { timeout: 20000 }).catch(() => fail('登录后未进入主界面'))
   const chatHome = await win.locator('text=问你的库，或直接说要做什么').count()
   if (!chatHome) await fail('登录后没有落在对话页')
   console.log('✅ 登录门登录成功，直接落在对话页')

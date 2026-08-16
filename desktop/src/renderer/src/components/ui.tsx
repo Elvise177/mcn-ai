@@ -86,7 +86,7 @@ export function UiHost() {
               </button>
             </div>
             {modal.kind === 'confirm' && modal.opts.message && (
-              <div className="mb-4 text-base leading-6 text-muted">{modal.opts.message}</div>
+              <div className="mb-4 whitespace-pre-line text-base leading-6 text-muted">{modal.opts.message}</div>
             )}
             {modal.kind === 'prompt' && (
               <input

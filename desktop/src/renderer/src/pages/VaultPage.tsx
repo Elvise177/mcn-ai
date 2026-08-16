@@ -6,9 +6,10 @@ import ForceGraph2D from 'react-force-graph-2d'
 import { FastMarkdown } from '../components/Markdown'
 import { VaultWizard } from '../components/VaultWizard'
 import { ui } from '../components/ui'
-import { X, Inbox, MoveUpLeft } from 'lucide-react'
+import { X, Inbox, MoveUpLeft, MoreHorizontal } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
 import { GRAPH_GROUP_TOKENS, token } from '../theme'
+import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
 
 const colorOf = (group: string): string => {
   let h = 0
@@ -253,6 +254,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   const [showInbox, setShowInbox] = useState(false)
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [dragOver, setDragOver] = useState(false)
+  const [hotZone, setHotZone] = useState<string | null>(null)
 
   // 从 Finder 直接丢进投递箱目录时没人开过面板，跑完那一刻面板会"啪"地消失、
   // 用户根本看不到结果。开跑就把面板钉住，结束后由上面的 4 秒计时器收起
@@ -328,9 +330,16 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
 
   const deleteNote = async (): Promise<void> => {
     if (!current) return
-    const okd = await ui.confirm({ title: `删除「${note?.title}」？`, message: '将移入系统废纸篓，可随时找回。', danger: true, okText: '删除' })
+    // 二次确认里带上文件名与所在目录，避免删错文件
+    const okd = await ui.confirm({
+      title: '确认删除这篇笔记？',
+      message: `${current}\n\n将移入系统废纸篓，可随时找回。`,
+      danger: true,
+      okText: '删除',
+    })
     if (!okd) return
     await window.api.vault.deleteNote(current)
+    ui.toast(`已删除「${note?.title ?? current}」，可在废纸篓找回`)
     closeNote()
   }
 
@@ -357,6 +366,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     e.preventDefault()
     e.stopPropagation()
     setDragOver(false)
+    setHotZone(null)
     const paths = dropPaths(e)
     if (paths.length) {
       setShowInbox(true)
@@ -372,29 +382,39 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         setDragOver(true)
       }}
       onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragOver(false)
+        if (e.currentTarget === e.target) {
+          setDragOver(false)
+          setHotZone(null)
+        }
       }}
       onDrop={(e) => void doEnqueue(e)}
     >
       {dragOver && (
+        // 静态时两个投递区一模一样（中性白底灰虚线），只有文件悬在哪个区上方，
+        // 哪个区才高亮——之前粉底那块会被当成"已选中"，误导用户
         <div className="absolute inset-0 z-30 flex gap-3 bg-overlay p-6">
-          <div
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => void doEnqueue(e)}
-            className="flex flex-1 flex-col items-center justify-center rounded-xl border-4 border-dashed border-accent bg-accent-soft text-accent"
-          >
-            <div className="text-xl font-semibold">业务资料</div>
-            <div className="mt-2 text-base opacity-80">公司文件 · 智能打标 → 80_Library</div>
-          </div>
-          {routes.map((r) => (
+          {[{ name: '业务资料', desc: '公司文件 · 智能打标 → 80_Library', subdir: undefined as string | undefined }].concat(
+            routes.map((r) => ({ name: r.name, desc: `主题打标 · 概念建链 → ${r.dest}/`, subdir: r.name }))
+          ).map((z) => (
             <div
-              key={r.name}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => void doEnqueue(e, r.name)}
-              className="flex flex-1 flex-col items-center justify-center rounded-xl border-4 border-dashed border-line bg-card text-ink"
+              key={z.name}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setHotZone(z.name)
+              }}
+              onDragLeave={() => setHotZone((h) => (h === z.name ? null : h))}
+              onDrop={(e) => {
+                setHotZone(null)
+                void doEnqueue(e, z.subdir)
+              }}
+              className={`flex flex-1 flex-col items-center justify-center rounded-xl border-2 border-dashed transition-colors ${
+                hotZone === z.name
+                  ? 'border-accent bg-accent-soft text-accent'
+                  : 'border-line bg-card text-ink'
+              }`}
             >
-              <div className="text-xl font-semibold">{r.name}</div>
-              <div className="mt-2 text-base text-muted">主题打标 · 概念建链 → {r.dest}/</div>
+              <div className="text-xl font-semibold">{z.name}</div>
+              <div className={`mt-2 text-base ${hotZone === z.name ? '' : 'text-muted'}`}>{z.desc}</div>
             </div>
           ))}
         </div>
@@ -545,6 +565,66 @@ function Tree({
   )
 }
 
+/** 笔记头部的 ··· 菜单：低频/危险操作收进来，常驻位置只留「编辑」 */
+function MoreMenu({ items }: { items: Array<{ label: string; danger?: boolean; onClick: () => void }> }) {
+  const [open, setOpen] = useState(false)
+  const boxRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent): void => {
+      if (!boxRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onEsc = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onEsc)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onEsc)
+    }
+  }, [open])
+
+  return (
+    <div ref={boxRef} className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        title="更多操作"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={`flex items-center rounded-full border border-line px-2.5 py-1 text-muted hover:bg-hover ${
+          open ? 'bg-hover text-ink' : ''
+        }`}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="fade-up absolute right-0 top-8 z-30 w-32 overflow-hidden rounded-md border border-line bg-card py-1 shadow-pop"
+        >
+          {items.map((it) => (
+            <button
+              key={it.label}
+              role="menuitem"
+              onClick={() => {
+                setOpen(false)
+                it.onClick()
+              }}
+              className={`block w-full px-3 py-1.5 text-left text-base hover:bg-hover ${
+                it.danger ? 'text-danger' : ''
+              }`}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function NoteView({
   path,
   note,
@@ -600,9 +680,11 @@ function NoteView({
     }
   }
 
-  const fmEntries = Object.entries(note.frontmatter).filter(([, v]) => v != null && v !== '')
+  // 空值不再整条丢掉，而是显示破折号——字段在不在，用户一眼能看见
+  const fmEntries = Object.entries(note.frontmatter)
   const emptyBody = note.body.trim().length === 0
-  const oversize = note.body.length > RENDER_CAP
+  const shownBody = formatNoteBody(note.body)
+  const oversize = shownBody.length > RENDER_CAP
 
   return (
     <div className="flex h-full flex-col">
@@ -629,28 +711,29 @@ function NoteView({
             </>
           ) : (
             <>
-              <button onClick={startEdit} className="rounded-full border border-line px-3 py-1 hover:bg-accent-soft">
+              <button onClick={startEdit} className="rounded-full border border-line px-3 py-1 hover:bg-hover">
                 编辑
               </button>
-              <button
-                onClick={async () => {
-                  const name = await ui.prompt({ title: '重命名笔记', initial: note.title })
-                  if (!name || name === note.title) return
-                  try {
-                    const newRel = await window.api.vault.renameNote(path, name)
-                    onOpenLink(newRel)
-                    ui.toast('已重命名')
-                  } catch (e) {
-                    ui.toast(String(e), 'error')
-                  }
-                }}
-                className="rounded-full border border-line px-3 py-1 hover:bg-accent-soft"
-              >
-                重命名
-              </button>
-              <button onClick={onDelete} className="rounded-full border border-line px-3 py-1 text-muted hover:text-accent">
-                删除
-              </button>
+              {/* 重命名/删除收进 ···，低频且危险的操作不占常驻位置 */}
+              <MoreMenu
+                items={[
+                  {
+                    label: '重命名',
+                    onClick: async () => {
+                      const name = await ui.prompt({ title: '重命名笔记', initial: note.title })
+                      if (!name || name === note.title) return
+                      try {
+                        const newRel = await window.api.vault.renameNote(path, name)
+                        onOpenLink(newRel)
+                        ui.toast('已重命名')
+                      } catch (e) {
+                        ui.toast(String(e), 'error')
+                      }
+                    },
+                  },
+                  { label: '删除', danger: true, onClick: onDelete },
+                ]}
+              />
               <button onClick={onClose} title="关闭文件" className="flex items-center rounded-full border border-line px-2.5 py-1 text-muted hover:text-accent">
                 <X size={13} />
               </button>
@@ -680,12 +763,15 @@ function NoteView({
           <div className="mx-auto max-w-3xl px-8 py-6">
             {fmEntries.length > 0 && (
               <div className="mb-5 overflow-hidden rounded-xl border border-line">
-                {fmEntries.map(([k, v]) => (
-                  <div key={k} className="flex border-b border-line text-sm last:border-0">
-                    <div className="w-32 shrink-0 bg-sidebar px-3 py-1.5 text-muted">{k}</div>
-                    <div className="px-3 py-1.5">{Array.isArray(v) ? v.join(' / ') : String(v)}</div>
-                  </div>
-                ))}
+                {fmEntries.map(([k, v]) => {
+                  const shown = formatFrontmatterValue(v)
+                  return (
+                    <div key={k} className="flex border-b border-line text-sm last:border-0">
+                      <div className="w-32 shrink-0 bg-sidebar px-3 py-1.5 text-muted">{k}</div>
+                      <div className={`px-3 py-1.5 ${shown === EMPTY_MARK ? 'text-muted-soft' : ''}`}>{shown}</div>
+                    </div>
+                  )
+                })}
               </div>
             )}
             {emptyBody ? (
@@ -693,7 +779,7 @@ function NoteView({
                 该笔记只有属性、没有正文（模板类文件常见）。点右上角「编辑」可添加内容。
               </div>
             ) : oversize ? (
-              <FastMarkdown body={note.body} onLink={handleLink} />
+              <FastMarkdown body={shownBody} onLink={handleLink} />
             ) : (
               <article className="md-article">
                 <ReactMarkdown
@@ -723,7 +809,7 @@ function NoteView({
                     ),
                   }}
                 >
-                  {note.body}
+                  {shownBody}
                 </ReactMarkdown>
               </article>
             )}

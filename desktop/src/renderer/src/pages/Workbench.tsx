@@ -182,7 +182,8 @@ export default function Workbench({
           </>
         )}
       </div>
-      <ArtifactPanel />
+      {/* 首页已经有「最近产物」卡片区，这里默认收起，避免同屏两份一样的内容 */}
+      <ArtifactPanel homeEmpty={empty} />
     </div>
   )
 }
@@ -319,11 +320,17 @@ function InputBox({
   )
 }
 
-function ArtifactPanel() {
+function ArtifactPanel({ homeEmpty }: { homeEmpty: boolean }) {
   const [items, setItems] = useState<ArtifactInfo[]>([])
   const [fresh, setFresh] = useState<string | null>(null)
   const [preview, setPreview] = useState<{ path: string; text: string } | null>(null)
-  const [open, setOpen] = useState(() => localStorage.getItem('chat.artifacts') !== '0')
+  const prefersOpen = (): boolean => localStorage.getItem('chat.artifacts') !== '0'
+  const [open, setOpen] = useState(() => !homeEmpty && prefersOpen())
+
+  // 首页（空态）默认收起，进了对话恢复用户上次的偏好；对话中新产物落地时下面会自动展开
+  useEffect(() => {
+    setOpen(homeEmpty ? false : prefersOpen())
+  }, [homeEmpty])
 
   const setVisible = (v: boolean): void => {
     localStorage.setItem('chat.artifacts', v ? '1' : '0')
