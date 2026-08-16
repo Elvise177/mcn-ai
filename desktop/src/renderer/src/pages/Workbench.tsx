@@ -102,7 +102,11 @@ export default function Workbench({
         {empty ? (
           // 问候区落在视口上方 1/3（--home-top），下面依次是输入框、快捷指令、最近卡片区
           <div className="flex flex-1 flex-col items-center overflow-auto px-8 pb-10 pt-home-top">
-            <h1 className="fade-up mb-2 font-serif text-display leading-tight">{greetingLine(nickname)}</h1>
+            {/* 衬线在米白底上偏轻飘：字号提到 38px 压住（见 --text-display 注释），
+                字重 500 只对拉丁昵称生效，中文衬线没有 medium 字面 */}
+            <h1 className="fade-up mb-2 font-serif text-display font-medium leading-tight">
+              {greetingLine(nickname)}
+            </h1>
             <p className="mb-8 text-md text-muted">问你的库，或直接说要做什么</p>
             <InputBox value={input} onChange={setInput} onSend={() => send(input)} streaming={false} wide />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
@@ -374,31 +378,34 @@ function ArtifactPanel({ homeEmpty }: { homeEmpty: boolean }) {
           <X size={14} />
         </button>
       </div>
-      <div className="flex-1 space-y-2 overflow-auto p-3">
+      {/* 无框列表：一行一个产物（图标 + 文件名 + 时间），靠行距和 hover 浅底分隔，
+          和首页「最近产物」是同一种轻量观感——卡片的边框+阴影在窄侧栏里太重 */}
+      <div className="flex-1 space-y-0.5 overflow-auto p-2">
         {items.map((a) => (
           <div
             key={a.path}
-            className={`group rounded-lg border p-3 transition-colors ${
-              fresh === a.path ? 'border-accent bg-accent-soft' : 'border-line bg-card hover:border-accent-line'
+            className={`group rounded-md px-2 py-1.5 transition-colors ${
+              fresh === a.path ? 'bg-accent-soft' : 'hover:bg-hover'
             }`}
           >
-            <div className="flex items-start gap-2.5">
-              <span className="mt-0.5">
-                <FileIcon name={a.name} size={18} />
+            <div className="flex items-center gap-2.5">
+              <FileIcon name={a.name} size={16} />
+              <span className="min-w-0 flex-1 truncate text-base" title={a.name}>
+                {a.name}
               </span>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-base font-medium" title={a.name}>
-                  {a.name}
-                </div>
-                <div className="text-xs text-muted">
-                  {shortTime(a.mtimeMs)}
-                  {' · '}
-                  {a.size > 1048576 ? `${(a.size / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(a.size / 1024))}KB`}
-                </div>
-              </div>
+              <span
+                className="shrink-0 text-xs text-muted"
+                title={
+                  a.size > 1048576
+                    ? `${(a.size / 1048576).toFixed(1)}MB`
+                    : `${Math.max(1, Math.round(a.size / 1024))}KB`
+                }
+              >
+                {shortTime(a.mtimeMs)}
+              </span>
             </div>
-            {/* 操作按钮只在 hover 时露出，静态时卡片保持干净 */}
-            <div className="mt-2 hidden gap-2 text-sm group-hover:flex">
+            {/* 操作按钮只在 hover 时露出，静态时列表保持干净 */}
+            <div className="ml-6 mt-1.5 hidden gap-2 text-sm group-hover:flex">
               <button
                 onClick={() => window.api.artifacts.open(a.path)}
                 className="rounded-full border border-line px-2.5 py-0.5 hover:bg-hover"
@@ -426,7 +433,7 @@ function ArtifactPanel({ homeEmpty }: { homeEmpty: boolean }) {
               )}
             </div>
             {preview?.path === a.path && (
-              <div className="mt-2 max-h-60 overflow-auto rounded-md bg-bg p-2 text-sm">
+              <div className="ml-6 mt-2 max-h-60 overflow-auto rounded-md bg-sidebar p-2 text-sm">
                 <FastMarkdown body={preview.text} onLink={() => void 0} />
               </div>
             )}

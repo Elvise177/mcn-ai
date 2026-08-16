@@ -29,6 +29,8 @@ module.exports = {
         'file-pdf': 'var(--color-file-pdf)',
         'file-md': 'var(--color-file-md)',
         'file-other': 'var(--color-file-other)',
+        'table-head': 'var(--color-table-head)',
+        'divider-hover': 'var(--color-divider-hover)',
       },
       fontFamily: {
         sans: 'var(--font-sans)',
@@ -68,6 +70,7 @@ module.exports = {
         modal: 'var(--size-modal)',
         'graph-panel': 'var(--size-graph-panel)',
         'home-top': 'var(--home-top)',
+        divider: 'var(--size-divider)',
       },
       boxShadow: {
         card: 'var(--shadow-card)',

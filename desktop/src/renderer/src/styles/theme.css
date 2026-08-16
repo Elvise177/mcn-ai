@@ -39,17 +39,28 @@
 
   /* ===== 颜色：关系图（canvas 绘制，经 theme.ts 读取） ===== */
   --color-graph-bg: #faf9f5;
-  --color-graph-link: #dcd7c9;
-  --color-graph-link-dim: rgba(220, 215, 201, 0.25);
+  /* 边线：低饱和暖灰，压在米白底上只做"连着"的提示，不跟节点抢注意力 */
+  --color-graph-link: #d6cfc0;
+  --color-graph-link-dim: rgba(214, 207, 192, 0.25);
   --color-graph-label: rgba(61, 57, 47, 0.85);
   --color-graph-label-dim: rgba(61, 57, 47, 0.1);
-  --color-group-1: #e25484;
-  --color-group-2: #ba8c1e;
-  --color-group-3: #4a76be;
-  --color-group-4: #589860;
-  --color-group-5: #8c6bb8;
-  --color-group-6: #c96a4a;
-  --color-group-7: #5aa7a7;
+  /* 节点分组色：以主玫瑰为起点的同明度暖调谱系（玫瑰→陶土→赭黄→暖棕→灰绿→藕紫→砖红），
+     不再用默认的蓝/紫/绿三原色——那套跟暖米白底和玫瑰主色是两个体系 */
+  --color-group-1: #cf5b7a;
+  --color-group-2: #c6754f;
+  --color-group-3: #b58a3f;
+  --color-group-4: #956d50;
+  --color-group-5: #6f8a5c;
+  --color-group-6: #a67395;
+  --color-group-7: #ac5353;
+
+  /* ===== 颜色：表格（markdown 正文 / 属性卡片共用一套） ===== */
+  --color-table-head: #f2efe5;
+  --color-table-zebra: rgba(61, 57, 47, 0.022);
+  --color-table-hover: rgba(61, 57, 47, 0.05);
+
+  /* ===== 颜色：可拖拽分隔线 ===== */
+  --color-divider-hover: rgba(226, 84, 132, 0.35);
 
   /* ===== 字体 ===== */
   /* 全局：系统黑体栈 */
@@ -71,7 +82,10 @@
   --text-xl: 20px;
   --text-2xl: 24px;
   --text-3xl: 30px;
-  --text-display: 34px;
+  /* 只用于首页问候语。34→38px：衬线中文在米白底上偏轻飘，而 font-weight:500 对
+     Songti/Noto Serif SC 无效（无 medium 字面，系统也不合成），只有拉丁昵称吃得到，
+     所以真正压住份量的是字号 */
+  --text-display: 38px;
 
   /* ===== 间距（4px 栅格 + 外壳语义尺寸） ===== */
   --space-1: 4px;
@@ -85,10 +99,18 @@
   --space-12: 48px;
   --size-sidebar: 240px;
   --size-artifact-panel: 300px;
-  --size-tree: 288px;
+  /* 文件树默认宽（可拖拽，用户拖过的值记在 localStorage vault.treeWidth） */
+  --size-tree: 220px;
+  --size-tree-min: 160px;
+  --size-tree-max: 420px;
   --size-input: 60px;
   --size-modal: 380px;
+  /* 关系图侧栏默认宽（同样可拖拽 → localStorage vault.graphWidth） */
   --size-graph-panel: 360px;
+  --size-graph-panel-min: 240px;
+  --size-graph-panel-max: 680px;
+  /* 三栏之间的拖拽把手命中区 */
+  --size-divider: 5px;
   /* 首页问候区落点：视口上方 1/3 */
   --home-top: 22vh;
 

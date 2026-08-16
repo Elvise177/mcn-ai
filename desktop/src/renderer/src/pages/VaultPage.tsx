@@ -8,7 +8,7 @@ import { VaultWizard } from '../components/VaultWizard'
 import { ui } from '../components/ui'
 import { X, Inbox, MoveUpLeft, MoreHorizontal } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
-import { GRAPH_GROUP_TOKENS, token } from '../theme'
+import { GRAPH_GROUP_TOKENS, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
 
 const colorOf = (group: string): string => {
@@ -19,6 +19,71 @@ const colorOf = (group: string): string => {
 
 /** 超过该长度改走 marked 快速渲染（remark 管线解析大表会卡界面 2-4 秒；marked 快一个数量级） */
 const RENDER_CAP = 60_000
+
+/** 栏宽记忆：默认值与上下限都在 theme.css，这里只负责读写 localStorage */
+const readWidth = (key: string, defToken: string, def: number): number => {
+  const saved = Number(localStorage.getItem(key))
+  return Number.isFinite(saved) && saved > 0 ? saved : tokenPx(defToken, def)
+}
+
+/**
+ * 三栏之间的可拖拽分隔线。拖动时实时改宽度，松手写进 localStorage（下次开库沿用）。
+ * invert = 被调整的栏在分隔线右侧（关系图），此时往左拖才是变宽。
+ */
+function Divider({
+  testId,
+  value,
+  min,
+  max,
+  invert,
+  onChange,
+  onCommit,
+}: {
+  testId: string
+  value: number
+  min: number
+  max: number
+  invert?: boolean
+  onChange: (w: number) => void
+  onCommit: (w: number) => void
+}) {
+  const start = useRef({ x: 0, w: 0 })
+  const onMouseDown = (e: React.MouseEvent): void => {
+    e.preventDefault()
+    start.current = { x: e.clientX, w: value }
+    let latest = value
+    const move = (ev: MouseEvent): void => {
+      const dx = (ev.clientX - start.current.x) * (invert ? -1 : 1)
+      latest = Math.min(max, Math.max(min, start.current.w + dx))
+      onChange(latest)
+    }
+    const up = (): void => {
+      document.removeEventListener('mousemove', move)
+      document.removeEventListener('mouseup', up)
+      // 拖动过程中全局锁光标 + 禁选中，否则划过正文会把文字选成一片蓝
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      onCommit(latest)
+    }
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    document.addEventListener('mousemove', move)
+    document.addEventListener('mouseup', up)
+  }
+  return (
+    <div
+      data-testid={testId}
+      role="separator"
+      aria-orientation="vertical"
+      title="拖动调整宽度"
+      onMouseDown={onMouseDown}
+      className="group relative z-10 w-divider shrink-0 cursor-col-resize"
+    >
+      {/* 命中区 5px，画出来只有 1px：静态就是原来那条分栏线，hover 才透出可拖的暗示 */}
+      <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-line transition-colors group-hover:bg-divider-hover" />
+    </div>
+  )
+}
 
 export default function VaultPage() {
   const [vault, setVault] = useState<VaultOpenResult | null>(null)
@@ -226,6 +291,9 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<SearchHit[]>([])
   const [showGraph, setShowGraph] = useState(() => localStorage.getItem('vault.showGraph') !== '0')
+  // 三栏宽度：拖过就记住（默认值/上下限见 theme.css 的 --size-tree* / --size-graph-panel*）
+  const [treeW, setTreeW] = useState(() => readWidth('vault.treeWidth', '--size-tree', 220))
+  const [graphW, setGraphW] = useState(() => readWidth('vault.graphWidth', '--size-graph-panel', 360))
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggleDir = useCallback((p: string) => {
     setExpanded((old) => {
@@ -422,21 +490,23 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
       {(showInbox || inboxRunning) && (
         <InboxPanel events={inboxEvents} running={inboxRunning} onClose={() => setShowInbox(false)} />
       )}
-      {/* 分区树 */}
-      <div className="flex w-tree shrink-0 flex-col border-r border-line">
-        <div className="border-b border-line p-3">
+      {/* 分区树（宽度可拖，右侧分隔线兼作分栏线） */}
+      <div data-testid="tree-col" style={{ width: treeW }} className="flex shrink-0 flex-col">
+        {/* 顶部两行：搜索框独占一行，下一行「篇数居左 · 操作居右」 */}
+        <div className="border-b border-line px-3 py-2.5">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索库…"
-            className="w-full rounded-md border border-line bg-card px-3 py-1.5 text-md outline-none focus:border-accent"
+            className="h-8 w-full rounded-md border border-line bg-card px-2.5 text-md outline-none focus:border-accent"
           />
-          <div className="mt-2 flex items-center justify-between text-xs text-muted">
-            <span>{countNotes(tree) || vault.noteCount} 篇笔记</span>
-            <span className="flex gap-2">
+          <div className="mt-2.5 flex items-center justify-between gap-2 text-xs text-muted">
+            <span className="shrink-0">{countNotes(tree) || vault.noteCount} 篇</span>
+            <span className="flex shrink-0 items-center gap-2.5">
               {/* 空库时给投递箱入口加个描边，和中间区域的引导箭头对上 */}
               <button
                 onClick={() => setShowInbox((s) => !s)}
+                title="投递箱"
                 className={
                   inboxRunning
                     ? 'text-accent'
@@ -447,15 +517,15 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
               >
                 投递箱{inboxRunning ? '·忙' : ''}
               </button>
-              <button onClick={createNote} className="hover:text-accent">
-                ＋新建
+              <button onClick={createNote} title="新建笔记" className="hover:text-accent">
+                新建
               </button>
               {!showGraph && !vaultEmpty && (
-                <button onClick={() => setGraphVisible(true)} className="hover:text-accent">
+                <button onClick={() => setGraphVisible(true)} title="打开关系图" className="hover:text-accent">
                   图谱
                 </button>
               )}
-              <button onClick={onSwitch} className="hover:text-accent">
+              <button onClick={onSwitch} title="切换知识库" className="hover:text-accent">
                 换库
               </button>
             </span>
@@ -479,6 +549,15 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         </div>
       </div>
 
+      <Divider
+        testId="divider-tree"
+        value={treeW}
+        min={tokenPx('--size-tree-min', 160)}
+        max={tokenPx('--size-tree-max', 420)}
+        onChange={setTreeW}
+        onCommit={(w) => localStorage.setItem('vault.treeWidth', String(Math.round(w)))}
+      />
+
       {/* 正文（可关闭） */}
       {current && note && (
         <div className="min-w-0 flex-1 overflow-hidden">
@@ -497,12 +576,27 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
       {vaultEmpty ? (
         <EmptyVaultGuide onOpenInbox={() => setShowInbox(true)} />
       ) : showGraph ? (
-        <GraphPanel
-          expanded={!current}
-          currentRef={currentRef}
-          onOpen={openNote}
-          onClose={() => setGraphVisible(false)}
-        />
+        <>
+          {/* 图谱缩为侧栏时才可拖（占满右侧时没有可分的两栏） */}
+          {current && note && (
+            <Divider
+              testId="divider-graph"
+              value={graphW}
+              min={tokenPx('--size-graph-panel-min', 240)}
+              max={tokenPx('--size-graph-panel-max', 680)}
+              invert
+              onChange={setGraphW}
+              onCommit={(w) => localStorage.setItem('vault.graphWidth', String(Math.round(w)))}
+            />
+          )}
+          <GraphPanel
+            expanded={!current}
+            width={graphW}
+            currentRef={currentRef}
+            onOpen={openNote}
+            onClose={() => setGraphVisible(false)}
+          />
+        </>
       ) : (
         !current && (
           <div className="flex flex-1 items-center justify-center text-md text-muted">
@@ -767,7 +861,8 @@ function NoteView({
                   const shown = formatFrontmatterValue(v)
                   return (
                     <div key={k} className="flex border-b border-line text-sm last:border-0">
-                      <div className="w-32 shrink-0 bg-sidebar px-3 py-1.5 text-muted">{k}</div>
+                      {/* 属性卡片的键列跟 markdown 表头同一个暖灰底，两处观感统一 */}
+                      <div className="w-32 shrink-0 bg-table-head px-3 py-1.5 text-muted">{k}</div>
                       <div className={`px-3 py-1.5 ${shown === EMPTY_MARK ? 'text-muted-soft' : ''}`}>{shown}</div>
                     </div>
                   )
@@ -831,11 +926,13 @@ interface GNode {
 
 const GraphPanel = memo(function GraphPanel({
   expanded,
+  width,
   currentRef,
   onOpen,
   onClose,
 }: {
   expanded: boolean
+  width: number
   currentRef: MutableRefObject<string | null>
   onOpen: (p: string) => void
   onClose: () => void
@@ -925,7 +1022,11 @@ const GraphPanel = memo(function GraphPanel({
   }
 
   return (
-    <div className={`flex shrink-0 flex-col border-l border-line ${expanded ? 'flex-1' : 'w-graph-panel'}`}>
+    <div
+      data-testid="graph-col"
+      style={expanded ? undefined : { width }}
+      className={`flex shrink-0 flex-col ${expanded ? 'flex-1' : ''}`}
+    >
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <div className="text-md font-medium">
           关系图{' '}

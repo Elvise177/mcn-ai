@@ -132,16 +132,29 @@ button { transition: background-color var(--dur-fast) ease, color var(--dur-fast
 .md-article hr { border: none; border-top: 1px solid var(--color-border); margin: 1.5em 0; }
 .md-article img { max-width: 100%; border-radius: var(--radius-md); }
 
-/* 表格：横向可滚、表头着色、斑马纹 */
+/* 表格：与卡片同款——外框圆角、表头暖灰底、行 hover 微高亮。
+   圆角要生效必须 border-collapse: separate（collapse 下浏览器忽略 radius），
+   所以外框画在 table 上、格线只画每格的右/下边，最后一列/最后一行去掉 */
 .md-article table {
-  display: block; max-width: 100%; overflow-x: auto;
-  border-collapse: collapse; margin: 0.8em 0; font-size: var(--text-base);
+  /* width: max-content + max-width 100%：窄表就贴着列收边（不然外框会拉满整栏、
+     右边留一大块空），宽表被 max-width 截断后照旧横向滚动 */
+  display: block; width: max-content; max-width: 100%; overflow: auto;
+  border-collapse: separate; border-spacing: 0;
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  margin: 0.8em 0; font-size: var(--text-base);
   white-space: nowrap;
 }
 .md-article th {
-  background: var(--color-sidebar); font-weight: 600; text-align: left;
-  border: 1px solid var(--color-border); padding: 6px 12px;
+  background: var(--color-table-head); font-weight: 600; text-align: left;
+  border-right: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border);
+  padding: 7px 12px;
 }
-.md-article td { border: 1px solid var(--color-border); padding: 6px 12px; }
-.md-article tr:nth-child(even) td { background: rgba(0, 0, 0, 0.015); }
+.md-article td {
+  border-right: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border);
+  padding: 7px 12px;
+}
+.md-article th:last-child, .md-article td:last-child { border-right: none; }
+.md-article tbody tr:last-child td { border-bottom: none; }
+.md-article tbody tr:nth-child(even) td { background: var(--color-table-zebra); }
+.md-article tbody tr:hover td { background: var(--color-table-hover); }
 .md-article input[type='checkbox'] { accent-color: var(--color-accent); margin-right: 0.4em; }

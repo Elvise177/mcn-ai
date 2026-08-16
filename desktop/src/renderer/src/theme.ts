@@ -12,7 +12,13 @@ export function token(name: string): string {
   return v
 }
 
-/** 关系图分组配色（按分组名 hash 取色） */
+/** px 类 token 的数值读取（可拖拽栏宽的默认值/上下限走这里，避免组件里写死数字） */
+export function tokenPx(name: string, fallback: number): number {
+  const n = parseFloat(token(name))
+  return Number.isFinite(n) ? n : fallback
+}
+
+/** 关系图分组配色（按分组名 hash 取色）——暖调谱系，数值在 styles/theme.css */
 export const GRAPH_GROUP_TOKENS = [
   '--color-group-1',
   '--color-group-2',

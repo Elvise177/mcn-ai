@@ -282,6 +282,11 @@ try {
   await win.click('text=个人知识库')
   await snap('02-知识库-默认大图谱', 2500)
 
+  // 文件树默认宽度收窄到 ~220px（第二轮精修项）
+  const treeW0 = await win.locator('[data-testid="tree-col"]').evaluate((el) => el.offsetWidth)
+  if (treeW0 < 200 || treeW0 > 240) throw new Error(`文件树默认宽度不是 ~220px：${treeW0}`)
+  console.log('文件树默认宽度 ✓', treeW0)
+
   // 展开树 + 点开一篇笔记
   const dirBtn = win.locator('button:has-text("▸")').first()
   if (await dirBtn.count()) {
@@ -315,7 +320,7 @@ try {
   }
 
   // 应用内弹窗（替代系统 prompt 的验证）＋ 新建→删除的完整危险路径
-  await win.click('text=＋新建')
+  await win.click('button[title="新建笔记"]')
   await snap('03b-应用内弹窗', 500)
   await win.fill('input[placeholder="笔记名称"]', 'e2e待删除笔记')
   await win.click('button:has-text("确定")')
@@ -484,6 +489,156 @@ try {
         break
       }
     }
+  }
+
+  // ---- 三栏可拖拽分隔线：真拖一次并断言宽度变化 + 记忆到 localStorage ----
+  {
+    // 图谱侧栏形态需要有笔记打开；前面的流程可能已关掉，兜底再点开一篇
+    if (!(await win.locator('[data-testid="divider-graph"]').count())) {
+      await win.locator('button.block.truncate').first().click()
+      await win.waitForTimeout(1200)
+    }
+    const dragBy = async (testId, dx) => {
+      const box = await win.locator(`[data-testid="${testId}"]`).boundingBox()
+      if (!box) throw new Error(`分隔线 ${testId} 不存在`)
+      const y = box.y + box.height / 2
+      await win.mouse.move(box.x + box.width / 2, y)
+      await win.mouse.down()
+      await win.mouse.move(box.x + box.width / 2 + dx, y, { steps: 12 })
+      await win.mouse.up()
+      await win.waitForTimeout(200)
+    }
+    const widthOf = (testId) =>
+      win.locator(`[data-testid="${testId}"]`).evaluate((el) => el.offsetWidth)
+
+    const treeBefore = await widthOf('tree-col')
+    await dragBy('divider-tree', 90)
+    const treeAfter = await widthOf('tree-col')
+    if (Math.abs(treeAfter - treeBefore - 90) > 12)
+      throw new Error(`拖文件树分隔线宽度没跟上：${treeBefore} → ${treeAfter}（期望 +90）`)
+
+    const graphBefore = await widthOf('graph-col')
+    await dragBy('divider-graph', -80) // 图谱在右侧：往左拖 = 变宽
+    const graphAfter = await widthOf('graph-col')
+    if (Math.abs(graphAfter - graphBefore - 80) > 12)
+      throw new Error(`拖图谱分隔线宽度没跟上：${graphBefore} → ${graphAfter}（期望 +80）`)
+    await snap('18-三栏-拖拽分隔线后', 300)
+
+    const saved = await win.evaluate(() => ({
+      tree: localStorage.getItem('vault.treeWidth'),
+      graph: localStorage.getItem('vault.graphWidth'),
+    }))
+    if (Math.abs(Number(saved.tree) - treeAfter) > 2 || Math.abs(Number(saved.graph) - graphAfter) > 2)
+      throw new Error('拖拽后的宽度没写进 localStorage：' + JSON.stringify(saved))
+
+    // 记忆验证：重载后回知识库，宽度应还是拖完的值
+    await win.reload()
+    await win.waitForTimeout(2000)
+    await win.click('text=个人知识库')
+    await win.waitForTimeout(2500)
+    const treeReload = await widthOf('tree-col')
+    if (Math.abs(treeReload - treeAfter) > 2)
+      throw new Error(`重载后文件树宽度没记住：${treeAfter} → ${treeReload}`)
+    await snap('18b-重载后-栏宽记忆', 300)
+    console.log('分隔线拖拽 ✓', JSON.stringify({ treeBefore, treeAfter, graphBefore, graphAfter, saved, treeReload }))
+  }
+
+  // ---- 关系图配色特写：节点色是否融进暖色主题，需要人工看这张图确认 ----
+  {
+    const groups = await win.evaluate(() => {
+      const cs = getComputedStyle(document.documentElement)
+      const names = ['--color-graph-link', ...Array.from({ length: 7 }, (_, i) => `--color-group-${i + 1}`)]
+      return Object.fromEntries(names.map((n) => [n, cs.getPropertyValue(n).trim()]))
+    })
+    if (Object.values(groups).some((v) => !v)) throw new Error('图谱配色 token 缺失：' + JSON.stringify(groups))
+    const cbox = await win.locator('canvas').first().boundingBox()
+    if (!cbox) throw new Error('关系图 canvas 不存在')
+    // 节点团不一定落在画布正中（力导布局每次落点不同），直接扫 canvas 像素求出
+    // 非背景区域的中心，再把滚轮缩放对准那里——否则容易放大到一片空白
+    const cluster = await win.evaluate(() => {
+      const c = document.querySelector('canvas')
+      const { width, height } = c
+      const d = c.getContext('2d').getImageData(0, 0, width, height).data
+      let minX = width, minY = height, maxX = 0, maxY = 0, n = 0
+      for (let y = 0; y < height; y += 2) {
+        for (let x = 0; x < width; x += 2) {
+          const i = (y * width + x) * 4
+          // 背景 #faf9f5；跟它差得够远的像素才算画上了东西（节点/边/标签）
+          if (Math.abs(d[i] - 250) + Math.abs(d[i + 1] - 249) + Math.abs(d[i + 2] - 245) > 60) {
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+            if (y < minY) minY = y
+            if (y > maxY) maxY = y
+            n++
+          }
+        }
+      }
+      const dpr = width / c.clientWidth
+      return { n, cx: (minX + maxX) / 2 / dpr, cy: (minY + maxY) / 2 / dpr }
+    })
+    if (!cluster.n) throw new Error('关系图画布上没有画出任何节点')
+    // 滚轮以指针为中心放大，放大后指针那一点的内容不动，正好用同一点当截图中心
+    await win.mouse.move(cbox.x + cluster.cx, cbox.y + cluster.cy)
+    for (let i = 0; i < 3; i++) {
+      await win.mouse.wheel(0, -200)
+      await win.waitForTimeout(250)
+    }
+    await win.waitForTimeout(1000)
+    const w = Math.min(820, Math.floor(cbox.width))
+    const h = Math.min(560, Math.floor(cbox.height))
+    const clipX = Math.max(cbox.x, Math.min(cbox.x + cluster.cx - w / 2, cbox.x + cbox.width - w))
+    const clipY = Math.max(cbox.y, Math.min(cbox.y + cluster.cy - h / 2, cbox.y + cbox.height - h))
+    await win.screenshot({
+      path: join(shots, '02d-关系图-配色特写.png'),
+      clip: { x: clipX, y: clipY, width: w, height: h },
+    })
+    record('02d-关系图-配色特写')
+    console.log('shot: 02d-关系图-配色特写', JSON.stringify({ cluster, ...groups }))
+  }
+
+  // ---- markdown 表格样式：造一篇带表格的笔记，看圆角/表头暖灰底/行 hover ----
+  {
+    const rel = await win.evaluate(async () => {
+      const p = await window.api.vault.createNote('', 'e2e表格样式')
+      await window.api.vault.write(
+        p,
+        [
+          '# 表格样式走查',
+          '',
+          '| 达人 | 场次 | GMV | 备注 |',
+          '| --- | --- | --- | --- |',
+          '| 灰太太 | 12 | 86,400 | 主推 |',
+          '| 皮蛋 | 8 | 43,100 | 稳定 |',
+          '| 一只啤酒猫 | 5 | 21,700 | 新号 |',
+          '',
+        ].join('\n')
+      )
+      return p
+    })
+    await win.locator('button.block.truncate:has-text("e2e表格样式")').first().click()
+    await win.locator('.md-article table').first().waitFor({ timeout: 8000 })
+    await win.waitForTimeout(500)
+    const tbl = await win.evaluate(() => {
+      const t = document.querySelector('.md-article table')
+      const th = t.querySelector('th')
+      const st = getComputedStyle(t)
+      return { radius: st.borderTopLeftRadius, thBg: getComputedStyle(th).backgroundColor }
+    })
+    if (parseFloat(tbl.radius) < 6) throw new Error('markdown 表格没有圆角：' + JSON.stringify(tbl))
+    await snap('19-markdown表格样式', 200)
+    const rowBgOf = () =>
+      win.evaluate(
+        () =>
+          getComputedStyle(document.querySelectorAll('.md-article tbody tr')[1].querySelector('td'))
+            .backgroundColor
+      )
+    const idleBg = await rowBgOf()
+    await win.locator('.md-article tbody tr').nth(1).hover()
+    await win.waitForTimeout(200)
+    const hoverBg = await rowBgOf()
+    if (idleBg === hoverBg) throw new Error(`表格行 hover 没有高亮：${idleBg}`)
+    await snapHover('19b-表格行hover高亮')
+    console.log('markdown 表格 ✓', JSON.stringify({ ...tbl, idleBg, hoverBg, note: rel }))
   }
 
   // 设置页
