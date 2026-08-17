@@ -46,6 +46,8 @@ export function registerIpc(): void {
     aiReady: describeTier('standard').hasKey,
     keyWritePending: isSecretPending(describeTier('standard').keyField),
     apiBaseUrl: store.get('apiBaseUrl'),
+    sensitiveAllowAi: store.get('sensitiveAllowAi'),
+    sensitiveAllowCloud: store.get('sensitiveAllowCloud'),
     dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
     dingtalkSecret: store.get('dingtalkSecret') ?? '',
     dingtalkNotifyInbox: store.get('dingtalkNotifyInbox'),
@@ -55,6 +57,14 @@ export function registerIpc(): void {
 
   ipcMain.handle('settings:setArtifactAutoIngest', (_e, v: boolean) => {
     store.set('artifactAutoIngest', !!v)
+    return { ok: true }
+  })
+
+  // A-8 三态：界面三档 → 两个独立布尔。**不追溯已入库的笔记**（PLAN §5f-3），
+  // 只影响之后进投递箱的文件
+  ipcMain.handle('settings:setSensitiveMode', (_e, allowAi: boolean, allowCloud: boolean) => {
+    store.set('sensitiveAllowAi', !!allowAi || !!allowCloud) // 允许上云必然也允许打标
+    store.set('sensitiveAllowCloud', !!allowCloud)
     return { ok: true }
   })
 

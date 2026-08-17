@@ -47,6 +47,8 @@ interface DesktopSettings {
   dingtalkNotifyInbox: boolean
   dingtalkNotifyArtifact: boolean
   artifactAutoIngest: boolean
+  sensitiveAllowAi: boolean
+  sensitiveAllowCloud: boolean
 }
 
 type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'
@@ -248,6 +250,7 @@ interface Window {
         notifyArtifact: boolean
       }) => Promise<{ ok: boolean }>
       setArtifactAutoIngest: (v: boolean) => Promise<{ ok: boolean }>
+      setSensitiveMode: (allowAi: boolean, allowCloud: boolean) => Promise<{ ok: boolean }>
     }
     ai: {
       tiers: () => Promise<{ tiers: AiTier[] }>

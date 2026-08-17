@@ -155,6 +155,13 @@ Electron App（macOS arm64，v0.1.0）
      测试隔离实例的 config 必须显式写 `tierMigrated:true` + 出厂档位映射，否则 `migrateTiers` 会判成老用户把标准档搬回中转站
      （`e2e/walkthrough.mjs` 已加永久断言守这条）
 
+7. **【已知限制】规则打标的笔记零双链（2026-08-18）**：`03b_tag_rules` 只产出 frontmatter
+   （标签/分类/结构摘要），**不生成 `[[…]]` 双链**。所以敏感文件那一批（本次 Maggie 全量里 37 篇：
+   人事档案、财务表、达人信息表）在图谱上只有 MOC 那一条目录型连接，彼此之间没有关联。
+   这是刻意选的——规则层没有语义理解，硬造双链只会造出错误关联。
+   **与 A-3（`08_table_to_cards` 达人卡进链）关联：A-3 立项时一并评估敏感笔记的关联怎么补**，
+   不要各修各的（`docs/PLAN-fix-batch.md` §5f-1）
+
 ### 未解决/未做（按计划属 P1+）
 
 - **网关（安全待办 · 已定方向，2026-08-17 拍板）**：MVP 直连中转站，**客户端 key 理论可提取**，而且 2026-08-17 查实这把 key 的分量比原先以为的重得多——服务端下发给每台客户机的 `CLIENT_RELAY_API_KEY` **就是网页版在用的 `AIHUBMIX_API_KEY` 主 key**（哈希一致），它同时供着网页版的向量与聊天。任何一台客户机被扒出 key，网页版全线得跟着轮换。
@@ -168,6 +175,16 @@ Electron App（macOS arm64，v0.1.0）
 - **本地 SQLite 聊天库**：v2；当前聊天记录只在云端
 - ~~**仓库卫生**：`desktop/` 有一批未提交的工作区改动~~ ✅ 2026-08-17 随档位单一并提交，工作区已干净；接手仍建议先 `git status` 看一眼
 - **client.ts 死代码**：`webpage/lib/automation/dingtalk/client.ts` 现在只有 `listRecords` 有调用方（vault-notes），`listSheets/insertRecords/updateRecords/deleteRecords/sendGroupMessage` 全部无人调用（钉钉剥离的遗留，见 §4-16）。留着无害，后续收拾
+- **pipeline 仓库卫生规则（2026-08-18 定）**：`~/Documents/AI/pkb-pipeline` 曾有两个月的
+  **已发布但未提交**的改动（docx 的 lxml 修复、外部资料文件名兜底打标）——线上跑的代码比仓库新，
+  出了问题连"当时发的是哪一版"都查不到。已于 2026-08-18 补录（commit `c64820f`）。
+  **自此定规矩：冻结发布 = 必须同时提交源码，不允许产物比仓库新。**
+  冻结命令：`.venv/bin/python -m PyInstaller mcn-ingest.spec --noconfirm --clean`，
+  产物拷进 `desktop/resources/pipeline/`
+- **新增 pipeline 阶段脚本必须同时加进 `mcn-ingest.spec` 的 `datas`**：`cli.py` 用
+  `SourceFileLoader` 从 `sys._MEIPASS` 取阶段脚本，没进 `datas` 的脚本冻结后运行时才报找不到，
+  而 **dev 形态从脚本同目录取、永远正常** —— 2026-08-18 接 `03b_tag_rules` 时就踩在这上面，
+  只有打包形态实测能发现（同 §4-5 的原则）
 - **客户机兼容预检**：发新客户前用 yara 本机预检 Electron 是否会被 XProtect 误杀；老 macOS 的 pyexpat 坑已用 lxml 修掉（docx2md），但同类"编译目标过新"问题在 pipeline 其他依赖上仍可能出现
 
 ### 已知未验项（2026-08-17 档位单收尾时明确留下的）

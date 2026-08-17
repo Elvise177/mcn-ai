@@ -109,6 +109,11 @@ export class VaultManager {
     this.root = null
   }
 
+  /** 按相对路径取一篇笔记（cloudSync 判 `sensitive` 用；不另建索引，直接读内存里那份） */
+  noteAt(relPath: string): VaultNote | undefined {
+    return this.notes.get(relPath)
+  }
+
   tree(): VaultTreeNode[] {
     return buildTree(this.notes, this.dirs)
   }

@@ -135,6 +135,8 @@ const STAGE_ZH: Record<string, string> = {
   convert: '转换',
   pii_guard: 'PII守卫',
   tag_llm: '智能打标',
+  tag_rules: '规则打标',
+  convert_failures: '转换结果',
   sensitive_enrich: '实体建链',
   gen_moc: '索引重建',
   archive: '归档',
@@ -172,8 +174,16 @@ function useInbox(onDone?: (files: string[]) => void, onEnd?: (ok: boolean) => v
 
 /** 阶段进度（done/total/label）由主进程算好放在 task.progress 里，这里只负责画 */
 function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boolean; onClose: () => void }) {
-  const dot = (s?: string): string => (s === 'ok' ? 'bg-ok' : s === 'error' ? 'bg-danger' : 'bg-line')
+  const dot = (s?: string): string =>
+    s === 'ok' ? 'bg-ok' : s === 'error' ? 'bg-danger' : s === 'warn' ? 'bg-warning' : 'bg-line'
   const events = task?.stages ?? []
+  // A-4：pipeline 把没产出笔记的文件名放在 convert_failures 事件里，这里摊平成一张清单。
+  // 只给数字没法处理——用户要知道是哪几个文件才能决定补什么
+  const failures = events.flatMap((e) =>
+    e.stage === 'convert_failures'
+      ? [...((e as { failed?: string[] }).failed ?? []), ...((e as { unsupported?: string[] }).unsupported ?? [])]
+      : []
+  )
   const { done, total, label } = task?.progress ?? { done: 0, total: 6, label: '' }
   // 取消是用户主动的操作，不该看起来像出错：中性灰，不是红（设计 §5.1）
   const canceled = task?.status === 'canceled'
@@ -247,6 +257,16 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
           </div>
         </div>
       )}
+      {failures.length > 0 && (
+        <div data-testid="inbox-failures" className="border-b border-line bg-warning-soft px-4 py-2 text-sm">
+          <div className="mb-1 font-medium">以下文件没有生成笔记，原件已移到「投递箱/.failed/」：</div>
+          <ul className="ml-4 list-disc text-muted">
+            {failures.map((f) => (
+              <li key={f} className="truncate">{f}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div ref={logRef} className="max-h-64 overflow-auto px-4 py-2">
         {events.length === 0 ? (
           <div className="py-3 text-sm text-muted">
@@ -267,6 +287,9 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
                     <span className="text-muted">（{ev.stage === 'convert' ? '本批已在分流完成' : '跳过'}）</span>
                   )}
                   {ev.status === 'error' && <span className="text-danger"> 失败：{ev.message}</span>}
+                  {/* A-4：转换失败与格式不支持过去只写进 convert_fail.log，界面六阶段全绿、
+                      原件照样进 .done，用户看投递箱空了就以为全入库了 */}
+                  {ev.status === 'warn' && <span className="text-warning"> {ev.message}</span>}
                   {ev.stage === 'init' && ev.pending != null && <span className="text-muted"> · {ev.pending} 个文件</span>}
                 </span>
               )}

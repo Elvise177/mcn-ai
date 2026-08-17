@@ -28,6 +28,10 @@
   /* ===== 颜色：状态 ===== */
   --color-danger: #dc4c4c;
   --color-ok: #2f9e6e;
+  /* 警示（A-4 的「转换失败/格式不支持」）：比 danger 轻一档——这不是系统出错，
+     是有几个文件没处理成，用户需要知道但不必惊慌 */
+  --color-warning: #b8761f;
+  --color-warning-soft: #fdf6e8;
   /* 提醒（云端离线条）：取暖调赭黄，与关系图 group-3 同一支，别引入蓝灰系的"系统提示"感 */
   --color-warn: #a8762f;
   --color-warn-soft: #f8f1e2;

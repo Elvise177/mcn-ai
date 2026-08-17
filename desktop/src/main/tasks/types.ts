@@ -20,6 +20,9 @@ export interface InboxEvent {
   ok?: boolean
   /** pipeline 若在阶段行里报了 token 用量就原样带上（目前只有智能打标可能有），没有就是 undefined */
   usage?: unknown
+  /** A-4：`convert_failures` 事件带的两张清单——转换失败的、格式不支持的 */
+  failed?: string[]
+  unsupported?: string[]
 }
 
 export interface TaskBase {
@@ -114,6 +117,9 @@ export const INBOX_FLOW: Array<[string, string]> = [
   ['convert', '转换'],
   ['pii_guard', 'PII守卫'],
   ['tag_llm', '智能打标'],
+  // 敏感文件走这一步：零模型的规则打标，补上 AI 打标跳过的那批的 frontmatter（A-2）。
+  // 必须排在实体建链之前——07 没有 frontmatter 就写不进结构摘要
+  ['tag_rules', '规则打标'],
   ['sensitive_enrich', '实体建链'],
   ['gen_moc', '索引重建'],
   ['cloud_sync', '上云'],

@@ -23,6 +23,8 @@ module.exports = {
         'on-solid': 'var(--color-on-solid)',
         danger: 'var(--color-danger)',
         ok: 'var(--color-ok)',
+        warning: 'var(--color-warning)',
+        'warning-soft': 'var(--color-warning-soft)',
         warn: 'var(--color-warn)',
         'warn-soft': 'var(--color-warn-soft)',
         'warn-line': 'var(--color-warn-line)',

@@ -4,6 +4,7 @@ import { join, basename } from 'path'
 import { type BrowserWindow } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
+import { vaultManager } from '../vault'
 import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
 import { pipelineBin } from '../lib/pipeline'
@@ -368,12 +369,26 @@ export class InboxOrchestrator {
         }
       }
       await walk(this.vaultRoot)
+
+      // A-8：带 `sensitive: true` 的笔记不进云端（除非用户在设置里开了第三档）。
+      // 标记由 09_pii_guard 写进 frontmatter——不读 pipeline 的 .checkpoint.jsonl，
+      // 那是它的内部文件，让主进程去读是错误的依赖方向
+      const allowCloud = store.get('sensitiveAllowCloud')
+      const isSensitive = (rel: string): boolean =>
+        vaultManager.noteAt(rel)?.frontmatter?.sensitive === true
+      const held = allowCloud ? [] : changed.filter(isSensitive)
+      const toPush = allowCloud ? changed : changed.filter((r) => !isSensitive(r))
+
       let synced = 0
-      for (const rel of changed.slice(0, 50)) {
+      for (const rel of toPush.slice(0, 50)) {
         const r = await ingestNote(rel)
         if (r.ok && !r.skipped) synced++
       }
-      this.send({ type: 'stage', stage: 'cloud_sync', status: 'ok', message: `${synced} 篇上云` })
+      // 「N 篇未同步」单说会让人以为同步坏了、去查网络——而那 M 篇是按他自己的设置刻意不传的
+      const holdNote = held.length ? `，其中 ${held.length} 篇为敏感文件，按设置仅存本地` : ''
+      const truncated = Math.max(0, toPush.length - 50)
+      const truncNote = truncated ? `，另有 ${truncated} 篇待同步（单轮上限 50）` : ''
+      this.send({ type: 'stage', stage: 'cloud_sync', status: 'ok', message: `${synced} 篇上云${holdNote}${truncNote}` })
     } catch (e) {
       this.send({ type: 'stage', stage: 'cloud_sync', status: 'error', message: String(e) })
     }
@@ -392,6 +407,8 @@ export class InboxOrchestrator {
 
     const llmKey = getLlmKey()
     const args = ['--vault', this.vaultRoot, '--max-cost', '10']
+    // A-8 三态：默认敏感文件只走本地规则打标；用户在设置里明示后才允许发给模型
+    if (store.get('sensitiveAllowAi')) args.push('--sensitive-allow-ai')
     if (llmKey) {
       args.push('--llm-key', llmKey, '--llm-base-url', store.get('llmBaseUrl'), '--llm-model', store.get('llmModel'))
     } else {
@@ -423,6 +440,8 @@ export class InboxOrchestrator {
               status: ev.status,
               message: ev.message,
               pending: ev.pending,
+              failed: ev.failed,
+              unsupported: ev.unsupported,
               // 打标阶段若报了 token 用量就带上；pipeline 目前不报，那就只记次数（见下方 appendUsage）
               usage: ev.usage,
             })

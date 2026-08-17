@@ -45,6 +45,15 @@ interface StoreSchema {
   bizSyncEnabled: boolean
   /** AI 产物生成后自动送入投递箱转为知识 */
   artifactAutoIngest: boolean
+  /**
+   * 敏感资料的处置（A-8 三态开关）。界面收成三档，**存储是两个独立布尔**——
+   * 收成一个枚举的话，以后想加「允许打标但不上云」要改数据结构。
+   *   仅本地规则打标（默认） = false / false
+   *   允许 AI 打标           = true  / false
+   *   与普通文件相同          = true  / true
+   */
+  sensitiveAllowAi: boolean
+  sensitiveAllowCloud: boolean
   /** 密钥指纹用的随机盐（不是秘密，见 secrets.ts） */
   secretSalt?: string
   encryptedApiKeyFp?: string
@@ -66,6 +75,8 @@ export const store = new Store<StoreSchema>({
     dingtalkNotifyArtifact: true,
     bizSyncEnabled: false,
     artifactAutoIngest: false,
+    sensitiveAllowAi: false,
+    sensitiveAllowCloud: false,
   },
 })
 

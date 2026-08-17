@@ -516,6 +516,72 @@ function IngestSection() {
   )
 }
 
+/**
+ * 敏感资料的处置（A-8 三态）。
+ *
+ * 界面收成三档，**存储是两个独立布尔**（`sensitiveAllowAi` / `sensitiveAllowCloud`）——
+ * 收成枚举的话，以后想加「允许打标但不上云」要改数据结构。
+ *
+ * 文案原则（2026-08-17 拍板）：说清真实边界。默认档不是"少了个功能"，
+ * 而是"敏感文件不离开你的电脑，AI 回答时仍可引用"——用户要能据此判断自己要不要改。
+ */
+const SENSITIVE_MODES = [
+  {
+    key: 'local',
+    label: '仅本地规则打标（默认）',
+    desc: '敏感文件不离开你的电脑：不发给模型、不上传云端。仍会自动打标签、生成摘要，AI 回答时照常可以引用它们。',
+  },
+  {
+    key: 'ai',
+    label: '允许 AI 打标',
+    desc: '内容会发送给模型用于生成标签与摘要，但仍不上传云端。标签质量更好，代价是这些内容离开了本机。',
+  },
+  {
+    key: 'all',
+    label: '与普通文件相同',
+    desc: '发给模型，并同步到云端知识库（多设备可用）。人事、财务、达人信息这类文件请谨慎选择。',
+  },
+] as const
+
+function SensitiveSection() {
+  const [mode, setMode] = useState<'local' | 'ai' | 'all'>('local')
+  useEffect(() => {
+    void window.api.settings.get().then((s) => {
+      setMode(s.sensitiveAllowCloud ? 'all' : s.sensitiveAllowAi ? 'ai' : 'local')
+    })
+  }, [])
+  const pick = (k: 'local' | 'ai' | 'all'): void => {
+    setMode(k)
+    void window.api.settings.setSensitiveMode(k === 'ai', k === 'all')
+  }
+  return (
+    <div className="space-y-2 border-t border-line pt-4" data-testid="settings-sensitive">
+      <div className="text-md font-medium">敏感资料（人事档案、财务表、达人信息表等）</div>
+      <div className="space-y-2">
+        {SENSITIVE_MODES.map((m) => (
+          <label key={m.key} className="flex cursor-pointer gap-2 text-md">
+            <input
+              type="radio"
+              name="sensitive-mode"
+              data-testid={`sensitive-mode-${m.key}`}
+              checked={mode === m.key}
+              onChange={() => pick(m.key)}
+              className="mt-1 accent-accent"
+            />
+            <span>
+              <span>{m.label}</span>
+              <span className="block text-sm leading-5 text-muted">{m.desc}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      {/* 改档不追溯已入库的笔记（PLAN §5f-3）：追溯要跑批量重打标、重新上云，
+          还要处理「已在云端的敏感篇要不要删」——那是另一个大单 */}
+      <div className="text-sm text-muted">仅影响之后入库的文件，已入库的笔记不受影响。</div>
+    </div>
+  )
+}
+
 /** 投递箱分流：客户可自助配置「投递箱子文件夹 → 落位目录」规则，无需碰配置文件 */
 function RoutesSection() {
   const [routes, setRoutesState] = useState<Array<{ name: string; dest: string; builtin?: boolean }>>([])
@@ -953,6 +1019,7 @@ function SettingsPage({
       {/* 3. 知识库 */}
       <Card title="知识库" testId="settings-group-vault">
         <IngestSection />
+        <SensitiveSection />
         <RoutesSection />
       </Card>
 
