@@ -679,6 +679,8 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
                 className="mb-1.5 flex items-center justify-between px-1 text-xs text-muted"
               >
                 <span>
+                  {/* 精确没找到、退到相近结果时必须说出来：不说的话用户会以为这就是精确命中（B-1） */}
+                  {result.fuzzy && <span className="text-accent">相近结果 · </span>}
                   {result.hits.length} / 共 {result.total} 条
                 </span>
                 <button

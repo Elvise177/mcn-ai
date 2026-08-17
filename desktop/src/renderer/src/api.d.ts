@@ -226,6 +226,8 @@ interface SearchHit {
 interface SearchResult {
   hits: SearchHit[]
   total: number
+  /** 精确那一遍没命中、退到「相近结果」了（B-1）。界面要说出来，别让人以为是精确命中 */
+  fuzzy?: boolean
 }
 
 interface Window {

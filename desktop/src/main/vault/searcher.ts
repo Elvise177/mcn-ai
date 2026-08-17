@@ -20,9 +20,9 @@ export class VaultSearcher {
 
   constructor() {
     this.worker = new Worker(workerPath())
-    this.worker.on('message', (m: { type: string; id?: number; hits?: SearchHit[]; total?: number }) => {
+    this.worker.on('message', (m: { type: string; id?: number; hits?: SearchHit[]; total?: number; fuzzy?: boolean }) => {
       if (m.type === 'results' && m.id != null) {
-        this.pending.get(m.id)?.({ hits: m.hits ?? [], total: m.total ?? m.hits?.length ?? 0 })
+        this.pending.get(m.id)?.({ hits: m.hits ?? [], total: m.total ?? m.hits?.length ?? 0, fuzzy: m.fuzzy })
         this.pending.delete(m.id)
       }
     })

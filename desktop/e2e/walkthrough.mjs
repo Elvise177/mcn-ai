@@ -579,6 +579,40 @@ const cdp = await prepWindow(app, win)
 // 线路纪律：任何真实调用之前先验标准档是官方直连。走查的 userData 每次都是清空重建，
 // migrateTiers 会走「全新安装」分支拿出厂映射——这条断言就是守住这个前提不被改坏
 await assertStandardRoute(win, '走查主实例')
+
+/**
+ * B-1 检索回归（不烧 token，所以常驻走查）。
+ *
+ * 修前：索引侧 unigram+bigram、检索侧 AND，于是整句自然语言查询里那些**跨词边界的二元组**
+ * （「公司年度目标」里的「司年」）在任何一篇笔记里都不存在 → 整条查询归零。
+ * 实测 10 题问库里有 7 题因此答「库里没有」，而资料就在库里。
+ *
+ * **最后两条是防幻觉的地基，比前面几条更要紧**：库里确实没有「完美日记」这个品牌，
+ * 检索就必须返回 0。中间某一版放宽成 OR 之后它漏了 12 条、置顶还正好是
+ * 「向日花年框」「霞飞年框」——**张冠李戴的原料**。这条挂了就说明模糊那一遍又放太松了。
+ */
+{
+  const CASES = [
+    ['公司年度目标', '>0'],
+    ['谁的绩效最好', '>0'],
+    ['星母第二期', '>0'],
+    ['2026年上半年收支', '>0'],
+    ['公司今年的年度目标是什么，目前进展如何', '>0'],
+    ['哪位达人最适合带霞飞的高光粉', '>0'],
+    ['灰太太', '>0'], // 精确查询不许退化
+    ['收支利润表', '>0'],
+    ['完美日记', '=0'], // 库里没有这个品牌
+    ['我们和完美日记的合作条款是什么', '=0'],
+  ]
+  const bad = []
+  for (const [q, expect] of CASES) {
+    const r = await win.evaluate((x) => window.api.vault.search(x), q)
+    const ok = expect === '>0' ? r.total > 0 : r.total === 0
+    if (!ok) bad.push(`「${q}」期望 ${expect}，实际 total=${r.total}${r.fuzzy ? '（模糊）' : ''}`)
+  }
+  if (bad.length) throw new Error('B-1 检索回归失败：\n  ' + bad.join('\n  '))
+  console.log(`B-1 检索回归 ✓ ${CASES.length} 条全过`)
+}
 const snap = async (name, ms = 600) => {
   await win.waitForTimeout(ms)
   await win.screenshot({ path: join(shots, name + '.png') })

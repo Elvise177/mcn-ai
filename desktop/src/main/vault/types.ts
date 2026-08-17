@@ -35,4 +35,9 @@ export interface SearchResult {
   hits: SearchHit[]
   /** 命中总数（未截断前） */
   total: number
+  /**
+   * 这批结果来自**模糊那一遍**（AND 空了才跑的 OR + 覆盖率闸门，见 search-worker 的 runSearch）。
+   * UI 要把它说出来——「精确没找到，这些是相近的」和「精确命中」是两件事
+   */
+  fuzzy?: boolean
 }
