@@ -117,6 +117,31 @@ Electron App（macOS arm64，v0.1.0）
 3. ~~**make-ppt 偶发撞上 `maxTurns: 30`**~~ ✅ **2026-08-16 已修**：deepseek-v4-pro 很爱反复检索（同一个问题实测连调 4–5 次 `search_knowledge`），做 PPT 那条链路上偶尔把 30 轮预算耗光，SDK 直接返回 `Reached maximum number of turns (30)`、产物不生成（修前统计：DeepSeek 官方 2/2 轮全过，inferera 3/4 轮全过）。**两手一起改**：系统提示词加第 7 条「同一任务 search_knowledge 最多 3 次，素材够就立刻产出，轮次有上限」＋ `agent/index.ts` 的 `maxTurns` 30→40。**验证**：DeepSeek 线路连跑 3 轮，每轮 6/6 全过，make-ppt 分别 43s / 50s / 46s（修前失败那次是跑满 75s 才耗光轮次）
 4. **supabase-js 的 Node 20 弃用警告**：启动时打 deprecation warning。根因是 Electron 30 内置 Node 20，而 Electron 版本被 XProtect 问题锁死（见 §4-2），升级链条：拿到开发者签名 → 升 Electron → 消除此警告。短期无害
 
+5. **【2026-08-17 QA 回归批次，共 8 条，全部未修】**：用 Maggie 源数据在隔离环境重跑并批跑问答，抓到的问题清单见
+   `docs/QA-REPORT-diff.md` §9（A-1~A-8）与 `docs/QA-REPORT-qa.md` §4/§5（B 组）。本次**零产品代码改动**。按严重度：
+
+   | 编号 | 严重度 | 问题 | 位置 |
+   |---|---|---|---|
+   | B-1 | **高** | `search_knowledge` 对「整句话」查询必然返回空：bigram 分词 + `combineWith:'AND'`，跨词边界的二元组缺一个就整条归零。实测「公司年度目标」0 命中，「公司 年度目标」5 命中。标准档 10 轮里 7 轮因此答「库里没有」，而资料就在库里 | `src/main/vault/search-worker.ts` |
+   | A-8 | **高** | `09_pii_guard` 只挡 LLM 打标、**不挡上云**：`cloudSync` 无敏感标记检查，登录后 37 篇 HR/财务 PII 照样进 Supabase | `src/main/inbox/orchestrator.ts:372` |
+   | A-1 | **高** | 整包拖入递归 0 文件、静默返回 `n=0`：`enqueue` 对目录只 `readdir` 一层，新客户拖整个文件夹进去界面毫无反应 | `src/main/inbox/orchestrator.ts:317` |
+   | A-2 | **高** | `03b_tag_rules.py` 不在 `cli.py` 链上 → 敏感文件零 frontmatter（本次 37/92 篇，占 40%），无 doc_type/category/tags/summary | pkb-pipeline `cli.py` |
+   | B-2 | 中 | 用量页系统性高估花费：`tokensOf` 把 `cache_read_input_tokens` 按**全价**计进 input。本轮实测产品口径 ¥153.83 vs 缓存折价口径 ¥49.79，**高估 3.1 倍**，且缓存命中越高的增强档高估越狠 | `src/main/usage/index.ts` + `scripts/usage-report.mjs` |
+   | A-3 | 中 | 双链 352 → 2 条：`07` 建链依赖 `20_公司管理/25_达人档案`、`40_带货/产品`、`30_课程/课程计划` 三张实体清单，模板新建库里前者空、后两者目录都不存在 | `07_sensitive_enrich.py` + `vault/wizard.ts` |
+   | A-4 | 中 | 转换失败与格式不支持在界面上完全不可见：6 个文件没产出笔记，六阶段进度条全绿、终态 succeeded、原件照样归档进 `.done` | `inbox` 面板 |
+   | A-7 | 中 | 批量导入上云只推前 50 篇（`changed.slice(0,50)`），剩下的静默丢弃且不提示 | `src/main/inbox/orchestrator.ts:372` |
+   | B-3 | 低 | 内部机制泄漏进回答：模型把子代理编排讲给用户听（「之前启动的两个子代理中，PDF提取那个卡住了」），系统提示词无相关约束 | `src/main/agent/index.ts` 提示词 |
+   | A-5 / A-6 | 低 | `Library_MOC` 断链（`04_gen_moc` 引用但不生成）；`05_qc_sample` 不在链上 | pipeline |
+
+   **A-2 + A-8 的修复原则已拍板**（合并为一个修复大单，四条）：① 敏感标记笔记不进 `cloudSync`，本地检索与问答引用照常可用；
+   ② `03b` 接回链，敏感文件默认规则打标，标签与结构化摘要必须有且零外发；③ 设置页「知识入库」组加三态选项
+   （仅本地规则打标（默认）／允许 AI 打标（明示会发给模型）／与普通文件相同（含云端同步））；④ 文案说清真实边界——
+   「敏感文件不离开你的电脑，AI 回答时仍可引用」。
+
+   **回归结论（好的那一半）**：落位一致率 92/92 = 100%；AI 打标质量与旧版持平（每篇标签 5.14 → 5.22）；
+   转换失败清单与旧版逐条一致；MOC/主题索引正确刷新。旧库 372 篇里约 270 篇来自 `06_concepts`/`08_table_to_cards`
+   等**不在桌面版链上**的阶段，属能力边界不是回归。
+
 ### 未解决/未做（按计划属 P1+）
 
 - **网关（安全待办 · 已定方向，2026-08-17 拍板）**：MVP 直连中转站，**客户端 key 理论可提取**，而且 2026-08-17 查实这把 key 的分量比原先以为的重得多——服务端下发给每台客户机的 `CLIENT_RELAY_API_KEY` **就是网页版在用的 `AIHUBMIX_API_KEY` 主 key**（哈希一致），它同时供着网页版的向量与聊天。任何一台客户机被扒出 key，网页版全线得跟着轮换。
@@ -259,7 +284,9 @@ desktop/
 
 | 路径 | 用途 |
 |---|---|
-| `~/Documents/MyBrain` | 0 号用户（Maggie/大头）的 Obsidian vault，验收基准数据 |
+| `~/Documents/AI/maggie-personal-data` | Maggie 的**源文档**（98 个 docx/xlsx/pdf/pptx，558 MB），回归重跑的输入 |
+| `~/Documents/AI/maggie-vault` | Maggie 的旧版产出 vault（372 篇 md，git 仓库，9 个阶段叠出来的），**回归对比基准** |
+| `~/Documents/MyBrain` | 开发者本人的 Obsidian vault（求职/刷题），**与 Maggie 无关**——旧版文档误标成「0 号用户 vault」，2026-08-17 更正 |
 | `~/Documents/AI/pkb-pipeline` | Python 入库 pipeline 源仓库（02_convert.py 是冻结风险核心） |
 | `~/Documents/AI/omg-dingtalk-automation` | 钉钉定制项目（独立业务线，勿混入产品仓库） |
 | `~/Desktop/mcn-ai产品文档-v2.docx`、`mcn-ai开发计划-v1.docx` | 产品定稿与实施计划 |
