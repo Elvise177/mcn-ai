@@ -78,6 +78,16 @@ const syncPending = (): void => {
 }
 
 /**
+ * 这个失败是"连不上云端"还是"云端拒了这条数据"？
+ * Postgres 的约束/RLS 拒绝一行**不等于**断网——那种情况点亮全局「云端离线」条，
+ * 用户会去查网络，而真正的问题在数据里。只有传输层失败才算 Condition 变化。
+ */
+const looksOffline = (e: unknown): boolean =>
+  /fetch failed|network|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|getaddrinfo|socket hang up|timed? ?out|Failed to fetch/i.test(
+    e instanceof Error ? e.message : String(e)
+  )
+
+/**
  * 聊天记录直写 Supabase（RLS=仅本人）。本地 electron-store 仍是权威副本。
  *
  * 失败不再静默蒸发（审计 M-03）：落进 syncQueue（退避 1m/5m/30m→转手动，见设计 §3.5），
@@ -126,7 +136,7 @@ export async function syncConversation(conv: {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     const item = pushSyncFailure(conv.id, msg)
-    markCloudUnreachable(e)
+    if (looksOffline(e)) markCloudUnreachable(e)
     tasks.patch(id, { tries: item.tries, nextRetryAt: item.nextRetryAt })
     tasks.finish(id, 'failed', msg)
   } finally {

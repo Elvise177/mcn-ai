@@ -108,6 +108,21 @@ class TaskRegistry {
     if (t) this.emit({ type: 'upsert', task: t })
   }
 
+  /**
+   * 撤掉一条任务（不进 recent）。用于"这件事其实压根没开始"——比如 AI 发送前的预检
+   * 就没过：留一条 failed 只会在 Dock 上挂一句红字，而它并不是一次真的失败。
+   */
+  drop(id: string): void {
+    const pending = this.throttled.get(id)
+    if (pending) {
+      clearTimeout(pending)
+      this.throttled.delete(id)
+    }
+    this.active.delete(id)
+    this.recent = this.recent.filter((t) => t.id !== id)
+    this.emit({ type: 'remove', id })
+  }
+
   finish(id: string, status: 'succeeded' | 'failed' | 'canceled', error?: string): void {
     const t = this.active.get(id)
     if (!t) return

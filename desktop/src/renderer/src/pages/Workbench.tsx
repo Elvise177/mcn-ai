@@ -31,7 +31,8 @@ export default function Workbench({
   onOpenConv,
 }: {
   conv: Conversation
-  onSend: (text: string) => void
+  /** 返回 false = 主进程拒了这次发送（同一会话已在生成中，H-10），输入框内容要留着 */
+  onSend: (text: string) => Promise<boolean>
   onOpenNote: (wikiTarget: string) => void
   nickname?: string
   recentConvs: Conversation[]
@@ -92,14 +93,23 @@ export default function Workbench({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [messages, draft, toolLine])
 
+  /**
+   * 发送。**生成中也照发**——由主进程拒绝并回一条带「停止当前生成」动作的提示（设计 §5.3）。
+   * 渲染层静默吞掉这次按键的话，用户敲了 Enter 什么都没发生，只会以为键盘坏了。
+   */
   const send = useCallback(
-    (text: string) => {
+    async (text: string) => {
       const t = text.trim()
-      if (!t || streaming) return // 同一会话已经在跑就不再发（二期主进程也会拒一次）
-      setInput('')
-      setSending(true)
-      setDraft('')
-      onSend(t)
+      if (!t) return
+      const busy = streaming
+      if (!busy) {
+        setSending(true)
+        setDraft('')
+      }
+      const ok = await onSend(t)
+      // 被拒：输入原样留着，用户点了 toast 上的「停止当前生成」就能接着发
+      if (ok) setInput('')
+      else if (!busy) setSending(false)
     },
     [streaming, onSend]
   )
@@ -165,7 +175,7 @@ export default function Workbench({
               {greetingLine(nickname)}
             </h1>
             <p className="mb-8 text-md text-muted">问你的库，或直接说要做什么</p>
-            <InputBox value={input} onChange={setInput} onSend={() => send(input)} streaming={false} wide />
+            <InputBox value={input} onChange={setInput} onSend={() => void send(input)} streaming={false} wide />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
               {CHIPS.map((c) => (
                 <button
@@ -234,7 +244,7 @@ export default function Workbench({
                 <InputBox
                   value={input}
                   onChange={setInput}
-                  onSend={() => send(input)}
+                  onSend={() => void send(input)}
                   onStop={() => window.api.chat.stop(convRef.current.id)}
                   streaming={streaming}
                 />

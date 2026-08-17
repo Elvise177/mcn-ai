@@ -19,14 +19,26 @@ export default function LoginGate({
   const secretTask = useTask('secret')
   const saving = !!secretTask && (secretTask.status === 'running' || secretTask.status === 'queued')
 
+  /**
+   * M-01：登录失败必须区分「网络不可达」和「密码错」。
+   * Supabase 被暂停（域名直接 NXDOMAIN）或断网时报"密码错"是最坏的一种误导——
+   * 用户会一遍遍改密码，永远不会想到去看网络。
+   */
   const submit = async (): Promise<void> => {
     if (!email.trim() || !pwd || busy) return
     setBusy(true)
     setErr('')
     const r = await window.api.auth.login(email.trim(), pwd)
     setBusy(false)
-    if (r.ok) onLoggedIn()
-    else setErr(r.error === 'Invalid login credentials' ? '邮箱或密码不对' : (r.error ?? '登录失败'))
+    if (r.ok) return onLoggedIn()
+    if (r.kind === 'canceled') return setErr('已取消登录')
+    if (r.kind === 'network')
+      return setErr('连不上服务器：网络不通，或云端暂时不可用。可先「暂不登录，仅本地使用」')
+    if (r.kind === 'timeout')
+      return setErr('登录超时（10 秒没有响应）：多半是网络不通或云端不可用，稍后再试')
+    if (r.kind === 'credential')
+      return setErr(r.error === 'Invalid login credentials' ? '邮箱或密码不对' : (r.error ?? '登录失败'))
+    setErr(r.error ?? '登录失败')
   }
 
   return (
@@ -64,6 +76,16 @@ export default function LoginGate({
         >
           {busy ? '登录中…' : '登录'}
         </button>
+        {/* 可取消：Supabase 挂起时不给出口的话，这颗按钮会永远定格在「登录中…」（M-01） */}
+        {busy && (
+          <button
+            data-testid="login-cancel"
+            onClick={() => void window.api.auth.loginCancel()}
+            className="w-full rounded-input border border-line bg-card py-2 text-base text-muted hover:bg-hover"
+          >
+            取消登录
+          </button>
+        )}
       </div>
 
       <div className="mt-6 flex flex-col items-center gap-3 text-sm text-muted">

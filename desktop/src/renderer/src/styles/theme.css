@@ -31,6 +31,9 @@
   /* 提醒（云端离线条）：取暖调赭黄，与关系图 group-3 同一支，别引入蓝灰系的"系统提示"感 */
   --color-warn: #a8762f;
   --color-warn-soft: #f8f1e2;
+  /* 提醒条自己的描边（冲突条的按钮/分隔线）。Tailwind 的透明度修饰符对 var() 颜色无效，
+     要淡一档只能另开 token，见 HANDOFF §4-13 */
+  --color-warn-line: rgba(168, 118, 47, 0.35);
 
   /* ===== 颜色：文件类型（产物卡片图标区分） ===== */
   --color-file-ppt: #cf6a3c;
@@ -108,6 +111,9 @@
   --size-tree-max: 420px;
   --size-input: 60px;
   --size-modal: 380px;
+  /* 多选一弹窗（编辑冲突的三个出口）：380px 放不下三颗按钮，会折成两行、
+     主操作被挤到下一排，看着像"次要选项" */
+  --size-modal-wide: 520px;
   /* 关系图侧栏默认宽（同样可拖拽 → localStorage vault.graphWidth） */
   --size-graph-panel: 360px;
   --size-graph-panel-min: 240px;

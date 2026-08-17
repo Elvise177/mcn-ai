@@ -39,7 +39,7 @@ export class ArtifactsWatcher {
 
   constructor() {
     // ingest 的 running 阶段由某个 inbox run 承载，所以结果也跟着那一轮走
-    inboxOrchestrator.onRunEnd((ok) => void this.resolvePending(ok))
+    inboxOrchestrator.onRunEnd((ok, canceled) => void this.resolvePending(ok, canceled))
   }
 
   attachWindow(win: BrowserWindow): void {
@@ -114,10 +114,16 @@ export class ArtifactsWatcher {
   }
 
   /** 本轮 pipeline 跑完：把等着的 ingest 任务一并结掉，并把「已入库」写进落盘表 */
-  private async resolvePending(ok: boolean): Promise<void> {
+  private async resolvePending(ok: boolean, canceled = false): Promise<void> {
     for (const rel of [...this.pending]) {
       this.pending.delete(rel)
       const id = `ingest:${rel}`
+      if (canceled) {
+        // 用户停了本轮投递：这些入库跟着停，是 canceled 不是 failed（中性灰，不报红）
+        tasks.patch(id, { title: `已停止入库「${basename(rel)}」` })
+        tasks.finish(id, 'canceled')
+        continue
+      }
       if (!ok) {
         tasks.patch(id, { title: `入库失败「${basename(rel)}」` })
         tasks.finish(id, 'failed', '投递箱本轮处理失败')

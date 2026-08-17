@@ -1,7 +1,7 @@
-import { spawn } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
 import { join, basename } from 'path'
-import { app, type BrowserWindow } from 'electron'
+import { type BrowserWindow } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
 import { ingestNote } from '../knowledge/client'
@@ -24,24 +24,30 @@ export class InboxOrchestrator {
   private running = false
   private rerun = false
   private debounce: ReturnType<typeof setTimeout> | null = null
-  /** 最近一次运行的阶段记录，UI 恢复用 */
-  lastRun: InboxEvent[] = []
+  /** 最近一次运行的阶段记录，任务对象的 stages 从这里来 */
+  private stages: InboxEvent[] = []
   /** 本轮收到的文件名（钉钉通知用），run-end 后清空 */
   private runFiles: string[] = []
+  /**
+   * 当前 pipeline 子进程。**必须是实例字段**：以前它是 run() 里 Promise 内的局部变量，
+   * 外面拿不到句柄 = 没有任何 kill 入口（审计 H-13），退出应用还会留下孤儿进程
+   */
+  private child: ChildProcess | null = null
+  private killTimer: ReturnType<typeof setTimeout> | null = null
+  /** 本轮是被谁停的。非 null 时终态是 canceled 而不是 failed */
+  private canceledBy: 'user' | 'quit' | null = null
 
   attachWindow(win: BrowserWindow): void {
     this.win = win
   }
 
   private send(ev: InboxEvent): void {
-    if (ev.type === 'run-start') this.lastRun = []
+    if (ev.type === 'run-start') this.stages = []
     if (ev.type === 'stage') {
-      this.lastRun.push(ev)
+      this.stages.push(ev)
       if (ev.status === 'error') log('error', 'inbox', `${ev.stage}: ${ev.message}`)
     }
     this.toTask(ev)
-    // legacy 通道：一期继续转发（只增不减，新 UI 出问题旧路径仍然工作），二期删
-    this.win?.webContents.send('inbox:event', ev)
   }
 
   private get taskId(): string {
@@ -52,7 +58,7 @@ export class InboxOrchestrator {
   private computeProgress(): { done: number; total: number; label: string } {
     let done = 0
     let label = ''
-    for (const ev of this.lastRun) {
+    for (const ev of this.stages) {
       if (ev.type !== 'stage' || !ev.stage) continue
       const i = INBOX_FLOW.findIndex(([k]) => k === ev.stage)
       if (i < 0) continue
@@ -77,7 +83,8 @@ export class InboxOrchestrator {
           key: this.vaultRoot ?? '',
           status: 'queued',
           title: '投递箱已收到文件',
-          cancelable: false,
+          // 3 秒去抖窗口内也能取消（那会儿还没 spawn，取消 = 撤掉这轮调度）
+          cancelable: true,
           files: ev.file ? [ev.file] : [],
           stages: [],
         })
@@ -96,7 +103,7 @@ export class InboxOrchestrator {
         key: this.vaultRoot ?? '',
         status: 'running',
         title: '投递箱处理中',
-        cancelable: false,
+        cancelable: true,
         files,
         stages: [],
         progress: { done: 0, total: INBOX_FLOW.length, label: '准备中' },
@@ -107,7 +114,7 @@ export class InboxOrchestrator {
     if (ev.type === 'stage') {
       if (!live) return
       tasks.patch(id, {
-        stages: [...this.lastRun],
+        stages: [...this.stages],
         progress: this.computeProgress(),
         ...(ev.status === 'error' ? { error: `${ev.stage}: ${ev.message ?? '失败'}` } : {}),
       } as Partial<InboxTask>)
@@ -115,18 +122,31 @@ export class InboxOrchestrator {
     }
 
     if (ev.type === 'run-end') {
+      const canceled = this.canceledBy
+      const progress = this.computeProgress()
       tasks.patch(id, {
-        stages: [...this.lastRun],
-        progress: this.computeProgress(),
-        title: ev.ok ? '投递箱处理完成' : '投递箱处理失败',
+        stages: [...this.stages],
+        progress,
+        pid: undefined,
+        cancelable: false,
+        canceled: canceled ?? undefined,
+        // 取消不是出错：把中途 stage 留下的 error 抹掉，面板/全局条才不会画成红色
+        ...(canceled ? { error: undefined } : {}),
+        title: canceled
+          ? `已停止（本轮处理到 ${progress.done}/${progress.total}，已完成的部分已保留）`
+          : ev.ok
+            ? '投递箱处理完成'
+            : '投递箱处理失败',
       } as Partial<InboxTask>)
-      tasks.finish(id, ev.ok ? 'succeeded' : 'failed')
+      // 用户主动停的是 canceled 不是 failed——主动操作不该看起来像出错（设计 §5.1）
+      tasks.finish(id, canceled ? 'canceled' : ev.ok ? 'succeeded' : 'failed')
       // 「进行中」永不落盘，落的只有这一条终态结果（重启后面板仍能看到上次结果）
       setLastInboxRun({
         endedAt: Date.now(),
         ok: !!ev.ok,
+        canceled: !!canceled,
         files: [...((tasks.get(id) as InboxTask | undefined)?.files ?? [])],
-        stages: [...this.lastRun],
+        stages: [...this.stages],
       })
     }
   }
@@ -135,13 +155,14 @@ export class InboxOrchestrator {
   private seedFromDisk(): void {
     const r = getLastInboxRun()
     if (!r) return
-    this.lastRun = r.stages
+    this.stages = r.stages
     tasks.seedRecent({
       id: this.taskId,
       kind: 'inbox',
       key: this.vaultRoot ?? '',
-      status: r.ok ? 'succeeded' : 'failed',
-      title: r.ok ? '上次投递处理完成' : '上次投递处理失败',
+      status: r.canceled ? 'canceled' : r.ok ? 'succeeded' : 'failed',
+      title: r.canceled ? '上次投递被停止' : r.ok ? '上次投递处理完成' : '上次投递处理失败',
+      canceled: r.canceled ? 'user' : undefined,
       startedAt: r.endedAt,
       endedAt: r.endedAt,
       cancelable: false,
@@ -215,6 +236,74 @@ export class InboxOrchestrator {
     if (this.debounce) clearTimeout(this.debounce)
   }
 
+  /** 退出前的清理入口：有没有还活着的 pipeline */
+  hasChild(): boolean {
+    return !!this.child?.pid
+  }
+
+  /**
+   * 杀掉整个 pipeline **进程组**（设计 §5.1）。
+   *
+   * `child.kill()` 只杀直接子进程：spawn 起的是 PyInstaller onedir 的引导程序，
+   * 真正干活的 Python 是它 fork 出来的孙子进程，会变成孤儿继续写 vault、继续烧 LLM 额度，
+   * 而 UI 已经显示"已停止"——比不做取消更糟。所以 spawn 时加 detached:true 让子进程成为
+   * 新进程组的组长（组 id == child.pid），这里用负号杀整组。
+   */
+  private killGroup(reason: 'user' | 'quit'): void {
+    const pgid = this.child?.pid
+    if (!pgid) return
+    this.canceledBy = reason
+    this.rerun = false // 停了就别接着排下一轮
+    try {
+      process.kill(-pgid, 'SIGTERM')
+      log('info', 'inbox', `已 SIGTERM 进程组 ${pgid}（${reason}）`)
+    } catch (e) {
+      // ESRCH = 进程组正好在这一刻自己退了，当成已停止
+      log('warn', 'inbox', `SIGTERM 进程组 ${pgid} 失败：${e}`)
+    }
+    if (this.killTimer) clearTimeout(this.killTimer)
+    this.killTimer = setTimeout(() => {
+      try {
+        process.kill(-pgid, 'SIGKILL')
+        log('warn', 'inbox', `进程组 ${pgid} 3 秒未退，已 SIGKILL`)
+      } catch {
+        /* 已经退了 */
+      }
+    }, 3000)
+    this.killTimer.unref?.()
+  }
+
+  /**
+   * 取消当前这一轮投递。**不做回滚**：pipeline 已经落位的 md、已经写的 .done 标记全部保留
+   * ——回滚意味着删用户 vault 里的文件，风险远大于收益。未处理的文件仍在投递箱里，
+   * 下次「立即处理」会接着做。
+   */
+  async cancel(reason: 'user' | 'quit' = 'user'): Promise<boolean> {
+    // 还在 3 秒去抖窗口里、pipeline 没起来：撤掉这轮调度即可
+    if (!this.child) {
+      if (this.debounce) {
+        clearTimeout(this.debounce)
+        this.debounce = null
+      }
+      const t = tasks.get(this.taskId)
+      if (!t || (t.status !== 'queued' && t.status !== 'running')) return false
+      this.rerun = false
+      tasks.patch(this.taskId, {
+        canceled: reason,
+        cancelable: false,
+        title: '已取消本轮投递（文件仍在投递箱里）',
+      } as Partial<InboxTask>)
+      tasks.finish(this.taskId, 'canceled')
+      return true
+    }
+    const child = this.child
+    const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
+    this.killGroup(reason)
+    // SIGKILL 在 3 秒时补刀，这里再多给 1 秒兜底，之后无论如何都返回
+    await Promise.race([closed, new Promise((r) => setTimeout(r, 4000))])
+    return true
+  }
+
   /** 拖拽/批量导入入口：拷贝进投递箱，watcher 自然接管 */
   async enqueue(paths: string[], subdir?: string): Promise<number> {
     if (!this.inboxDir) throw new Error('投递箱未就绪，请先打开知识库')
@@ -244,8 +333,8 @@ export class InboxOrchestrator {
   }
 
   /** 本轮跑完的回调（产物入库任务靠它知道自己成没成——ingest 的 running 阶段由某个 inbox run 承载） */
-  private runEndCbs: Array<(ok: boolean) => void> = []
-  onRunEnd(cb: (ok: boolean) => void): void {
+  private runEndCbs: Array<(ok: boolean, canceled: boolean) => void> = []
+  onRunEnd(cb: (ok: boolean, canceled: boolean) => void): void {
     this.runEndCbs.push(cb)
   }
 
@@ -296,6 +385,7 @@ export class InboxOrchestrator {
       return
     }
     this.running = true
+    this.canceledBy = null
     const runStart = Date.now()
     this.send({ type: 'run-start' })
 
@@ -308,7 +398,12 @@ export class InboxOrchestrator {
     }
 
     const ok = await new Promise<boolean>((resolve) => {
-      const child = spawn(pipelineBin(), args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      // detached:true → 子进程成为新进程组的组长（组 id == child.pid），取消时才能连孙子进程
+      // 一起杀（见 killGroup）。**不调 unref()**：我们仍然要等它的 close 事件
+      const child = spawn(pipelineBin(), args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+      this.child = child
+      // pid 进任务对象：取消入口与走查的进程组断言都靠它
+      tasks.patch(this.taskId, { pid: child.pid, cancelable: true } as Partial<InboxTask>)
       let buf = ''
       let lastStatus = 'ok'
       child.stdout.on('data', (d: Buffer) => {
@@ -328,24 +423,35 @@ export class InboxOrchestrator {
         }
       })
       child.stderr.on('data', () => void 0)
-      child.on('close', (code) => resolve(code === 0 && lastStatus === 'ok'))
+      const settle = (v: boolean): void => {
+        if (this.child === child) this.child = null
+        if (this.killTimer) {
+          clearTimeout(this.killTimer)
+          this.killTimer = null
+        }
+        resolve(v)
+      }
+      child.on('close', (code) => settle(code === 0 && lastStatus === 'ok'))
       child.on('error', (err) => {
         this.send({ type: 'stage', stage: 'spawn', status: 'error', message: String(err) })
-        resolve(false)
+        settle(false)
       })
     })
 
-    if (ok) await this.cloudSync(runStart)
+    // 被停掉的那一轮不再上云：半截结果没必要推到云端，也别让用户多等一次网络往返
+    if (ok && !this.canceledBy) await this.cloudSync(runStart)
 
+    const canceled = !!this.canceledBy
     this.send({ type: 'run-end', ok })
     for (const cb of this.runEndCbs) {
       try {
-        cb(ok)
+        cb(ok, canceled)
       } catch (e) {
         log('error', 'inbox', `run-end 回调失败: ${e}`)
       }
     }
-    {
+    // 用户自己停的不推钉钉——那是他刚做的动作，不是需要被通知的事件
+    if (!canceled) {
       const files = this.runFiles.splice(0)
       const fileLine = files.length ? `\n\n处理文件：${files.slice(0, 8).join('、')}${files.length > 8 ? ` 等${files.length}个` : ''}` : ''
       notifyDingtalk(
@@ -353,12 +459,16 @@ export class InboxOrchestrator {
         'mcn-ai 投递箱',
         `### 投递箱处理${ok ? '完成 ✅' : '失败 ❌'}${fileLine}\n\n> ${new Date().toLocaleString('zh-CN')} · mcn-ai 自动化`
       )
+    } else {
+      this.runFiles.length = 0
     }
     this.running = false
-    if (this.rerun) {
+    // 取消之后不接着排下一轮：文件还在投递箱里，等用户自己点「立即处理」
+    if (this.rerun && !canceled) {
       this.rerun = false
       this.schedule()
     }
+    this.rerun = false
   }
 }
 

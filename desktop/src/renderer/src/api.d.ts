@@ -35,6 +35,8 @@ interface DesktopSettings {
 
 type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'
 type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
+/** 登录失败的种类（M-01）：不同种类对应不同文案，别把网络不通说成密码错 */
+type LoginKind = 'credential' | 'network' | 'timeout' | 'canceled' | 'config'
 
 interface TaskBase {
   id: string
@@ -54,7 +56,10 @@ interface InboxTask extends TaskBase {
   kind: 'inbox'
   files: string[]
   stages: InboxEvent[]
+  /** pipeline 子进程组 id（取消要用；走查靠它做进程组残留断言） */
   pid?: number
+  /** 谁停的：user=面板上点了「停止本轮」，quit=退出应用时清理 */
+  canceled?: 'user' | 'quit'
 }
 interface AgentTask extends TaskBase {
   kind: 'agent'
@@ -209,20 +214,36 @@ interface Window {
       resolveLink: (target: string) => Promise<string | null>
       readRaw: (relPath: string) => Promise<string>
       write: (relPath: string, raw: string) => Promise<void>
+      /** 编辑冲突基线（M-27）：进入编辑态时记一份 */
+      stat: (relPath: string) => Promise<{ mtimeMs: number; hash: string; size: number }>
+      /** 带基线校验的写入：磁盘 hash 与基线对不上就不写，把磁盘现状回给渲染层 */
+      writeChecked: (
+        relPath: string,
+        raw: string,
+        baseHash: string
+      ) => Promise<{ ok: true } | { ok: false; conflict: true; current: string; currentHash: string }>
+      /** 冲突三选一的默认项：写成「笔记名 (冲突副本 …).md」，返回新笔记的相对路径 */
+      saveCopy: (relPath: string, raw: string) => Promise<string>
       createNote: (dir: string, name: string) => Promise<string>
       deleteNote: (relPath: string) => Promise<void>
       renameNote: (relPath: string, newName: string) => Promise<string>
       openFile: (href: string, fromNote: string) => Promise<boolean>
-      onChanged: (cb: (payload: { path: string }) => void) => () => void
+      /** self=true 表示这次变更是应用自己写出去的，冲突检测要跳过 */
+      onChanged: (cb: (payload: { path: string; self?: boolean }) => void) => () => void
     }
     inbox: {
       enqueue: (paths: string[], subdir?: string) => Promise<number>
       runNow: () => Promise<void>
-      lastRun: () => Promise<InboxEvent[]>
-      onEvent: (cb: (ev: InboxEvent) => void) => () => void
+      /** 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚 */
+      cancel: () => Promise<boolean>
     }
     chat: {
-      send: (sessionId: string, prompt: string, resume?: string) => Promise<void>
+      /** ok=false 表示被主进程拒了（同一会话已在生成中，H-10） */
+      send: (
+        sessionId: string,
+        prompt: string,
+        resume?: string
+      ) => Promise<{ ok: boolean; reason?: 'busy'; error?: string }>
       stop: (sessionId: string) => Promise<void>
       list: () => Promise<Conversation[]>
       save: (conv: Conversation) => Promise<void>
@@ -230,7 +251,13 @@ interface Window {
       onStream: (cb: (p: AgentStreamPayload) => void) => () => void
     }
     auth: {
-      login: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>
+      /** kind 区分「网络不可达」与「密码错」：Supabase 被暂停时报密码错是最坏的误导（M-01） */
+      login: (
+        email: string,
+        password: string
+      ) => Promise<{ ok: boolean; kind?: LoginKind; error?: string }>
+      /** 挂住时把界面从「登录中…」放出来 */
+      loginCancel: () => Promise<{ ok: boolean }>
       logout: () => Promise<void>
       state: () => Promise<{ loggedIn: boolean; email?: string }>
       provision: () => Promise<{ ok: boolean; error?: string; wrote?: string[] }>
@@ -239,6 +266,8 @@ interface Window {
     }
     tasks: {
       list: () => Promise<{ tasks: Task[]; cloud: CloudState }>
+      /** 待同步队列转手动之后唯一的出口：tries 归零 + 立刻跑一轮（设计 §3.5） */
+      retrySync: () => Promise<{ pending: number; synced: number }>
       onEvent: (cb: (p: TaskEventPayload) => void) => () => void
     }
     shortcut: {

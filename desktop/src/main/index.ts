@@ -7,6 +7,7 @@ process.on('unhandledRejection', (r) => log('error', 'main-rejection', r instanc
 import { join } from 'path'
 import { registerIpc, openStoredVault } from './ipc'
 import { probeCloud, provisionKeys } from './auth'
+import { startSyncRetry } from './knowledge/sync-queue'
 import { vaultManager } from './vault'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
@@ -55,6 +56,7 @@ function createWindow(): void {
   win.webContents.once('did-finish-load', () => {
     void provisionKeys() // 已登录用户启动时刷新服务端下发的 AI 配置（值没变则零写入）
     void probeCloud() // 云端可达性：探测有超时，Supabase 被暂停时不会把启动拖住
+    startSyncRetry() // 上次退出时没同步上去的聊天记录，开机补一轮（退避 1m/5m/30m→转手动）
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -124,4 +126,20 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+/**
+ * 退出前把 pipeline 进程组杀干净（设计 §5.1 第 5 条）。
+ *
+ * 这是**当前就存在的 bug**，只是没人注意到：spawn 出去的 pipeline 不跟着应用退，
+ * 用户以为关掉了应用，实际还有个 Python 在写 vault、烧 LLM 额度。
+ * 用 preventDefault 拿回控制权，等 kill 走完（SIGTERM → 3 秒 → SIGKILL）再真的退。
+ */
+let quitting = false
+app.on('before-quit', (e) => {
+  if (quitting || !inboxOrchestrator.hasChild()) return
+  quitting = true
+  e.preventDefault()
+  log('info', 'main', '退出前清理投递箱 pipeline 进程组')
+  void inboxOrchestrator.cancel('quit').finally(() => app.exit(0))
 })

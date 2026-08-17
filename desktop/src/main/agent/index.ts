@@ -67,6 +67,8 @@ xlsx: {"title":"名","sheets":[{"name":"表名","headers":["列1"],"rows":[["值
 export class AgentManager {
   private win: BrowserWindow | null = null
   private live = new Map<string, LiveSession>()
+  /** 已被用户停掉、但 abort 还没传播到位的会话（见 stop 与消息循环开头的注释） */
+  private stopped = new Set<string>()
   /** 测试观察口：无头冒烟不经 IPC 直接收事件 */
   tap: ((p: AgentStreamPayload) => void) | null = null
 
@@ -84,11 +86,34 @@ export class AgentManager {
     return `agent:${sessionId}`
   }
 
+  /**
+   * 这个会话是不是已经在流式中。`send()` 与 IPC 层都要问它——
+   * 「我以为它没在跑」和「我想重来」是两回事，静默 abort 会误伤正在生成的长回答（H-10）
+   */
+  isStreaming(sessionId: string): boolean {
+    const t = tasks.get(this.taskId(sessionId))
+    return t?.status === 'running' || t?.status === 'queued'
+  }
+
+  /**
+   * 停止生成（H-09）：已经流出来的半截回答**落成一条 assistant 消息**再 abort。
+   * 以前 abort 路径只发 done，屏幕一清那段文字就永远没了，连复制都来不及。
+   */
   stop(sessionId: string): void {
+    const taskId = this.taskId(sessionId)
+    const t = tasks.get(taskId) as AgentTask | undefined
+    const draft = t?.draft?.trim()
+    if (draft) {
+      // 先落消息再 abort：abort 会让 for-await 抛出、走 catch 分支发 done，
+      // 渲染层收到 done 就清屏，顺序反了这段正文照样没
+      this.emit({ sessionId, kind: 'assistant', text: `${draft}\n\n（已停止）`, sdkSessionId: t?.sdkSessionId })
+      tasks.patch(taskId, { draft: '', toolLine: undefined } as Partial<AgentTask>)
+    }
+    this.stopped.add(sessionId)
     this.live.get(sessionId)?.abort.abort()
     this.live.delete(sessionId)
-    // 二期在这里把 draft 落成一条「（已停止）」的 assistant 消息（H-09）
-    tasks.finish(this.taskId(sessionId), 'canceled')
+    tasks.patch(taskId, { title: '已停止生成' } as Partial<AgentTask>)
+    tasks.finish(taskId, 'canceled')
   }
 
   private buildSystemPrompt(): string {
@@ -110,112 +135,14 @@ export class AgentManager {
 
   /** 发送一轮对话；流式事件经 agent:stream 下行 */
   async send(sessionId: string, prompt: string, resumeSdkSessionId?: string): Promise<void> {
-    const root = vaultManager.currentRoot
-    if (!root) {
-      this.emit({ sessionId, kind: 'error', text: '请先在「个人知识库」打开一个库' })
+    // H-10：同一 session 已在流式中就**拒绝**，不 abort 旧的。IPC 层已经先拦过一道并把
+    // 「停止当前生成」的出口给了用户，这里是竞态兜底（拒绝之后 AbortController 覆盖问题随之消失）
+    if (this.isStreaming(sessionId)) {
+      log('warn', 'agent', `会话 ${sessionId} 已在生成中，拒绝重复发送`)
       return
     }
-    // provider 层给出地址/模型/key：模型显式指定，绝不依赖端点的自动映射（见 ai/provider.ts）
-    const provider = resolveForRequest()
-    if (!provider.apiKey) {
-      this.emit({ sessionId, kind: 'error', text: `请先在「设置」里配置 ${provider.label} 的 API Key` })
-      return
-    }
-    if (!provider.baseUrl) {
-      this.emit({ sessionId, kind: 'error', text: '请先在「设置」里填写自定义线路的 base URL' })
-      return
-    }
-
-    const { query, createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk')
-
-    const artifactsDir = join(root, '90_产物')
-    await fs.mkdir(artifactsDir, { recursive: true })
-
-    const knowledge = createSdkMcpServer({
-      name: 'knowledge',
-      version: '1.0.0',
-      tools: [
-        tool(
-          'search_knowledge',
-          '检索用户的个人知识库（标题/正文/标签），返回最相关的笔记路径与片段',
-          { query: z.string().describe('检索词，中文') },
-          async ({ query: q }) => {
-            // 登录后走云端三层检索（平台爆款/公司共享/个人层，带语义与加权）；未登录回退本地全文
-            const cloud = await searchCloud(q)
-            if (cloud && cloud.length) {
-              const LAYER: Record<string, string> = { platform: '平台', org: '公司', private: '我的' }
-              const text = cloud
-                .map((m, i) => `${i + 1}. [${LAYER[m.visibility ?? 'org'] ?? m.visibility}] (${m.source_type}, 相关度${m.similarity.toFixed(2)})\n   ${m.content.slice(0, 200)}`)
-                .join('\n')
-              return { content: [{ type: 'text', text }] }
-            }
-            const hits = await vaultManager.search(q)
-            const text = hits.length
-              ? hits.slice(0, 6).map((h, i) => `${i + 1}. [[${h.title}]] (${h.path})\n   ${h.snippet}`).join('\n')
-              : '（无命中）'
-            return { content: [{ type: 'text', text }] }
-          }
-        ),
-        tool(
-          'render_pptx',
-          '把 outline JSON 渲染成 PPT 文件，写入 90_产物/，返回文件路径',
-          {
-            outline_json: z.string().describe('完整 outline JSON 字符串'),
-            filename: z.string().describe('文件名（不含扩展名），中文可'),
-          },
-          async ({ outline_json, filename }) => {
-            const safe = filename.replace(/[\\/:*?"<>|]/g, '').trim() || 'ppt'
-            const day = new Date().toISOString().slice(0, 10)
-            const outDir = join(artifactsDir, `${day}_${safe}`)
-            await fs.mkdir(outDir, { recursive: true })
-            const specPath = join(tmpdir(), `mcnai-spec-${Date.now()}.json`)
-            await fs.writeFile(specPath, outline_json, 'utf-8')
-            const outPath = join(outDir, `${safe}.pptx`)
-            const result = await new Promise<string>((resolve) => {
-              const child = spawn(pipelineBin(), ['render-pptx', specPath, outPath])
-              let out = ''
-              child.stdout.on('data', (d: Buffer) => (out += d.toString()))
-              child.stderr.on('data', (d: Buffer) => (out += d.toString()))
-              child.on('close', (code) => resolve(code === 0 ? `已生成 ${outPath}` : `渲染失败: ${out.slice(-500)}`))
-              child.on('error', (e) => resolve(`渲染进程启动失败: ${e}`))
-            })
-            return { content: [{ type: 'text', text: result }] }
-          }
-        ),
-        tool(
-          'render_document',
-          '把 spec JSON 渲染成 Word(docx)/Excel(xlsx)/PDF 文件，写入 90_产物/，返回文件路径',
-          {
-            format: z.enum(['docx', 'xlsx', 'pdf']).describe('输出格式'),
-            spec_json: z.string().describe('spec JSON 字符串（docx/pdf 用 doc 结构，xlsx 用 sheets 结构）'),
-            filename: z.string().describe('文件名（不含扩展名），中文可'),
-          },
-          async ({ format, spec_json, filename }) => {
-            const safe = filename.replace(/[\\/:*?"<>|]/g, '').trim() || 'doc'
-            const day = new Date().toISOString().slice(0, 10)
-            const outDir = join(artifactsDir, `${day}_${safe}`)
-            await fs.mkdir(outDir, { recursive: true })
-            const specPath = join(tmpdir(), `mcnai-doc-${Date.now()}.json`)
-            await fs.writeFile(specPath, spec_json, 'utf-8')
-            const outPath = join(outDir, `${safe}.${format}`)
-            const result = await new Promise<string>((resolve) => {
-              const child = spawn(pipelineBin(), [`render-${format}`, specPath, outPath])
-              let out = ''
-              child.stdout.on('data', (d: Buffer) => (out += d.toString()))
-              child.stderr.on('data', (d: Buffer) => (out += d.toString()))
-              child.on('close', (code) => resolve(code === 0 ? `已生成 ${outPath}` : `渲染失败: ${out.slice(-500)}`))
-              child.on('error', (e) => resolve(`渲染进程启动失败: ${e}`))
-            })
-            return { content: [{ type: 'text', text: result }] }
-          }
-        ),
-      ],
-    })
-
-    const abort = new AbortController()
-    this.live.set(sessionId, { abort })
-    // draft 上移主进程：切走再切回来能补齐这段时间流出的字（H-08 的对话版），
-    // 也是二期「停止生成保留半截」「同一会话拒绝重复发送」的前提
+    // 任务对象在**第一个同步 tick** 就建起来：下面全是 await，任务建晚了这段窗口里
+    // 第二条消息照样挤得进来，AbortController 又会被后来的覆盖（H-10 的老根因）
     const taskId = this.taskId(sessionId)
     tasks.start({
       id: taskId,
@@ -226,6 +153,21 @@ export class AgentManager {
       conversationId: sessionId,
       draft: '',
     })
+    /** 预检不通过：这一轮压根没开始，任务直接撤掉（别在 Dock 上留一条红字） */
+    const bail = (msg: string): void => {
+      tasks.drop(taskId)
+      this.emit({ sessionId, kind: 'error', text: msg })
+    }
+
+    const root = vaultManager.currentRoot
+    if (!root) return bail('请先在「个人知识库」打开一个库')
+    // provider 层给出地址/模型/key：模型显式指定，绝不依赖端点的自动映射（见 ai/provider.ts）
+    const provider = resolveForRequest()
+    if (!provider.apiKey) return bail(`请先在「设置」里配置 ${provider.label} 的 API Key`)
+    if (!provider.baseUrl) return bail('请先在「设置」里填写自定义线路的 base URL')
+
+    // draft 上移主进程：切走再切回来能补齐这段时间流出的字（H-08 的对话版），
+    // 也是「停止生成保留半截」（H-09）与「同一会话拒绝重复发送」（H-10）的前提
     const appendDraft = (text: string): void => {
       const t = tasks.get(taskId) as AgentTask | undefined
       if (!t) return
@@ -234,7 +176,97 @@ export class AgentManager {
       tasks.patch(taskId, { draft: next, toolLine: undefined } as Partial<AgentTask>, true)
     }
 
+    const abort = new AbortController()
+    this.live.set(sessionId, { abort })
+    this.stopped.delete(sessionId) // 上一轮停止留下的标记，别把这一轮也掐了
+
     try {
+      const { query, createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk')
+
+      const artifactsDir = join(root, '90_产物')
+      await fs.mkdir(artifactsDir, { recursive: true })
+
+      const knowledge = createSdkMcpServer({
+        name: 'knowledge',
+        version: '1.0.0',
+        tools: [
+          tool(
+            'search_knowledge',
+            '检索用户的个人知识库（标题/正文/标签），返回最相关的笔记路径与片段',
+            { query: z.string().describe('检索词，中文') },
+            async ({ query: q }) => {
+              // 登录后走云端三层检索（平台爆款/公司共享/个人层，带语义与加权）；未登录回退本地全文
+              const cloud = await searchCloud(q)
+              if (cloud && cloud.length) {
+                const LAYER: Record<string, string> = { platform: '平台', org: '公司', private: '我的' }
+                const text = cloud
+                  .map((m, i) => `${i + 1}. [${LAYER[m.visibility ?? 'org'] ?? m.visibility}] (${m.source_type}, 相关度${m.similarity.toFixed(2)})\n   ${m.content.slice(0, 200)}`)
+                  .join('\n')
+                return { content: [{ type: 'text', text }] }
+              }
+              const hits = await vaultManager.search(q)
+              const text = hits.length
+                ? hits.slice(0, 6).map((h, i) => `${i + 1}. [[${h.title}]] (${h.path})\n   ${h.snippet}`).join('\n')
+                : '（无命中）'
+              return { content: [{ type: 'text', text }] }
+            }
+          ),
+          tool(
+            'render_pptx',
+            '把 outline JSON 渲染成 PPT 文件，写入 90_产物/，返回文件路径',
+            {
+              outline_json: z.string().describe('完整 outline JSON 字符串'),
+              filename: z.string().describe('文件名（不含扩展名），中文可'),
+            },
+            async ({ outline_json, filename }) => {
+              const safe = filename.replace(/[\\/:*?"<>|]/g, '').trim() || 'ppt'
+              const day = new Date().toISOString().slice(0, 10)
+              const outDir = join(artifactsDir, `${day}_${safe}`)
+              await fs.mkdir(outDir, { recursive: true })
+              const specPath = join(tmpdir(), `mcnai-spec-${Date.now()}.json`)
+              await fs.writeFile(specPath, outline_json, 'utf-8')
+              const outPath = join(outDir, `${safe}.pptx`)
+              const result = await new Promise<string>((resolve) => {
+                const child = spawn(pipelineBin(), ['render-pptx', specPath, outPath])
+                let out = ''
+                child.stdout.on('data', (d: Buffer) => (out += d.toString()))
+                child.stderr.on('data', (d: Buffer) => (out += d.toString()))
+                child.on('close', (code) => resolve(code === 0 ? `已生成 ${outPath}` : `渲染失败: ${out.slice(-500)}`))
+                child.on('error', (e) => resolve(`渲染进程启动失败: ${e}`))
+              })
+              return { content: [{ type: 'text', text: result }] }
+            }
+          ),
+          tool(
+            'render_document',
+            '把 spec JSON 渲染成 Word(docx)/Excel(xlsx)/PDF 文件，写入 90_产物/，返回文件路径',
+            {
+              format: z.enum(['docx', 'xlsx', 'pdf']).describe('输出格式'),
+              spec_json: z.string().describe('spec JSON 字符串（docx/pdf 用 doc 结构，xlsx 用 sheets 结构）'),
+              filename: z.string().describe('文件名（不含扩展名），中文可'),
+            },
+            async ({ format, spec_json, filename }) => {
+              const safe = filename.replace(/[\\/:*?"<>|]/g, '').trim() || 'doc'
+              const day = new Date().toISOString().slice(0, 10)
+              const outDir = join(artifactsDir, `${day}_${safe}`)
+              await fs.mkdir(outDir, { recursive: true })
+              const specPath = join(tmpdir(), `mcnai-doc-${Date.now()}.json`)
+              await fs.writeFile(specPath, spec_json, 'utf-8')
+              const outPath = join(outDir, `${safe}.${format}`)
+              const result = await new Promise<string>((resolve) => {
+                const child = spawn(pipelineBin(), [`render-${format}`, specPath, outPath])
+                let out = ''
+                child.stdout.on('data', (d: Buffer) => (out += d.toString()))
+                child.stderr.on('data', (d: Buffer) => (out += d.toString()))
+                child.on('close', (code) => resolve(code === 0 ? `已生成 ${outPath}` : `渲染失败: ${out.slice(-500)}`))
+                child.on('error', (e) => resolve(`渲染进程启动失败: ${e}`))
+              })
+              return { content: [{ type: 'text', text: result }] }
+            }
+          ),
+        ],
+      })
+
       const q = query({
         prompt,
         options: {
@@ -278,6 +310,9 @@ export class AgentManager {
       })
 
       for await (const message of q) {
+        // abort 传播需要时间，SDK 往往还会再吐一条 result 出来。半截回答此刻已经带着
+        // 「（已停止）」落进对话了，再补一条完整答案等于根本没停成（H-09）
+        if (this.stopped.has(sessionId)) break
         if (message.type === 'system' && message.subtype === 'init') {
           const tools = (message as { tools?: string[] }).tools ?? []
           console.log(
@@ -330,6 +365,7 @@ export class AgentManager {
       }
     } finally {
       this.live.delete(sessionId)
+      this.stopped.delete(sessionId)
     }
   }
 }

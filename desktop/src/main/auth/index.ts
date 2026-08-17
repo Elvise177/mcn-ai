@@ -7,8 +7,9 @@ import { tasks } from '../tasks/registry'
 import { clearSyncQueue, getSyncQueue } from '../tasks/persist'
 import { SecretVault, type SecretBackend } from '../secrets'
 
-/** Supabase 公开配置（anon key 设计上可公开，RLS 才是安全边界）；从 webpage 同项目取 */
-const SUPABASE_URL = 'https://yqozqfrmdddmfrpavrsn.supabase.co'
+/** Supabase 公开配置（anon key 设计上可公开，RLS 才是安全边界）；从 webpage 同项目取。
+    MCNAI_SUPABASE_URL 只给 e2e 用：把它指到黑洞地址才能验"云端不可达"那条登录分支（M-01） */
+const SUPABASE_URL = process.env.MCNAI_SUPABASE_URL || 'https://yqozqfrmdddmfrpavrsn.supabase.co'
 interface AuthStoreSchema {
   anonKey?: string
   encryptedSession?: string
@@ -71,11 +72,76 @@ export function getSupabase(): SupabaseClient | null {
   return client
 }
 
-export async function login(email: string, password: string): Promise<{ ok: boolean; error?: string }> {
+/**
+ * 登录失败的种类（M-01）。渲染层据此给不同文案——
+ * Supabase 被暂停或断网时给「密码错」是最坏的一种误导：用户会一遍遍改密码。
+ */
+export type LoginKind = 'credential' | 'network' | 'timeout' | 'canceled' | 'config'
+export interface LoginResult {
+  ok: boolean
+  kind?: LoginKind
+  error?: string
+}
+
+/** 登录超时：Supabase 被暂停时域名直接 NXDOMAIN，signInWithPassword 会挂很久 */
+const LOGIN_TIMEOUT_MS = 10_000
+
+/** 取信号：`auth:loginCancel` 用它把界面从「登录中…」放出来（底层请求可能仍在跑，但没人等它了） */
+let releaseLogin: ((r: LoginResult) => void) | null = null
+export function cancelLogin(): void {
+  releaseLogin?.({ ok: false, kind: 'canceled' })
+}
+
+/** 网络层失败 vs 凭据错误：supabase-js 两种都塞在 AuthError 里，只能按形态区分 */
+function isNetworkish(e: { name?: string; status?: number; message?: string }): boolean {
+  if (e.name === 'AuthRetryableFetchError') return true
+  // 凭据错误一定带 4xx；网络层失败 status 是 0/undefined
+  if (!e.status) return true
+  return /fetch failed|network|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|getaddrinfo|socket hang up|timed? ?out/i.test(
+    e.message ?? ''
+  )
+}
+
+export async function login(email: string, password: string): Promise<LoginResult> {
   const sb = getSupabase()
-  if (!sb) return { ok: false, error: '未配置 Supabase anon key（设置页填写）' }
-  const { error } = await sb.auth.signInWithPassword({ email, password })
-  if (error) return { ok: false, error: error.message }
+  if (!sb) return { ok: false, kind: 'config', error: '未配置 Supabase anon key（设置页填写）' }
+
+  const attempt = (async (): Promise<LoginResult> => {
+    try {
+      const { error } = await sb.auth.signInWithPassword({ email, password })
+      if (!error) return { ok: true }
+      const net = isNetworkish(error)
+      if (net) markCloudUnreachable(error)
+      return { ok: false, kind: net ? 'network' : 'credential', error: error.message }
+    } catch (e) {
+      markCloudUnreachable(e)
+      return { ok: false, kind: 'network', error: e instanceof Error ? e.message : String(e) }
+    }
+  })()
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const r = await Promise.race<LoginResult>([
+    attempt,
+    new Promise<LoginResult>((resolve) => {
+      timer = setTimeout(() => resolve({ ok: false, kind: 'timeout' }), LOGIN_TIMEOUT_MS)
+    }),
+    new Promise<LoginResult>((resolve) => {
+      releaseLogin = resolve
+    }),
+  ])
+  clearTimeout(timer)
+  releaseLogin = null
+
+  if (r.kind === 'timeout') {
+    markCloudUnreachable(new Error(`登录超时（${LOGIN_TIMEOUT_MS / 1000}s 无响应）`))
+    // 请求本身还挂在那儿：万一它后来成功了，把结果落进会话，用户下次进来就是已登录
+    void attempt.then((late) => {
+      if (late.ok) void probeCloud()
+    })
+    return r
+  }
+  if (!r.ok) return r
+
   void provisionKeys() // 登录即用：服务端下发 AI key（不阻塞登录返回）
   void probeCloud()
   return { ok: true }

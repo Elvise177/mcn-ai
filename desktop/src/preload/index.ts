@@ -27,30 +27,32 @@ const api = {
     resolveLink: (target: string) => ipcRenderer.invoke('vault:resolveLink', target),
     readRaw: (relPath: string) => ipcRenderer.invoke('vault:readRaw', relPath),
     write: (relPath: string, raw: string) => ipcRenderer.invoke('vault:write', relPath, raw),
+    stat: (relPath: string) => ipcRenderer.invoke('vault:stat', relPath),
+    writeChecked: (relPath: string, raw: string, baseHash: string) =>
+      ipcRenderer.invoke('vault:writeChecked', relPath, raw, baseHash),
+    saveCopy: (relPath: string, raw: string) => ipcRenderer.invoke('vault:saveCopy', relPath, raw),
     createNote: (dir: string, name: string) => ipcRenderer.invoke('vault:createNote', dir, name),
     deleteNote: (relPath: string) => ipcRenderer.invoke('vault:deleteNote', relPath),
     renameNote: (relPath: string, newName: string) => ipcRenderer.invoke('vault:renameNote', relPath, newName),
     openFile: (href: string, fromNote: string) => ipcRenderer.invoke('vault:openFile', href, fromNote),
-    onChanged: (cb: (payload: { path: string }) => void) => {
-      const listener = (_e: unknown, payload: { path: string }): void => cb(payload)
+    onChanged: (cb: (payload: { path: string; self?: boolean }) => void) => {
+      const listener = (_e: unknown, payload: { path: string; self?: boolean }): void => cb(payload)
       ipcRenderer.on('vault:changed', listener)
       return () => ipcRenderer.removeListener('vault:changed', listener)
     },
   },
 }
 
+// legacy 的 inbox:event / inbox:lastRun 在二期删掉了：投递箱状态一律走任务层
+// （tasks:list + task:event），渲染层的 useInbox 已经是 useTask('inbox') 的薄封装
 const inbox = {
   enqueue: (paths: string[], subdir?: string) => ipcRenderer.invoke('inbox:enqueue', paths, subdir),
   runNow: () => ipcRenderer.invoke('inbox:runNow'),
-  lastRun: () => ipcRenderer.invoke('inbox:lastRun'),
-  onEvent: (cb: (ev: unknown) => void) => {
-    const listener = (_e: unknown, ev: unknown): void => cb(ev)
-    ipcRenderer.on('inbox:event', listener)
-    return () => ipcRenderer.removeListener('inbox:event', listener)
-  },
+  cancel: () => ipcRenderer.invoke('inbox:cancel'),
 }
 const auth = {
   login: (email: string, password: string) => ipcRenderer.invoke('auth:login', email, password),
+  loginCancel: () => ipcRenderer.invoke('auth:loginCancel'),
   logout: () => ipcRenderer.invoke('auth:logout'),
   state: () => ipcRenderer.invoke('auth:state'),
   provision: () => ipcRenderer.invoke('auth:provision'),
@@ -88,6 +90,7 @@ const artifacts = {
 }
 const tasksApi = {
   list: () => ipcRenderer.invoke('tasks:list'),
+  retrySync: () => ipcRenderer.invoke('sync:retry'),
   onEvent: (cb: (p: unknown) => void) => {
     const listener = (_e: unknown, p: unknown): void => cb(p)
     ipcRenderer.on('task:event', listener)

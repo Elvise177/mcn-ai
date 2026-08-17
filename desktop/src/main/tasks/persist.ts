@@ -31,7 +31,14 @@ export interface SyncQueueItem {
 }
 
 interface TaskStoreSchema {
-  lastInboxRun?: { endedAt: number; ok: boolean; files: string[]; stages: InboxEvent[] }
+  lastInboxRun?: {
+    endedAt: number
+    ok: boolean
+    /** 用户主动停止的那一轮：状态是 canceled 不是 failed（中性灰，不是红） */
+    canceled?: boolean
+    files: string[]
+    stages: InboxEvent[]
+  }
   ingested: Record<string, IngestedEntry>
   syncQueue: SyncQueueItem[]
 }
@@ -58,9 +65,24 @@ export function markIngested(artifactRel: string, e: IngestedEntry): void {
  * 退避阶梯：1m → 5m → 30m → 转手动（见设计 §3.5）。
  * 不给"永远重试"——离线一整天回来一次性打几百个请求，比失败本身更糟。
  */
-const BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000]
+export const BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000]
 
 export const getSyncQueue = (): SyncQueueItem[] => taskStore.get('syncQueue')
+
+/** 到点该重试的条目（nextRetryAt=0 已转手动，不在自动范围内） */
+export const dueSyncFailures = (now = Date.now()): SyncQueueItem[] =>
+  taskStore.get('syncQueue').filter((x) => x.nextRetryAt > 0 && x.nextRetryAt <= now)
+
+/**
+ * 「重试」按钮：整队 tries 归零并立刻到期（设计 §3.5）。
+ * 不给"永远重试"——离线一整天回来一次性打几百个请求，比失败本身更糟，
+ * 所以自动重试有上限，超限后只能由用户在这里手动踢一脚。
+ */
+export function resetSyncQueue(): SyncQueueItem[] {
+  const q = taskStore.get('syncQueue').map((x) => ({ ...x, tries: 0, nextRetryAt: Date.now() }))
+  taskStore.set('syncQueue', q)
+  return q
+}
 
 /** 同一会话只排一条：后来的覆盖前面的，tries 累加 */
 export function pushSyncFailure(convId: string, error: string): SyncQueueItem {

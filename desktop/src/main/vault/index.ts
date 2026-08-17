@@ -1,4 +1,5 @@
 import { promises as fs } from 'fs'
+import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
 import { shell, type BrowserWindow } from 'electron'
@@ -6,6 +7,9 @@ import { scanVault, parseNote, readNoteBody, buildTree, IGNORE } from './reader'
 import { buildGraph, makeResolver } from './graph'
 import { VaultSearcher } from './searcher'
 import type { VaultNote, VaultTreeNode, GraphData, SearchHit } from './types'
+
+/** 编辑冲突检测（M-27）用的内容指纹。用内容 hash 而不是 mtime——见 startWatcher 的注释 */
+const hashOf = (raw: string): string => createHash('sha256').update(raw, 'utf-8').digest('hex')
 
 /** vault 单例管理器：索引 + 监听 + 检索 + 读写，主进程内唯一数据源 */
 export class VaultManager {
@@ -15,6 +19,13 @@ export class VaultManager {
   private searcher = new VaultSearcher()
   private watcher: FSWatcher | null = null
   private win: BrowserWindow | null = null
+  /**
+   * 自触发抑制表（M-27）：应用自己 write 出去的内容指纹。
+   * 我们自己写的那一下也会让 watcher 冒 change 事件，不区分的话每次保存都会自己给自己报冲突。
+   * **按内容 hash 而不是 mtime 匹配**：chokidar 的 awaitWriteFinish(800ms) 会让事件里的 mtime
+   * 与写入那一刻记录的对不上，漏抑制就是误报（设计 §8 风险 3）
+   */
+  private selfWrites = new Map<string, string>()
 
   attachWindow(win: BrowserWindow): void {
     this.win = win
@@ -57,7 +68,10 @@ export class VaultManager {
       if (r) {
         this.notes.set(r.note.path, r.note)
         this.searcher.upsert(r.note, r.raw)
-        this.notify(rel)
+        // 内容与我们刚写出去的一致 = 这条事件是我们自己触发的，不算"外部改动"
+        const mine = this.selfWrites.get(rel) === hashOf(r.raw)
+        if (mine) this.selfWrites.delete(rel)
+        this.notify(rel, mine)
       }
     }
     this.watcher.on('add', onUpsert)
@@ -82,8 +96,9 @@ export class VaultManager {
     })
   }
 
-  private notify(path: string): void {
-    this.win?.webContents.send('vault:changed', { path })
+  /** self=true 表示这次变更是应用自己写出去的，冲突检测要跳过它 */
+  private notify(path: string, self = false): void {
+    this.win?.webContents.send('vault:changed', { path, self })
   }
 
   async close(): Promise<void> {
@@ -121,7 +136,69 @@ export class VaultManager {
   /** 写回原文；watcher 会自动捕获变更刷新索引 */
   async write(relPath: string, raw: string): Promise<void> {
     if (!this.root) throw new Error('vault 未打开')
-    await fs.writeFile(join(this.root, relPath), raw, 'utf-8')
+    // 先登记指纹再写：watcher 的 change 事件靠它认出"这是我自己写的"
+    this.selfWrites.set(relPath, hashOf(raw))
+    try {
+      await fs.writeFile(join(this.root, relPath), raw, 'utf-8')
+    } catch (e) {
+      this.selfWrites.delete(relPath)
+      throw e
+    }
+  }
+
+  /**
+   * 编辑冲突检测的基线（M-27，设计 §5.2）：进入编辑态时记一份 `{mtimeMs, hash}`。
+   * 文件不存在时返回 hash='' —— 调用方据此知道"这篇还没落盘"。
+   */
+  async stat(relPath: string): Promise<{ mtimeMs: number; hash: string; size: number }> {
+    if (!this.root) throw new Error('vault 未打开')
+    const abs = join(this.root, relPath)
+    try {
+      const [raw, st] = await Promise.all([fs.readFile(abs, 'utf-8'), fs.stat(abs)])
+      return { mtimeMs: st.mtimeMs, hash: hashOf(raw), size: st.size }
+    } catch {
+      return { mtimeMs: 0, hash: '', size: 0 }
+    }
+  }
+
+  /**
+   * 带基线校验的写入（设计 §5.2 的时机 (c)）：保存那一刻再算一次磁盘 hash 与基线比对，
+   * 兜住编辑期间那条非模态提示条漏掉的窗口 / TOCTOU。
+   * 对不上就**不写**，把磁盘现状回给渲染层，由用户在三选一里决定怎么办。
+   */
+  async writeChecked(
+    relPath: string,
+    raw: string,
+    baseHash: string
+  ): Promise<{ ok: true } | { ok: false; conflict: true; current: string; currentHash: string }> {
+    if (!this.root) throw new Error('vault 未打开')
+    const now = await this.stat(relPath)
+    if (now.hash !== baseHash) {
+      const current = now.hash ? await this.readRaw(relPath) : ''
+      return { ok: false, conflict: true, current, currentHash: now.hash }
+    }
+    await this.write(relPath, raw)
+    return { ok: true }
+  }
+
+  /**
+   * 冲突时的「另存为副本」：写成 `笔记名 (冲突副本 2026-08-16 14-30).md`，两份都保住。
+   * 它是三选一里的默认项——唯一零数据丢失的选项（Obsidian / Dropbox / 坚果云的通行做法）。
+   */
+  async saveConflictCopy(relPath: string, raw: string): Promise<string> {
+    if (!this.root) throw new Error('vault 未打开')
+    const d = new Date()
+    const p = (n: number): string => String(n).padStart(2, '0')
+    const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}`
+    const dir = relPath.split('/').slice(0, -1).join('/')
+    const base = (relPath.split('/').pop() ?? relPath).replace(/\.md$/i, '')
+    let rel = join(dir, `${base} (冲突副本 ${stamp}).md`)
+    let n = 1
+    while (this.notes.has(rel)) {
+      rel = join(dir, `${base} (冲突副本 ${stamp}-${++n}).md`)
+    }
+    await this.write(rel, raw)
+    return rel
   }
 
   /** 新建笔记，返回相对路径；重名自动加序号 */

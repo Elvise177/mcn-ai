@@ -5,6 +5,7 @@ import { wikiLinkPlugin } from 'remark-wiki-link'
 import ForceGraph2D from 'react-force-graph-2d'
 import { FastMarkdown } from '../components/Markdown'
 import { VaultWizard } from '../components/VaultWizard'
+import { ConflictBar } from '../components/ConflictBar'
 import { ui } from '../components/ui'
 import { X, Inbox, MoveUpLeft, MoreHorizontal } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
@@ -165,8 +166,14 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
   const dot = (s?: string): string => (s === 'ok' ? 'bg-ok' : s === 'error' ? 'bg-danger' : 'bg-line')
   const events = task?.stages ?? []
   const { done, total, label } = task?.progress ?? { done: 0, total: 6, label: '' }
-  const failed = !!task?.error
+  // 取消是用户主动的操作，不该看起来像出错：中性灰，不是红（设计 §5.1）
+  const canceled = task?.status === 'canceled'
+  const failed = !canceled && !!task?.error
   const pct = running || done > 0 ? Math.round((done / total) * 100) : 0
+  const [stopping, setStopping] = useState(false)
+  useEffect(() => {
+    if (!running) setStopping(false)
+  }, [running])
   // 日志区跟着最新一条走：不然跑到一半新阶段全在折叠线以下，看着像卡住不动
   const logRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -178,9 +185,24 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
         <div className="text-md font-medium">
           投递箱 {running && <span className="text-xs text-accent">处理中…</span>}
+          {canceled && <span className="text-xs text-muted">已停止</span>}
         </div>
         <div className="flex gap-2 text-sm">
-          {!running && (
+          {running ? (
+            // H-13：以前只有「立即处理」和「✕ 关闭」，误拖 200 个文件唯一的办法是退出应用
+            <button
+              data-testid="inbox-cancel"
+              disabled={stopping}
+              onClick={async () => {
+                setStopping(true)
+                await window.api.inbox.cancel()
+                ui.toast('已停止本轮投递，已完成的部分保留，未处理的文件仍在投递箱里')
+              }}
+              className="text-muted hover:text-accent disabled:opacity-60"
+            >
+              {stopping ? '停止中…' : '停止本轮'}
+            </button>
+          ) : (
             <button onClick={() => window.api.inbox.runNow()} className="text-muted hover:text-accent">
               立即处理
             </button>
@@ -190,20 +212,27 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
           </button>
         </div>
       </div>
+      {/* 取消后把"发生了什么、东西还在不在"说清楚：不回滚是刻意的，删用户 vault 里的文件
+          风险远大于收益（设计 §5.1） */}
+      {canceled && (
+        <div data-testid="inbox-canceled" className="border-b border-line px-4 py-2 text-sm text-muted">
+          {task?.title ?? '已停止'}；未处理的文件仍在投递箱里，点「立即处理」可接着做。
+        </div>
+      )}
       {/* 阶段进度条：过去只有一串日志行，看不出"还剩几步"，跑长任务时体感像卡死 */}
       {(running || done > 0) && (
         <div className="border-b border-line px-4 py-2.5">
           <div className="mb-1.5 flex items-center justify-between text-xs text-muted">
-            <span>{failed ? '有阶段失败' : label || '准备中'}</span>
+            <span>{canceled ? '已停止' : failed ? '有阶段失败' : label || '准备中'}</span>
             <span>
               {done}/{total}
             </span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-line">
             <div
-              className={`inbox-bar-fill h-full rounded-full ${failed ? 'bg-danger' : 'bg-accent'} ${
-                running && !failed ? 'inbox-bar-running' : ''
-              }`}
+              className={`inbox-bar-fill h-full rounded-full ${
+                canceled ? 'bg-muted-soft' : failed ? 'bg-danger' : 'bg-accent'
+              } ${running && !failed ? 'inbox-bar-running' : ''}`}
               style={{ width: `${Math.max(pct, running ? 6 : 0)}%` }}
             />
           </div>
@@ -767,6 +796,14 @@ function NoteView({
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [dirty, setDirty] = useState(false)
+  /**
+   * M-27 编辑冲突：进编辑态记一次内容基线，保存时拿它跟磁盘比。
+   * 用**内容 hash** 不用 mtime——chokidar 的 awaitWriteFinish 会让 mtime 对不上，
+   * 那样每次自己保存都会给自己报冲突（设计 §8 风险 3）
+   */
+  const baseHash = useRef('')
+  /** 编辑期间检测到的外部改动（非模态提示条），值是磁盘上那一版的正文 */
+  const [conflict, setConflict] = useState<string | null>(null)
 
   useEffect(() => {
     onDirty(dirty)
@@ -776,7 +813,11 @@ function NoteView({
 
   const startEdit = async (): Promise<void> => {
     try {
-      setDraft(await window.api.vault.readRaw(path))
+      const raw = await window.api.vault.readRaw(path)
+      const st = await window.api.vault.stat(path)
+      baseHash.current = st.hash
+      setConflict(null)
+      setDraft(raw)
       setDirty(false)
       setEditing(true)
     } catch (e) {
@@ -784,14 +825,75 @@ function NoteView({
     }
   }
 
+  /**
+   * 编辑期间的外部改动（设计 §5.2 时机 (b)）：**只挂一条非模态提示条，不打断用户**。
+   * 用户正在打字，弹模态会吞掉击键、打断输入法组合，比不提示还差。
+   * `self` 是主进程给的标记：应用自己 write 出去的那一下不算冲突。
+   */
+  useEffect(() => {
+    if (!editing) return
+    return window.api.vault.onChanged(async (p) => {
+      if (p.path !== path || p.self) return
+      const st = await window.api.vault.stat(path).catch(() => null)
+      if (!st || st.hash === baseHash.current) return
+      setConflict(await window.api.vault.readRaw(path).catch(() => ''))
+    })
+  }, [editing, path])
+
+  /** 落盘成功后的收尾：基线跟上、冲突条撤掉、退出编辑态 */
+  const afterSaved = (msg: string): void => {
+    void window.api.vault.stat(path).then((st) => {
+      baseHash.current = st.hash
+    })
+    setConflict(null)
+    setDirty(false)
+    setEditing(false)
+    ui.toast(msg)
+  }
+
+  /** 冲突条上的「用我的覆盖」：不等到保存那一步，就地把磁盘那版盖掉（对方改动会丢） */
+  const overwrite = async (): Promise<void> => {
+    try {
+      await window.api.vault.write(path, draft)
+      afterSaved('已保存（已覆盖磁盘上的版本）')
+    } catch (e) {
+      ui.toast(`保存失败：${errText(e)}`, 'error')
+    }
+  }
+
   // 保存三态：以前无论写盘成不成功都是"按钮变灰 + 退出编辑态"，
   // 磁盘只读/文件被 Obsidian 锁住/库被移走，用户全都以为存上了
   const save = async (): Promise<void> => {
     try {
-      await window.api.vault.write(path, draft)
-      setDirty(false)
-      setEditing(false)
-      ui.toast('已保存')
+      // 时机 (c)：写盘那一刻服务端再校验一次基线，兜住提示条漏掉的窗口 / TOCTOU。
+      // 此刻用户已经决定要写盘了，打断是合理的
+      const r = await window.api.vault.writeChecked(path, draft, baseHash.current)
+      if (r.ok) {
+        afterSaved('已保存')
+        return
+      }
+      setConflict(r.current)
+      const choice = await ui.choose({
+        title: '这个文件已在外部被修改',
+        message:
+          '你打开编辑之后，磁盘上的这个文件被别的程序（Obsidian？）改过了。\n' +
+          '直接保存会把对方的改动覆盖掉，请选择怎么处理：',
+        options: [
+          { value: 'cancel', label: '取消（回到编辑）' },
+          { value: 'overwrite', label: '覆盖对方版本', danger: true },
+          // 唯一零数据丢失的选项 → 默认高亮（Obsidian / Dropbox / 坚果云的通行做法）
+          { value: 'copy', label: '另存为副本', primary: true },
+        ],
+      })
+      if (choice === 'overwrite') {
+        await window.api.vault.write(path, draft)
+        afterSaved('已保存（已覆盖磁盘上的版本）')
+      } else if (choice === 'copy') {
+        const rel = await window.api.vault.saveCopy(path, draft)
+        // 磁盘上那一版原样保留，我的这一版写进副本——两份都在
+        afterSaved(`已另存为副本「${rel}」，两份都保留了`)
+      }
+      // 取消：什么都不做，留在编辑态（草稿一个字都不少）
     } catch (e) {
       // 失败保留编辑态与 draft，用户还能复制内容出去，别把人家写的东西弄没了
       ui.toast(`保存失败：${errText(e)}`, 'error')
@@ -888,6 +990,9 @@ function NoteView({
       </div>
 
       {editing ? (
+        <>
+        {/* 非模态：正文顶上挂一条，用户照常打字（设计 §5.2 时机 (b)） */}
+        {conflict !== null && <ConflictBar diskText={conflict} onOverwrite={overwrite} />}
         <textarea
           value={draft}
           onChange={(e) => {
@@ -903,6 +1008,7 @@ function NoteView({
           spellCheck={false}
           className="flex-1 resize-none bg-bg px-8 py-5 font-mono text-base leading-6 outline-none"
         />
+        </>
       ) : (
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-3xl px-8 py-6">

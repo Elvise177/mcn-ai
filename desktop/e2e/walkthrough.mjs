@@ -4,7 +4,9 @@
  * 每个里程碑交付前必须跑一遍并人工/AI 检视截图——「构建通过」不等于「功能可用」。
  */
 import { _electron as electron } from 'playwright-core'
-import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync, writeFileSync, readdirSync } from 'fs'
+import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync, writeFileSync, readdirSync, readFileSync } from 'fs'
+import { execSync } from 'child_process'
+import { createServer } from 'net'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
 import { fileURLToPath } from 'url'
@@ -73,6 +75,61 @@ const prepWindow = async (app, win) => {
     features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
   })
   return cdp
+}
+
+/**
+ * 进程组残留检查（设计 §5.1 / §8 风险 1）。
+ *
+ * `child.kill()` 只杀直接子进程：spawn 起的是 PyInstaller onedir 的引导程序，真正干活的
+ * Python 是它 fork 出来的孙子进程。取消/退出之后那一整组必须一个都不剩，否则 UI 显示"已停止"
+ * 而后台还在写 vault、烧 LLM 额度。**这条断言必须在打包形态（MCNAI_APP_BIN）下跑一次**——
+ * 打包后路径与权限都不一样，dev 形态验过不算数。
+ */
+const pipelineLeftovers = (pgid) =>
+  execSync('ps -eo pgid=,pid=,command=')
+    .toString()
+    .split('\n')
+    .map((l) => l.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/))
+    .filter(Boolean)
+    // ① 目标进程组里的任何进程；② 任何还挂在本次走查这个库上的 mcn-ingest
+    .filter(([, g, , cmd]) => (pgid && Number(g) === Number(pgid)) || (/mcn-ingest/.test(cmd) && cmd.includes(vaultCopy)))
+    .map(([, g, p, cmd]) => `pgid=${g} pid=${p} ${cmd.slice(0, 140)}`)
+
+/** 等到 pipeline 真的 spawn 起来（任务对象上有 pid 才说明进程组存在） */
+const waitForPipelinePid = async (page, timeoutMs = 90000) => {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeoutMs) {
+    const pid = await page.evaluate(async () => {
+      const s = await window.api.tasks.list()
+      const t = s.tasks.find((x) => x.kind === 'inbox' && (x.status === 'running' || x.status === 'queued'))
+      return t?.pid ?? null
+    })
+    if (pid) return pid
+    await page.waitForTimeout(120)
+  }
+  return null
+}
+
+/**
+ * 等投递箱彻底闲下来。取消断言必须从"没有任何在跑的轮次"开始，
+ * 否则 waitForPipelinePid 抓到的是上一轮**马上就要结束**的 pid，
+ * 点下去按钮已经变回「立即处理」了（实测踩过）。
+ * 空闲要连续 4.5 秒才算数——两轮之间有 3 秒去抖窗口。
+ */
+const waitInboxIdle = async (page, timeoutMs = 300000) => {
+  const t0 = Date.now()
+  let quietSince = 0
+  while (Date.now() - t0 < timeoutMs) {
+    const busy = await page.evaluate(async () => {
+      const s = await window.api.tasks.list()
+      return s.tasks.some((t) => t.kind === 'inbox' && (t.status === 'queued' || t.status === 'running'))
+    })
+    if (busy) quietSince = 0
+    else if (!quietSince) quietSince = Date.now()
+    else if (Date.now() - quietSince > 4500) return true
+    await page.waitForTimeout(400)
+  }
+  return false
 }
 
 /** 原始 CDP 抓屏：Playwright 的 page.screenshot() 会清掉 :hover，hover 态只能这样截 */
@@ -189,6 +246,89 @@ const rawShot = async (cdp, name) => {
   await a2.close()
 }
 
+// ---- M-01 登录超时 / 可取消 / 区分「网络不可达」和「密码错」----
+{
+  // (a) 连得上但永不回应：起一个只收不答的黑洞 socket。
+  //     真正的坑就是这种——Supabase 被暂停时请求挂在那儿，按钮永远定格在「登录中…」。
+  //     （直接指一个不可达 IP 不行：实测 fetch 9ms 就报 ENETUNREACH，压根走不到超时分支）
+  const sockets = new Set()
+  const blackhole = createServer((s) => {
+    sockets.add(s)
+    s.on('data', () => void 0) // 收下请求，什么都不回
+    s.on('close', () => sockets.delete(s))
+  })
+  await new Promise((r) => blackhole.listen(0, '127.0.0.1', r))
+  const holePort = blackhole.address().port
+
+  const loginUser = '/tmp/mcnai-e2e-login-timeout'
+  rmSync(loginUser, { recursive: true, force: true })
+  const a3 = await launch({
+    ...process.env,
+    MCNAI_USER_DATA: loginUser,
+    MCNAI_VAULT: vaultCopy,
+    MCNAI_SUPABASE_URL: `http://127.0.0.1:${holePort}`,
+  })
+  const w = await a3.firstWindow()
+  const cdp3 = await prepWindow(a3, w)
+  await w.locator('input[placeholder="邮箱"]').waitFor({ timeout: 20000 })
+  await w.fill('input[placeholder="邮箱"]', 'mcnai-test-a@example.com')
+  await w.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
+
+  // ① 可取消：挂住时必须有出口，不能永远定格在「登录中…」
+  await w.click('button:has-text("登录")')
+  await w.locator('[data-testid="login-cancel"]').waitFor({ timeout: 5000 })
+  await rawShot(cdp3, '38-登录中-可取消')
+  const tCancel = Date.now()
+  await w.click('[data-testid="login-cancel"]')
+  await w.locator('text=已取消登录').waitFor({ timeout: 8000 })
+  if (await w.locator('[data-testid="login-cancel"]').count())
+    throw new Error('点了取消，界面还停在「登录中…」')
+  console.log(`M-01 取消登录 ✓ ${Date.now() - tCancel}ms 回到可操作`)
+
+  // ② 10 秒超时：不能无限等，文案也不能说成"密码不对"
+  const t0 = Date.now()
+  await w.click('button:has-text("登录")')
+  await w.locator('text=登录超时').waitFor({ timeout: 20000 })
+  const took = Date.now() - t0
+  const timeoutErr = await w.locator('.text-danger').first().innerText()
+  if (took < 8000 || took > 15000) throw new Error(`登录超时不在 10s 量级：${took}ms`)
+  if (/密码|凭据/.test(timeoutErr)) throw new Error(`超时却报成密码错：「${timeoutErr}」`)
+  await w.waitForTimeout(300)
+  await w.screenshot({ path: join(shots, '38b-登录-超时文案.png') })
+  record('38b-登录-超时文案')
+  console.log('M-01 超时 ✓', JSON.stringify({ 耗时ms: took, 文案: timeoutErr.trim() }))
+  await a3.close()
+  for (const s of sockets) s.destroy()
+  blackhole.close()
+
+  // (b) 连都连不上（端口 9 = discard，没人监听）：应立刻回「网络不可达」，
+  //     绝不能说"邮箱或密码不对"——那会让用户一遍遍改密码，永远想不到去看网络
+  const refuseUser = '/tmp/mcnai-e2e-login-refused'
+  rmSync(refuseUser, { recursive: true, force: true })
+  const a4 = await launch({
+    ...process.env,
+    MCNAI_USER_DATA: refuseUser,
+    MCNAI_VAULT: vaultCopy,
+    MCNAI_SUPABASE_URL: 'http://127.0.0.1:9',
+  })
+  const w4 = await a4.firstWindow()
+  await prepWindow(a4, w4)
+  await w4.locator('input[placeholder="邮箱"]').waitFor({ timeout: 20000 })
+  await w4.fill('input[placeholder="邮箱"]', 'mcnai-test-a@example.com')
+  await w4.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
+  const raw = await w4.evaluate(() => window.api.auth.login('mcnai-test-a@example.com', 'McnAi-Test-2026!'))
+  if (raw.kind !== 'network') throw new Error('云端不可达时的错误种类不是 network：' + JSON.stringify(raw))
+  await w4.click('button:has-text("登录")')
+  await w4.locator('text=连不上服务器').waitFor({ timeout: 20000 })
+  const netErr = await w4.locator('.text-danger').first().innerText()
+  if (/密码|凭据/.test(netErr)) throw new Error(`网络不通却报成密码错：「${netErr}」`)
+  await w4.waitForTimeout(300)
+  await w4.screenshot({ path: join(shots, '38c-登录-网络不可达文案.png') })
+  record('38c-登录-网络不可达文案')
+  console.log('M-01 错误分类 ✓', JSON.stringify({ kind: raw.kind, 文案: netErr.trim() }))
+  await a4.close()
+}
+
 const app = await launch({
   ...process.env,
   MCNAI_USER_DATA: userData,
@@ -208,6 +348,9 @@ const snapHover = async (name, ms = 250) => {
 }
 
 // E2E_CHAT=1 要真调 AI：本地模式没有 key，必须先用测试账号登录拿服务端下发的 key
+/** 收尾的 before-quit 断言要自己 close，finally 里别再关一次 */
+let closed = false
+
 const CHAT = process.env.E2E_CHAT === '1'
 const E2E_EMAIL = process.env.E2E_EMAIL || 'mcnai-test-a@example.com'
 const E2E_PASSWORD = process.env.E2E_PASSWORD || 'McnAi-Test-2026!'
@@ -349,6 +492,70 @@ try {
       await snap('01e-工作台-回答完成', 1200)
       const answered = await win.locator('.md-article').count()
       if (!answered) throw new Error('E2E_CHAT：没有拿到任何回答正文')
+
+      // ---- H-09 停止留半截 + H-10 生成中重复发送被拒 ----
+      {
+        await chatInput.fill('把灰太太的情况尽量详细地展开讲讲，分点写，越长越好')
+        await chatInput.press('Enter')
+        // 等正文真的开始往外吐（要有半截可留）。
+        // 不用 waitFor(visible)：检索阶段 draft 可能只有一个换行，`.streaming-body` 里是个
+        // 空段落、高度为 0，Playwright 判定为 hidden，会一直等到超时（实测踩过）
+        const norm = (s) => s.replace(/\s+/g, '')
+        let half = ''
+        const tStream = Date.now()
+        while (Date.now() - tStream < 240000 && norm(half).length < 24) {
+          half = await win.evaluate(() => document.querySelector('.streaming-body')?.textContent ?? '')
+          if (norm(half).length < 24) await win.waitForTimeout(500)
+        }
+        if (norm(half).length < 10) {
+          const st = await win.evaluate(async () => {
+            const s = await window.api.tasks.list()
+            return s.tasks
+              .filter((t) => t.kind === 'agent')
+              .map((t) => ({ status: t.status, draftLen: t.draft?.length ?? 0, title: t.title }))
+          })
+          throw new Error('流式正文迟迟没出来，H-09 没得可停：' + JSON.stringify(st))
+        }
+        const head = norm(half).slice(0, 10)
+
+        // ① 主进程侧的权威拒绝：同一 session 已在流式中，第二条必须被拒
+        const convId = await win.evaluate(async () => {
+          const s = await window.api.tasks.list()
+          return s.tasks.find((t) => t.kind === 'agent' && t.status === 'running')?.key ?? null
+        })
+        if (!convId) throw new Error('拿不到正在生成的 agent 任务（H-10 断言无从谈起）')
+        const rejected = await win.evaluate((id) => window.api.chat.send(id, '插队的第二条'), convId)
+        if (rejected?.ok !== false || rejected.reason !== 'busy')
+          throw new Error('生成中重复发送竟然被接受了：' + JSON.stringify(rejected))
+        console.log('H-10 主进程拒绝 ✓', JSON.stringify(rejected))
+
+        // ② 界面侧：照常敲 Enter，应当出现带「停止当前生成」动作按钮的提示，且输入不被清空
+        await chatInput.fill('生成中再发一条')
+        await chatInput.press('Enter')
+        await win.locator('[data-testid="toast-action"]').waitFor({ timeout: 8000 })
+        const toastText = await win.locator('[data-testid="toast"]').last().innerText()
+        const actionLabel = await win.locator('[data-testid="toast-action"]').last().innerText()
+        if (!/生成中/.test(toastText)) throw new Error(`拒绝提示文案不对：「${toastText}」`)
+        if (!/停止当前生成/.test(actionLabel)) throw new Error(`提示上没有出口按钮：「${actionLabel}」`)
+        if ((await chatInput.inputValue()) !== '生成中再发一条')
+          throw new Error('被拒之后输入框内容被清掉了（用户白打一遍）')
+        await snap('35-生成中重复发送-拒绝并给出口', 100)
+        console.log('H-10 拒绝 + 出口 ✓', JSON.stringify({ toastText, actionLabel }))
+
+        // ③ 点提示上的「停止当前生成」= H-09：半截回答要落进对话并带「（已停止）」尾标
+        await win.locator('[data-testid="toast-action"]').last().click()
+        await win.locator('text=（已停止）').first().waitFor({ timeout: 30000 })
+        // abort 传播到 SDK 需要几秒，停止按钮随之消失（进行中状态收干净）
+        await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 60000 })
+        // 再等一会儿：停止之后**不能**再补一条完整答案上来（那等于根本没停成）
+        await win.waitForTimeout(3000)
+        const lastMsg = await win.locator('.md-article').last().innerText()
+        if (!lastMsg.includes('（已停止）')) throw new Error(`半截回答没带尾标：「${lastMsg.slice(-60)}」`)
+        if (!norm(lastMsg).includes(head))
+          throw new Error(`留下的不是刚才那段半截正文：期望含「${head}」，实得「${lastMsg.slice(0, 60)}」`)
+        await snap('36-停止生成-半截回答留在对话里', 300)
+        console.log('H-09 停止留半截 ✓', JSON.stringify({ head, 长度: lastMsg.length }))
+      }
     }
     // ＋新对话必须复位：空态问候可见 + 输入框清空（回归 2026-07-16 用户报障）
     await win.click('button[title="新对话"]')
@@ -588,7 +795,10 @@ try {
             for (let i = 0; i < 20; i++) {
               cmp = await win.evaluate(async () => {
                 const st = await window.api.tasks.list()
-                const act = st.tasks.filter((t) => t.status === 'queued' || t.status === 'running')
+                // sync 按设计 §1.3 全程静默、不进 Dock，所以对账时也要把它排除
+                const act = st.tasks.filter(
+                  (t) => (t.status === 'queued' || t.status === 'running') && t.kind !== 'sync'
+                )
                 return { active: act.length, titles: act.map((t) => t.title) }
               })
               if (!(await dockOpen())) {
@@ -667,6 +877,89 @@ try {
           if (await extBtn.count()) await extBtn.click()
           await snap('06c-文件树显示外部资料文件夹', 600)
           console.log('文件树 ✓（外部资料/无md子文件夹可见；原件与隐藏文件不显示）')
+
+          // ---- H-13 停止本轮：杀整个 pipeline 进程组，ps 查无残留，已落位的 md 不回滚 ----
+          {
+            const mdCount = () =>
+              win.evaluate(() =>
+                window.api.vault.tree().then((t) => {
+                  const n = []
+                  const walk = (ns) => ns.forEach((x) => (x.children ? walk(x.children) : n.push(x.path)))
+                  walk(t)
+                  return n.length
+                })
+              )
+            const cancelFiles = []
+            let pgid = null
+            let mdBefore = 0
+            // 面板先开着：按钮出现的那一刻就能点，不用先去找入口
+            if (!(await win.locator('.inbox-bar-fill').count())) {
+              const btn = win.locator('button[title="投递箱"]')
+              if (await btn.count()) await btn.click()
+            }
+            for (let attempt = 1; attempt <= 3 && !pgid; attempt++) {
+              // 必须从"完全闲下来"开始，否则抓到的是上一轮马上要结束的 pid
+              if (!(await waitInboxIdle(win))) throw new Error('投递箱一直没闲下来，取消断言没法开始')
+              mdBefore = await mdCount()
+              // 多丢几份才有足够的窗口去点停止（单份 docx 有时几秒就跑完了）
+              for (let i = 0; i < 10; i++) {
+                const name = `e2e取消测试_${Date.now()}_${attempt}_${i}.docx`
+                copyFileSync(sample, join(dir, name))
+                cancelFiles.push(name)
+              }
+              const p = await waitForPipelinePid(win, 180000)
+              if (!p) throw new Error('投递箱一直没 spawn 出 pipeline（拿不到 pid，取消断言无从谈起）')
+              if (!pipelineLeftovers(p).length) {
+                console.log(`第 ${attempt} 次：pgid=${p} 在 ps 里已经不在了，重来`)
+                continue
+              }
+              await snap('34-投递箱-运行中可停止', 100)
+              // 面板上真点「停止本轮」（不是直接调 IPC）
+              try {
+                await win.click('[data-testid="inbox-cancel"]', { timeout: 4000 })
+                pgid = p
+              } catch {
+                console.log(`第 ${attempt} 次没赶上（这一轮已经跑完了），再丢一批重来`)
+              }
+            }
+            if (!pgid) throw new Error('三次都没赶在 pipeline 跑完之前点到「停止本轮」')
+            console.log('pipeline 进程组 pgid =', pgid)
+            await win.locator('[data-testid="inbox-canceled"]').waitFor({ timeout: 20000 })
+
+            // 状态必须是 canceled 而不是 failed（用户主动的操作不该看起来像出错）
+            const ct = await win.evaluate(async () => {
+              const s = await window.api.tasks.list()
+              const t = s.tasks.find((x) => x.kind === 'inbox')
+              return t ? { status: t.status, title: t.title, canceled: t.canceled, error: t.error } : null
+            })
+            if (ct?.status !== 'canceled') throw new Error('停止后任务状态不是 canceled：' + JSON.stringify(ct))
+            if (ct.error) throw new Error('取消却带上了 error（会被画成红色）：' + JSON.stringify(ct))
+            const panelText = await win.locator('[data-testid="inbox-canceled"]').innerText()
+            if (!/已停止/.test(panelText) || !/已完成的部分/.test(panelText))
+              throw new Error(`停止后的面板文案不对：「${panelText}」`)
+            // 中性灰不是红：进度条填充色不能是 danger
+            const barColor = await win.locator('.inbox-bar-fill').first().evaluate((el) => getComputedStyle(el).backgroundColor)
+            const dangerColor = await win.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--color-danger').trim())
+            console.log('停止后进度条色', barColor, '（danger =', dangerColor, '）')
+            await snap('34b-投递箱-已停止中性态', 200)
+
+            // 进程组必须一个都不剩（SIGTERM → 3 秒 → SIGKILL）
+            let left = pipelineLeftovers(pgid)
+            for (let i = 0; i < 20 && left.length; i++) {
+              await win.waitForTimeout(500)
+              left = pipelineLeftovers(pgid)
+            }
+            if (left.length) throw new Error('停止后仍有 pipeline 进程残留：\n' + left.join('\n'))
+            console.log(`H-13 停止本轮 ✓ pgid=${pgid} 进程组无残留（打包形态=${packagedBin ? '是' : '否'}）`)
+
+            // 不做回滚：已落位的 md 一篇都不能少
+            const mdAfter = await mdCount()
+            if (mdAfter < mdBefore) throw new Error(`取消把已落位的笔记删掉了：${mdBefore} → ${mdAfter}`)
+            console.log('取消不回滚 ✓', JSON.stringify({ mdBefore, mdAfter }))
+
+            // 收尾：把没处理完的测试文件清掉，别影响后面的入库断言
+            for (const n of cancelFiles) rmSync(join(dir, n), { force: true })
+          }
         }
         break
       }
@@ -852,8 +1145,8 @@ try {
     await win.locator('text=放弃未保存的修改？').waitFor({ timeout: 5000 })
     await snap('21-未保存确认弹窗', 200)
     // 取消：应留在原来那篇的编辑态，草稿一个字都不能少
-    // （编辑态头部也有个「取消」，弹窗按钮一律收敛到 .w-modal 里点，否则撞 strict mode）
-    await win.click('.w-modal button:has-text("取消")')
+    // （编辑态头部也有个「取消」，弹窗按钮一律收敛到 [data-testid="modal"] 里点，否则撞 strict mode）
+    await win.click('[data-testid="modal"] button:has-text("取消")')
     await win.waitForTimeout(400)
     const stillEditing = await win.locator('textarea').count()
     if (!stillEditing) throw new Error('取消未保存确认后编辑态没了')
@@ -864,13 +1157,84 @@ try {
     // 再切一次并选「放弃修改」：这次应该真的跳过去，且磁盘上的内容仍是上一次保存的
     await other.click()
     await win.locator('text=放弃未保存的修改？').waitFor({ timeout: 5000 })
-    await win.click('.w-modal button:has-text("放弃修改")')
+    await win.click('[data-testid="modal"] button:has-text("放弃修改")')
     await win.waitForTimeout(800)
     if (await win.locator('textarea').count()) throw new Error('放弃修改后没退出编辑态')
     const onDisk = await win.evaluate(async () => window.api.vault.readRaw('e2e表格样式.md'))
     if (onDisk.includes('H-04 这段改动没保存')) throw new Error('放弃的改动竟然写进了磁盘')
     await snap('21c-放弃修改后切到另一篇', 300)
     console.log('H-04 未保存确认 ✓', JSON.stringify({ 切到: otherName }))
+  }
+
+  // ---- M-27 编辑冲突：外部脚本真改文件 → 非模态提示条 → 保存弹三选一 → 另存为副本 ----
+  {
+    const rel = 'e2e表格样式.md'
+    const abs = join(settings.vaultPath, rel)
+    // 回到那篇笔记并进编辑态（进编辑时记基线 hash）
+    await win.locator(`button.block.truncate:has-text("e2e表格样式")`).first().click()
+    await win.waitForTimeout(600)
+    await win.click('button:has-text("编辑")')
+    await win.locator('textarea').first().waitFor({ timeout: 5000 })
+
+    // ① 自触发抑制：应用自己保存一次，**不能**报冲突（否则每次保存都自己给自己报警）
+    const mine = '# 表格样式走查\n\nM-27：这一行是我在应用里写的。\n'
+    await win.locator('textarea').first().fill(mine)
+    await win.click('button:has-text("保存")')
+    await win.locator('text=已保存').waitFor({ timeout: 8000 })
+    await win.waitForTimeout(2500) // 给 watcher 的 awaitWriteFinish(800ms) 足够时间冒事件
+    if (await win.locator('[data-testid="conflict-bar"]').count())
+      throw new Error('应用自己保存竟然触发了冲突条（自触发抑制失效）')
+    console.log('M-27 自触发抑制 ✓ 自己写盘不算冲突')
+
+    // ② 编辑中，外部脚本真的改磁盘上的同一个文件
+    await win.click('button:has-text("编辑")')
+    await win.locator('textarea').first().waitFor({ timeout: 5000 })
+    const myDraft = '# 表格样式走查\n\nM-27：这是「我的」版本，冲突时要能保住。\n'
+    await win.locator('textarea').first().fill(myDraft)
+    // 不传文本、用脚本里的默认值：换行符经 shell 传参会变成字面量 \n（踩过一次，
+    // 结果"对方版本"里显示的是两个字符的 \n 而不是真的换行）
+    const THEIR_LINE = '这一行是外部程序（模拟 Obsidian）写进去的。'
+    execSync(`node ${JSON.stringify(join(root, 'e2e', 'external-edit.mjs'))} ${JSON.stringify(abs)}`)
+
+    // 非模态：提示条要出现，而且**不能**弹模态（用户正在打字）
+    await win.locator('[data-testid="conflict-bar"]').waitFor({ timeout: 20000 })
+    if (await win.locator('[data-testid="modal"]').count()) throw new Error('外部改动时弹了模态（应该只挂非模态提示条）')
+    if (!(await win.locator('textarea').count())) throw new Error('冲突提示条把编辑态顶掉了')
+    const keep = await win.locator('textarea').first().inputValue()
+    if (keep !== myDraft) throw new Error('挂出冲突条时草稿被改了：' + JSON.stringify(keep.slice(0, 40)))
+    await snap('37-编辑冲突-非模态提示条', 300)
+    // 「查看对方版本」真点：就地展开磁盘那一版
+    await win.click('[data-testid="conflict-view-theirs"]')
+    await win.locator('[data-testid="conflict-theirs"]').waitFor({ timeout: 5000 })
+    const theirs = await win.locator('[data-testid="conflict-theirs"]').innerText()
+    if (!theirs.includes(THEIR_LINE)) throw new Error('「查看对方版本」显示的不是磁盘上那一版')
+    await snap('37b-冲突-查看对方版本', 200)
+
+    // ③ 点保存 → 弹三选一，默认高亮「另存为副本」（唯一零数据丢失的选项）
+    await win.click('button:has-text("保存")')
+    await win.locator('text=这个文件已在外部被修改').waitFor({ timeout: 8000 })
+    const opts = await win.locator('[data-testid="modal"] [data-testid^="choose-"]').allInnerTexts()
+    if (opts.length !== 3) throw new Error('冲突弹窗不是三选一：' + JSON.stringify(opts))
+    const primary = await win.locator('[data-testid="modal"] [data-primary="1"]').innerText()
+    if (!primary.includes('另存为副本'))
+      throw new Error(`默认高亮的不是「另存为副本」，而是「${primary}」`)
+    const accent = await win.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--color-accent').trim())
+    const primaryBg = await win.locator('[data-testid="modal"] [data-primary="1"]').evaluate((el) => getComputedStyle(el).backgroundColor)
+    await snap('37c-冲突-保存三选一', 200)
+    console.log('M-27 三选一 ✓', JSON.stringify({ opts, primary: primary.trim(), primaryBg, accent }))
+
+    // ④ 选「另存为副本」：磁盘那一版原样留着，我的那一版进副本 —— 两份都在
+    await win.click('[data-testid="modal"] [data-testid="choose-copy"]')
+    await win.locator('text=已另存为副本').waitFor({ timeout: 10000 })
+    await win.waitForTimeout(1200)
+    const copies = readdirSync(settings.vaultPath).filter((f) => /^e2e表格样式 \(冲突副本 .+\)\.md$/.test(f))
+    if (copies.length !== 1) throw new Error('没产生（或产生了多个）冲突副本：' + JSON.stringify(copies))
+    const originalNow = readFileSync(abs, 'utf-8')
+    const copyNow = readFileSync(join(settings.vaultPath, copies[0]), 'utf-8')
+    if (!originalNow.includes(THEIR_LINE)) throw new Error('原文件里对方那一版被覆盖掉了（应该保住）')
+    if (!copyNow.includes('这是「我的」版本')) throw new Error('副本里不是我的那一版：' + copyNow.slice(0, 80))
+    await snap('37d-冲突-另存为副本后两份都在', 500)
+    console.log('M-27 另存为副本 ✓ 两份都在', JSON.stringify({ 副本: copies[0] }))
   }
 
   // ---- H-02 换库出口：换库要先确认，向导里要有「返回当前库」能退回来 ----
@@ -881,12 +1245,12 @@ try {
     if (!switchMsg.includes(settings.vaultPath)) throw new Error(`换库确认没显示当前库路径：「${switchMsg}」`)
     await snap('22-换库二次确认', 200)
     // 取消：应该还在原来的库里（文件树还在）
-    await win.click('.w-modal button:has-text("取消")')
+    await win.click('[data-testid="modal"] button:has-text("取消")')
     await win.waitForTimeout(400)
     if (!(await win.locator('[data-testid="tree-col"]').count())) throw new Error('取消换库后离开了当前库')
     // 确认进向导：必须有退出口
     await win.click('button[title="切换知识库"]')
-    await win.click('.w-modal button:has-text("去换库")')
+    await win.click('[data-testid="modal"] button:has-text("去换库")')
     await win.locator('text=建立你的知识库').waitFor({ timeout: 5000 })
     if (!(await win.locator('button:has-text("返回当前库")').count()))
       throw new Error('换库向导没有「返回当前库」出口（点了系统对话框取消就回不去了）')
@@ -1005,6 +1369,122 @@ try {
     if (back.aiProvider !== 'inferera') throw new Error('切回 inferera 失败')
   }
 
+  // ---- M-03 syncQueue 真重试：退避阶梯 → 转手动 → Dock「重试」→ 成功后自动清队 ----
+  // 需要登录（未登录时 syncConversation 直接返回，本来就不算失败），所以只在 E2E_CHAT 下跑
+  if (CHAT) {
+    const readQueue = () => {
+      try {
+        return JSON.parse(readFileSync(join(userData, 'tasks.json'), 'utf-8')).syncQueue ?? []
+      } catch {
+        return []
+      }
+    }
+    const waitQueue = async (pred, ms = 30000) => {
+      const t0 = Date.now()
+      let q = readQueue()
+      while (Date.now() - t0 < ms && !pred(q)) {
+        await win.waitForTimeout(400)
+        q = readQueue()
+      }
+      return q
+    }
+    const badConv = crypto.randomUUID()
+    // 制造一次**真实**的同步失败：messages.role 有 CHECK 约束（migration 001），
+    // 'bogus' 必被 Postgres 拒。之后换成合法 role 再存一次就会成功——正好验"恢复后自动清空"
+    const saveBad = () =>
+      win.evaluate(
+        (id) =>
+          window.api.chat.save({
+            id,
+            title: 'e2e 同步失败样例',
+            messages: [{ role: 'bogus', text: '这条会被 Supabase 拒掉' }],
+            updatedAt: Date.now(),
+          }),
+        badConv
+      )
+
+    await saveBad()
+    let q = await waitQueue((x) => x.some((i) => i.convId === badConv))
+    let item = q.find((i) => i.convId === badConv)
+    if (!item) throw new Error('同步失败没有落进 syncQueue（M-03 的"别蒸发"不成立）')
+    // 退避阶梯第 1 档 = 1 分钟（设计 §3.5 写死的值）
+    let delay = item.nextRetryAt - Date.now()
+    if (item.tries !== 1 || delay < 30_000 || delay > 70_000)
+      throw new Error('第 1 次失败的退避不是 ~1 分钟：' + JSON.stringify(item))
+    console.log('syncQueue 入队 ✓', JSON.stringify({ tries: item.tries, 退避秒: Math.round(delay / 1000) }))
+
+    // Dock 上必须看得见「N 条待同步」+「重试」出口
+    const dockText = await (async () => {
+      for (let i = 0; i < 40; i++) {
+        const open = await win
+          .locator('[data-testid="task-dock"]')
+          .evaluate((el) => getComputedStyle(el).maxHeight !== '0px')
+        if (open) {
+          const t = await win.locator('[data-testid="task-dock-btn"]').innerText()
+          if (/条待同步/.test(t)) return t
+        }
+        await win.waitForTimeout(500)
+      }
+      return ''
+    })()
+    if (!dockText) throw new Error('Dock 上看不到「N 条待同步」')
+    if (!(await win.locator('[data-testid="sync-retry"]').count()))
+      throw new Error('Dock 上没有「重试同步」出口（转手动之后就没救了）')
+    await snap('39-Dock-待同步与重试入口', 200)
+    console.log('M-03 可见性 ✓', JSON.stringify(dockText.replace(/\s+/g, ' ')))
+
+    // 退避阶梯：5 分钟 → 30 分钟 → 转手动（nextRetryAt=0，不再自动重试）
+    const LADDER = [
+      [4.5 * 60_000, 5.5 * 60_000],
+      [29 * 60_000, 31 * 60_000],
+    ]
+    for (let n = 0; n < LADDER.length; n++) {
+      const before = item.tries
+      await saveBad()
+      q = await waitQueue((x) => (x.find((i) => i.convId === badConv)?.tries ?? 0) > before)
+      item = q.find((i) => i.convId === badConv)
+      delay = item.nextRetryAt - Date.now()
+      if (delay < LADDER[n][0] || delay > LADDER[n][1])
+        throw new Error(`第 ${item.tries} 次失败的退避不在阶梯上：${Math.round(delay / 1000)}s`)
+    }
+    await saveBad() // 第 4 次：超出阶梯 → 转手动
+    q = await waitQueue((x) => (x.find((i) => i.convId === badConv)?.tries ?? 0) >= 4)
+    item = q.find((i) => i.convId === badConv)
+    if (item.tries !== 4 || item.nextRetryAt !== 0)
+      throw new Error('第 4 次失败没有转手动：' + JSON.stringify(item))
+    console.log('退避阶梯 ✓ 1m → 5m → 30m → 转手动')
+
+    // 「重试」真点：整队 tries 归零并立刻跑一轮。这次还是会失败（role 依旧非法），
+    // 所以 tries 从 4 变回 1 —— 这正是"真的重跑过一轮"的证据
+    await win.click('[data-testid="sync-retry"]')
+    q = await waitQueue((x) => (x.find((i) => i.convId === badConv)?.tries ?? 9) === 1, 40000)
+    item = q.find((i) => i.convId === badConv)
+    if (item?.tries !== 1) throw new Error('点「重试同步」后队列没有被真的重跑：' + JSON.stringify(item))
+    console.log('手动重试 ✓ tries 4 → 归零 → 重跑失败回到 1')
+
+    // 恢复后自动清队：同一条会话换成合法内容再存一次，成功即出队
+    await win.evaluate(
+      (id) =>
+        window.api.chat.save({
+          id,
+          title: 'e2e 同步失败样例',
+          messages: [{ role: 'user', text: 'e2e 同步恢复验证' }],
+          updatedAt: Date.now(),
+        }),
+      badConv
+    )
+    q = await waitQueue((x) => !x.some((i) => i.convId === badConv), 40000)
+    if (q.some((i) => i.convId === badConv)) throw new Error('同步成功后队列没清掉这条')
+    // pendingSync 是队列长度的投影：这里不能直接断言 0（走查后面还会造别的失败会话），
+    // 断言"跟盘上的队列一致"才是真相源一致性
+    const pend = await win.evaluate(async () => (await window.api.tasks.list()).cloud.pendingSync)
+    if (pend !== readQueue().length)
+      throw new Error(`cloud.pendingSync(${pend}) 与盘上的队列(${readQueue().length}) 对不上`)
+    console.log('M-03 恢复后自动清队 ✓')
+  } else {
+    console.log('⚠️ 未开 E2E_CHAT，跳过 syncQueue 重试断言（需要登录态才能制造真实同步失败）')
+  }
+
   // ---- 首页「最近对话」卡片区：造两条历史会话，重载后应同时出现在侧栏和首页卡片区 ----
   await win.evaluate(async () => {
     const now = Date.now()
@@ -1033,7 +1513,7 @@ try {
     if (!delMsg.includes('e2e 历史会话一')) throw new Error(`删除对话确认没显示标题：「${delMsg}」`)
     await snap('23-删除对话-二次确认', 200)
     // 取消：对话必须还在
-    await win.click('.w-modal button:has-text("取消")')
+    await win.click('[data-testid="modal"] button:has-text("取消")')
     await win.waitForTimeout(300)
     if (!(await win.locator('aside button:has-text("e2e 历史会话一")').count()))
       throw new Error('取消删除后对话却没了')
@@ -1041,7 +1521,7 @@ try {
     await row.hover()
     await row.locator('button[title="删除对话"]').click()
     await win.locator('text=确认删除这个对话？').waitFor({ timeout: 5000 })
-    await win.click('.w-modal button:has-text("删除")')
+    await win.click('[data-testid="modal"] button:has-text("删除")')
     await win.locator('text=已删除对话').waitFor({ timeout: 5000 })
     await snap('23b-删除对话-完成toast', 200)
     await win.waitForTimeout(500)
@@ -1206,8 +1686,34 @@ try {
     console.log('H-01 工作台拖入 ✓（应用未被替换 + 文件进队列）', dropName)
   }
 
+  // ---- before-quit：退出应用必须把 pipeline 进程组一起带走（当前就存在的孤儿进程 bug）----
+  // 上一步刚往投递箱丢了文件，等它真的 spawn 起来，然后关掉应用再查 ps
+  {
+    let pgid = null
+    for (let attempt = 1; attempt <= 3 && !pgid; attempt++) {
+      const p = await waitForPipelinePid(win, 180000)
+      if (!p) throw new Error('退出前拿不到 pipeline 的进程组（before-quit 断言无从谈起）')
+      // 关之前必须确认它**真的活着**，否则这条断言会空过
+      if (pipelineLeftovers(p).length) pgid = p
+      else {
+        console.log(`第 ${attempt} 次：pgid=${p} 已经退了，再丢一个文件让它重新跑起来`)
+        await win.evaluate((s) => window.api.inbox.enqueue([s]), join(root, 'e2e', 'sample.docx'))
+      }
+    }
+    if (!pgid) throw new Error('三次都没能在应用退出前抓到一个活着的 pipeline 进程组')
+    console.log('退出前 pipeline pgid =', pgid, '（ps 里确认存活）')
+    await app.close()
+    closed = true
+    let left = pipelineLeftovers(pgid)
+    for (let i = 0; i < 20 && left.length; i++) {
+      await new Promise((r) => setTimeout(r, 500))
+      left = pipelineLeftovers(pgid)
+    }
+    if (left.length) throw new Error('退出应用后仍有 pipeline 孤儿进程：\n' + left.join('\n'))
+    console.log(`before-quit 清理 ✓ pgid=${pgid} 无孤儿（打包形态=${packagedBin ? '是' : '否'}）`)
+  }
 } finally {
-  await app.close()
+  if (!closed) await app.close()
 }
 
 // ---- 收尾体检：shots/ 里凡是本次没刷新的 png 一律报警（旧版本残留会污染验收基线） ----

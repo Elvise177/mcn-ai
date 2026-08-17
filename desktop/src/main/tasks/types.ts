@@ -45,8 +45,10 @@ export interface InboxTask extends TaskBase {
   kind: 'inbox'
   files: string[]
   stages: InboxEvent[]
-  /** pipeline 子进程组 id，二期取消要用 */
+  /** pipeline 子进程组 id（spawn detached:true，组 id == 组长 pid）。取消要用它 kill 整组 */
   pid?: number
+  /** 谁停的：user=面板上点了「停止本轮」，quit=退出应用时清理 */
+  canceled?: 'user' | 'quit'
 }
 
 export interface AgentTask extends TaskBase {

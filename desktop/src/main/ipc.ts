@@ -10,7 +10,8 @@ import {
 } from './ai/provider'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
-import { login, logout, authState, provisionKeys, getProvisionError } from './auth'
+import { login, logout, authState, provisionKeys, getProvisionError, cancelLogin } from './auth'
+import { retryAllSyncs } from './knowledge/sync-queue'
 import { artifactsWatcher } from './agent/artifacts'
 import { listConversations, saveConversation, deleteConversation, type Conversation } from './agent/conversations'
 import { syncConversation } from './knowledge/client'
@@ -126,6 +127,14 @@ export function registerIpc(): void {
   ipcMain.handle('vault:resolveLink', (_e, target: string) => vaultManager.resolveLink(target))
   ipcMain.handle('vault:readRaw', (_e, relPath: string) => vaultManager.readRaw(relPath))
   ipcMain.handle('vault:write', (_e, relPath: string, raw: string) => vaultManager.write(relPath, raw))
+  // ---- 编辑冲突（M-27）：进编辑记基线 → 保存时服务端再校验一次 → 冲突就另存副本 ----
+  ipcMain.handle('vault:stat', (_e, relPath: string) => vaultManager.stat(relPath))
+  ipcMain.handle('vault:writeChecked', (_e, relPath: string, raw: string, baseHash: string) =>
+    vaultManager.writeChecked(relPath, raw, baseHash)
+  )
+  ipcMain.handle('vault:saveCopy', (_e, relPath: string, raw: string) =>
+    vaultManager.saveConflictCopy(relPath, raw)
+  )
   ipcMain.handle('vault:createNote', (_e, dir: string, name: string) => vaultManager.createNote(dir, name))
   ipcMain.handle('vault:deleteNote', (_e, relPath: string) => vaultManager.deleteNote(relPath))
   ipcMain.handle('vault:renameNote', (_e, relPath: string, newName: string) => vaultManager.renameNote(relPath, newName))
@@ -133,6 +142,11 @@ export function registerIpc(): void {
 
   // ---- auth ----
   ipcMain.handle('auth:login', (_e, email: string, password: string) => login(email, password))
+  // M-01：登录挂住时把界面从「登录中…」放出来（底层请求可能还在跑，但没人等它了）
+  ipcMain.handle('auth:loginCancel', () => {
+    cancelLogin()
+    return { ok: true }
+  })
   ipcMain.handle('auth:logout', () => logout())
   ipcMain.handle('auth:state', () => authState())
   // 设置页「重新获取服务端配置」；启动那次失败的原因也在这查（渲染层挂载晚于启动 provision）
@@ -144,8 +158,17 @@ export function registerIpc(): void {
   })
 
   // ---- chat ----
+  /**
+   * H-10：同一 session 已在流式中就**拒绝**，不 abort 旧的——「我以为它没在跑」和
+   * 「我想重来」是两回事，静默 abort 会误伤正在生成的长回答。拒绝理由回给渲染层，
+   * 由它弹一条带「停止当前生成」动作的提示（设计 §5.3），别把用户堵死在原地。
+   */
   ipcMain.handle('chat:send', (_e, sessionId: string, prompt: string, resume?: string) => {
+    if (agentManager.isStreaming(sessionId)) {
+      return { ok: false, reason: 'busy' as const, error: '这个对话还在生成中' }
+    }
     void agentManager.send(sessionId, prompt, resume)
+    return { ok: true }
   })
   ipcMain.handle('chat:stop', (_e, sessionId: string) => agentManager.stop(sessionId))
   ipcMain.handle('chat:list', () => listConversations())
@@ -166,6 +189,8 @@ export function registerIpc(): void {
   // ---- 全局任务状态层 ----
   // push（task:event）尽力而为，这个 invoke 才是权威：渲染层每次挂载都先拉一次打底
   ipcMain.handle('tasks:list', () => tasks.snapshot())
+  // 转手动之后唯一的出口：整队 tries 归零并立刻跑一轮（设计 §3.5）
+  ipcMain.handle('sync:retry', () => retryAllSyncs())
 
   // ---- 诊断与日志 ----
   ipcMain.handle('diag:export', () => exportDiagnostics())
@@ -186,7 +211,8 @@ export function registerIpc(): void {
 
   ipcMain.handle('inbox:enqueue', (_e, paths: string[], subdir?: string) => inboxOrchestrator.enqueue(paths, subdir))
   ipcMain.handle('inbox:runNow', () => void inboxOrchestrator.run())
-  ipcMain.handle('inbox:lastRun', () => inboxOrchestrator.lastRun)
+  // 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚（H-13，设计 §5.1）
+  ipcMain.handle('inbox:cancel', () => inboxOrchestrator.cancel('user'))
 }
 
 /** 启动时与知识库页共用：打开上次的库（对话工作台是首页，不能等用户进知识库页才加载库） */

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Loader2, AlertCircle, CloudOff } from 'lucide-react'
 import { isActive, useAllTasks, useCloud } from '../hooks/useTasks'
+import { ui } from './ui'
 
 /**
  * 全局任务条（设计见 docs/DESIGN-task-state.md §4.1）。
@@ -35,10 +36,15 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
   const all = useAllTasks()
   const cloud = useCloud()
   const [expanded, setExpanded] = useState(false)
+  const [retrying, setRetrying] = useState(false)
 
-  const active = all.filter(isActive)
-  // 终态里只有"失败"值得占用全局位置；成功的事情让它安静地过去
-  const failed = all.filter((t) => t.status === 'failed')
+  // sync 不进全局条：它几百毫秒就结束，冒一下又收回去只会让侧栏底部抽搐一下。
+  // 设计 §1.3 写死了「这一类的目标是绝大多数时候不可见」——失败由 pendingSync 表达
+  const active = all.filter((t) => isActive(t) && t.kind !== 'sync')
+  // 终态里只有"失败"值得占用全局位置；成功的事情让它安静地过去。
+  // **canceled 不算失败**——那是用户自己停的，不该在全局条上挂一句红字（设计 §5.1）。
+  // sync 也排除：它的失败已经由 pendingSync 表达成「N 条待同步」，两条都挂等于说两遍
+  const failed = all.filter((t) => t.status === 'failed' && t.kind !== 'sync')
   const pendingSync = cloud.pendingSync
 
   const show = active.length > 0 || failed.length > 0 || pendingSync > 0
@@ -96,6 +102,27 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
           </div>
           {only && only.progress && <Bar t={only} />}
         </button>
+
+        {/* 待同步：退避阶梯跑完就转手动，出口只有这一颗。整队 tries 归零并立刻跑一轮（设计 §3.5） */}
+        {pendingSync > 0 && active.length === 0 && (
+          <button
+            data-testid="sync-retry"
+            disabled={retrying}
+            onClick={async (e) => {
+              e.stopPropagation()
+              setRetrying(true)
+              try {
+                const r = await window.api.tasks.retrySync()
+                ui.toast(r.pending === 0 ? '待同步的聊天记录已全部补上' : `还有 ${r.pending} 条没同步上去，稍后会自动再试`)
+              } finally {
+                setRetrying(false)
+              }
+            }}
+            className="mt-1 w-full rounded-md border border-line px-3 py-1 text-xs text-muted hover:bg-hover disabled:opacity-60"
+          >
+            {retrying ? '重试中…' : '重试同步'}
+          </button>
+        )}
 
         {/* ≥2 项时点开列表：不新开页面，就地一个小浮层 */}
         {expanded && (

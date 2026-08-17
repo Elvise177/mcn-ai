@@ -133,17 +133,29 @@ export default function App() {
     setAccount({ loggedIn: false })
   }, [])
 
+  /**
+   * H-10：先问主进程收不收这条，再把用户消息落进对话。
+   * 顺序反了的话，被拒的那次会在历史里留一条永远等不到回答的用户消息。
+   * 拒绝时给一条**带「停止当前生成」动作**的提示——光说"不行"等于把用户堵死在原地（设计 §5.3）。
+   */
   const handleSend = useCallback(
-    (text: string) => {
+    async (text: string): Promise<boolean> => {
       const base = activeRef.current
-      const updated: Conversation = {
+      const r = await window.api.chat.send(base.id, text, base.sdkSessionId)
+      if (r && r.ok === false) {
+        ui.toast(r.error ?? '这个对话还在生成中', 'error', {
+          label: '停止当前生成',
+          onClick: () => void window.api.chat.stop(base.id),
+        })
+        return false
+      }
+      upsert({
         ...base,
         messages: [...base.messages, { role: 'user', text }],
         title: base.title === '新对话' ? text.slice(0, 18) : base.title,
         updatedAt: Date.now(),
-      }
-      upsert(updated)
-      window.api.chat.send(updated.id, text, updated.sdkSessionId)
+      })
+      return true
     },
     [upsert]
   )
