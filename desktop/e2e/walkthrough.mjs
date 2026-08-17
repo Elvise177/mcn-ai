@@ -93,6 +93,39 @@ const launch = (env) =>
   })
 
 /**
+ * 线路纪律闸门（2026-08-18 起，永久断言）。
+ *
+ * **背景**：`migrateTiers()` 判「这台机器以前用过」的依据是「配过库、或任意一把 key 落过盘」。
+ * 走查/测试的隔离实例如果预置了 key 却没预置档位映射，就会被判成**老用户**，
+ * 把标准档原样搬成 `describeProvider()` 的历史线路 —— **中转站**。
+ * 实测代价：20 轮本该走 DeepSeek 官方直连的测试调用全打在中转站余额上，把它打穿，
+ * 而那把 key 与网页版共用，连带影响线上。
+ *
+ * **纪律**：DeepSeek（v4-pro/v4-flash）一律官方直连 `api.deepseek.com`；
+ * aihubmix 只给增强档 `claude-opus-5` 用。任何测试实例起来后标准档不是官方直连即判失败。
+ *
+ * 这个坑不允许出现第三次——所以断言放在**任何真实调用之前**，早失败早停。
+ *
+ * **唯一豁免**：下面「老用户升级机」那个独立实例（45e）是**故意**走老用户分支的，
+ * 它的标准档就该是中转站，别给它加这条断言。
+ */
+const OFFICIAL_DEEPSEEK = 'https://api.deepseek.com'
+const assertStandardRoute = async (win, label = '') => {
+  const t = await win.evaluate(() => window.api.ai.tiers())
+  const std = t.tiers.find((x) => x.id === 'standard')
+  if (!std) throw new Error(`线路纪律：ai.tiers() 里没有标准档${label ? `（${label}）` : ''}`)
+  if (!std.baseUrl.startsWith(OFFICIAL_DEEPSEEK)) {
+    throw new Error(
+      `线路纪律违规${label ? `（${label}）` : ''}：标准档 baseUrl=${std.baseUrl}，` +
+        `必须是 ${OFFICIAL_DEEPSEEK}。多半是 migrateTiers 把这台实例判成了老用户——` +
+        `隔离实例的 config 必须显式写 tierMigrated:true + 出厂档位映射。`
+    )
+  }
+  console.log(`线路纪律 ✓ 标准档 ${std.baseUrl} / ${std.model}${label ? `（${label}）` : ''}`)
+  return std
+}
+
+/**
  * 走查窗口统一初始化：固定视口 + 关掉过渡动画。
  * 动画不关的话截图容易糊在淡入中间帧（整页发灰发虚，看着像对比度坏了），
  * 这里用 CDP 模拟 prefers-reduced-motion:reduce，样式表里已有对应的 @media 兜底。
@@ -543,6 +576,9 @@ const app = await launch({
 })
 const win = await app.firstWindow()
 const cdp = await prepWindow(app, win)
+// 线路纪律：任何真实调用之前先验标准档是官方直连。走查的 userData 每次都是清空重建，
+// migrateTiers 会走「全新安装」分支拿出厂映射——这条断言就是守住这个前提不被改坏
+await assertStandardRoute(win, '走查主实例')
 const snap = async (name, ms = 600) => {
   await win.waitForTimeout(ms)
   await win.screenshot({ path: join(shots, name + '.png') })

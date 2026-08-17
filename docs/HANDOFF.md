@@ -142,6 +142,19 @@ Electron App（macOS arm64，v0.1.0）
    转换失败清单与旧版逐条一致；MOC/主题索引正确刷新。旧库 372 篇里约 270 篇来自 `06_concepts`/`08_table_to_cards`
    等**不在桌面版链上**的阶段，属能力边界不是回归。
 
+6. **【运维风险 · aihubmix key 多方共用且无余额告警】（2026-08-18 实测踩坑，未解决）**：
+   测试跑批把中转站余额打穿，8 轮请求连续报 `403 Your account balance is insufficient`。
+   而按 §3 已查实的结论，这把 `CLIENT_RELAY_API_KEY` **就是网页版的 `AIHUBMIX_API_KEY`**，
+   同时供着网页版的向量与聊天；老用户（含大头那台）的标准档也被 `migrateTiers` 指在这条线上。
+   **余额见底 = 桌面版 + 网页版一起挂，而第一个感知渠道是客户报障。**
+   - 这是 §3「过渡期缓解：aihubmix 保持低余额、滚动充值」这个策略的直接代价——策略本身没问题，缺的是告警
+   - **网关单落地前的人工兜底：每周查一次 aihubmix 余额**（网关方案会把 key 收到服务端，那时顺带做配额监控）
+   - 连带发现见 `docs/PLAN-fix-batch.md` §5c：B-4（`max_tokens:1` 健康探针探不出余额不足）、
+     B-5（错误文案 "Failed to authenticate" 把人引去查密码）、失败轮仍被计入用量
+   - **线路纪律**（同 PLAN §5b）：DeepSeek 一律官方直连 `api.deepseek.com`，aihubmix 只给增强档 `claude-opus-5`；
+     测试隔离实例的 config 必须显式写 `tierMigrated:true` + 出厂档位映射，否则 `migrateTiers` 会判成老用户把标准档搬回中转站
+     （`e2e/walkthrough.mjs` 已加永久断言守这条）
+
 ### 未解决/未做（按计划属 P1+）
 
 - **网关（安全待办 · 已定方向，2026-08-17 拍板）**：MVP 直连中转站，**客户端 key 理论可提取**，而且 2026-08-17 查实这把 key 的分量比原先以为的重得多——服务端下发给每台客户机的 `CLIENT_RELAY_API_KEY` **就是网页版在用的 `AIHUBMIX_API_KEY` 主 key**（哈希一致），它同时供着网页版的向量与聊天。任何一台客户机被扒出 key，网页版全线得跟着轮换。
