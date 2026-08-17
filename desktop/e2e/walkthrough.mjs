@@ -4,7 +4,7 @@
  * 每个里程碑交付前必须跑一遍并人工/AI 检视截图——「构建通过」不等于「功能可用」。
  */
 import { _electron as electron } from 'playwright-core'
-import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync, writeFileSync, readdirSync, readFileSync } from 'fs'
+import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync, writeFileSync, readdirSync, readFileSync, chmodSync } from 'fs'
 import { execSync } from 'child_process'
 import { createServer } from 'net'
 import { join, dirname } from 'path'
@@ -173,6 +173,46 @@ const rawShot = async (cdp, name) => {
   record('00d-首跑-跳过后落对话页')
   console.log('shot: 00d-首跑-跳过后落对话页')
   await app2.close()
+}
+
+// ---- H-12 建库向导：创建失败/耗时长不再永久卡在灰掉的状态 ----
+// 用 MCNAI_E2E_VAULT_FAIL 让 vault:createNew 先卡 1.2 秒再抛错（走查专用开关，见 ipc.ts 注释）：
+// 系统保存框一弹起来 Playwright 就没法继续，只能这样验失败分支
+{
+  rmSync('/tmp/mcnai-e2e-wizardfail', { recursive: true, force: true })
+  const envW = { ...process.env, MCNAI_USER_DATA: '/tmp/mcnai-e2e-wizardfail', MCNAI_E2E_VAULT_FAIL: '1200' }
+  delete envW.MCNAI_VAULT
+  const appW = await launch(envW)
+  const wW = await appW.firstWindow()
+  const cdpW = await prepWindow(appW, wW)
+  await wW.waitForTimeout(1500)
+  await wW.click('text=暂不登录')
+  await wW.locator('text=建立你的知识库').waitFor({ timeout: 5000 })
+  await wW.click('[data-testid="wizard-create"]')
+
+  // ① busy 态要有文案与 spinner（旧版只是 opacity-60，被当成卡死而反复点）
+  await wW.locator('[data-testid="wizard-create"]:has-text("正在创建/索引…")').waitFor({ timeout: 4000 })
+  if (!(await wW.locator('[data-testid="wizard-create"] .animate-spin').count()))
+    throw new Error('建库 busy 态没有 spinner')
+  const busyDisabled = await wW.locator('[data-testid="wizard-existing"]').isDisabled()
+  if (!busyDisabled) throw new Error('创建中另一张卡片没有禁用（会被重复点）')
+  await rawShot(cdpW, '40-建库向导-创建中')
+
+  // ② 失败要有可见报错，而且必须解锁回可点状态（H-12 的正主：以前 setBusy(false) 根本不会执行）
+  await wW.locator('[data-testid="toast"]').waitFor({ timeout: 15000 })
+  const wizToast = await wW.locator('[data-testid="toast"]').first().innerText()
+  if (!/新建库失败/.test(wizToast)) throw new Error(`建库失败没有报错 toast：「${wizToast}」`)
+  await wW.screenshot({ path: join(shots, '40b-建库向导-失败报错.png') })
+  record('40b-建库向导-失败报错')
+  for (const id of ['wizard-create', 'wizard-existing']) {
+    if (await wW.locator(`[data-testid="${id}"]`).isDisabled())
+      throw new Error(`建库失败后 ${id} 仍然是禁用的（向导永久卡死）`)
+  }
+  // 真点第二次：还能再发起（不是"只剩重启一条路"）
+  await wW.click('[data-testid="wizard-create"]')
+  await wW.locator('[data-testid="wizard-create"]:has-text("正在创建/索引…")').waitFor({ timeout: 4000 })
+  console.log('H-12 建库向导 ✓', JSON.stringify({ toast: wizToast.trim(), 失败后可再点: true }))
+  await appW.close()
 }
 
 // ---- 空库引导环节：指向一个全新的空库 → 知识库页中间区域应给"拖入第一份资料"引导 ----
@@ -438,6 +478,32 @@ try {
   if (chipVal !== '写种草脚本：') throw new Error(`chip 未填充输入框："${chipVal}"`)
   await snap('01g-chips点击填充', 200)
 
+  // ---- L-03 toast：同屏最多 3 条 / 悬停暂停倒计时 / 点击立刻关掉 ----
+  // 附件按钮每点一次吐一条 toast，正好当发生器（它本身是 L-05 的占位控件）
+  {
+    await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
+    for (let i = 0; i < 5; i++) {
+      await win.click('button[title="添加附件（即将支持）"]')
+      await win.waitForTimeout(120)
+    }
+    const n = await win.locator('[data-testid="toast"]').count()
+    if (n !== 3) throw new Error(`连点 5 次后 toast 没有限流到 3 条：${n}`)
+    await snap('40c-toast-最多三条', 100)
+    // 悬停暂停：默认 3.2 秒，悬停 5 秒后被悬停的那条必须还在（不暂停的话早没了）
+    await win.locator('[data-testid="toast"]').first().hover()
+    await win.waitForTimeout(5000)
+    const stay = await win.locator('[data-testid="toast"]').count()
+    if (stay < 1) throw new Error('悬停 5 秒后 toast 还是自己消失了（倒计时没暂停）')
+    await snapHover('40d-toast-悬停暂停倒计时')
+    // 点击关闭：点一下立刻少一条
+    await win.locator('[data-testid="toast"]').first().click()
+    await win.waitForTimeout(250)
+    const after = await win.locator('[data-testid="toast"]').count()
+    if (after !== stay - 1) throw new Error(`点击没有关掉 toast：${stay} → ${after}`)
+    console.log('L-03 toast ✓', JSON.stringify({ 连点5次同屏: n, 悬停5秒后: stay, 点击后: after }))
+    await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
+  }
+
   const chatInput = win.locator('textarea').first()
   if (await chatInput.count()) {
     await chatInput.fill('灰太太最近的数据怎么样？')
@@ -467,7 +533,26 @@ try {
       console.log('流式光标（真实流式中）：', JSON.stringify(caretLive))
       // ---- H-10：生成中切走对话再切回来，进行中状态与半截正文都要还在 ----
       {
-        const bodyNow = await win.locator('.streaming-body').first().innerText().catch(() => '')
+        // 这一段的前提是"切走的那一刻它还在生成"。第一条问题很短，常常几秒就答完，
+        // 那样断言只能空过、截图 28 也刷不出来 —— 所以先确认真有活儿在跑，没有就补发一条长回答的提问
+        const agentRunning = () =>
+          win.evaluate(async () => {
+            const s = await window.api.tasks.list()
+            return s.tasks.some((t) => t.kind === 'agent' && t.status === 'running')
+          })
+        if (!(await agentRunning())) {
+          console.log('（第一条回答已经结束，补发一条长回答的提问来验 H-10 切走切回）')
+          await chatInput.fill('把灰太太的情况尽量详细地展开讲讲，分点写，越长越好')
+          await chatInput.press('Enter')
+        }
+        // 先等正文吐到一定长度再切走：刚开头就切的话，短回答很容易在这一两秒里答完，
+        // 断言就变成了"空过"（切回来本来就该没有进行中状态）
+        let bodyNow = ''
+        for (let i = 0; i < 40; i++) {
+          bodyNow = await win.evaluate(() => document.querySelector('.streaming-body')?.textContent ?? '')
+          if (bodyNow.replace(/\s+/g, '').length >= 24) break
+          await win.waitForTimeout(500)
+        }
         if (bodyNow.trim()) {
           const convTitle = (await win.locator('aside div.group button').first().innerText()).trim()
           await win.locator('button[title="新对话"]').click() // 切走
@@ -476,14 +561,24 @@ try {
             throw new Error('切到新对话后仍显示上一个会话的停止按钮')
           await win.locator(`aside button:has-text("${convTitle.slice(0, 8)}")`).first().click() // 切回
           await win.waitForTimeout(1200)
-          if (!(await win.locator('button[title="停止生成"]').count()))
-            throw new Error('切回生成中的对话后没有"进行中"状态（H-10）')
-          const bodyBack = await win.locator('.streaming-body').first().innerText().catch(() => '')
-          const head = bodyNow.trim().slice(0, 12)
-          if (!bodyBack.includes(head))
-            throw new Error(`切回后半截正文没接上（draft 基线失效）：期望含「${head}」，实得「${bodyBack.slice(0, 40)}」`)
-          await snap('28-切回生成中的对话', 200)
-          console.log('H-10 切走切回 ✓', JSON.stringify({ 切走前: head, 切回后长度: bodyBack.length }))
+          // 短回答有时在切走/切回这一两秒里就答完了——那时候"没有进行中状态"是对的。
+          // 所以先问主进程：这条 agent 任务还在跑吗？还在跑却看不到停止按钮，才是 H-10 回归
+          const stillRunning = await win.evaluate(async () => {
+            const s = await window.api.tasks.list()
+            return s.tasks.some((t) => t.kind === 'agent' && t.status === 'running')
+          })
+          if (!stillRunning) {
+            console.log('⚠️ 回答在切走/切回的间隙就结束了，跳过 H-10 切回断言（这不是回归）')
+          } else {
+            if (!(await win.locator('button[title="停止生成"]').count()))
+              throw new Error('切回生成中的对话后没有"进行中"状态（H-10）')
+            const bodyBack = await win.locator('.streaming-body').first().innerText().catch(() => '')
+            const head = bodyNow.trim().slice(0, 12)
+            if (!bodyBack.includes(head))
+              throw new Error(`切回后半截正文没接上（draft 基线失效）：期望含「${head}」，实得「${bodyBack.slice(0, 40)}」`)
+            await snap('28-切回生成中的对话', 200)
+            console.log('H-10 切走切回 ✓', JSON.stringify({ 切走前: head, 切回后长度: bodyBack.length }))
+          }
         } else {
           console.log('⚠️ 流式正文还没吐出来，跳过 H-10 切走切回断言')
         }
@@ -557,6 +652,158 @@ try {
         console.log('H-09 停止留半截 ✓', JSON.stringify({ head, 长度: lastMsg.length }))
       }
     }
+    // ---- M-11 AI 出错要能一键重试：复用上一条 user 消息重发，且不把提问复制成两条 ----
+    // 造一个**确定失败**的线路（custom 默认没有 base URL 也没有 key）→ 主进程立刻 bail，
+    // 这样本地模式和 E2E_CHAT 模式跑到的是同一条路径
+    {
+      await win.click('button[title="新对话"]')
+      await win.waitForTimeout(500)
+      await win.evaluate(() => window.api.ai.setProvider('custom'))
+      await chatInput.fill('M-11 重试走查：这条一定会失败')
+      await chatInput.press('Enter')
+      await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 30000 })
+      const errText1 = await win.locator('.md-article').last().innerText()
+      if (!errText1.includes('⚠️')) throw new Error(`错误没有落成气泡：「${errText1}」`)
+      // 预检失败的错误是**同步**发回来的，抢在 React 提交用户那条消息之前——
+      // 旧代码那一下会把刚发出去的提问整条盖掉（历史里只剩一条 ⚠️，重试也就无从谈起）
+      const userBubbles = await win.evaluate(
+        () => [...document.querySelectorAll('.max-w-3xl > div')].filter((b) => b.className.includes('justify-end')).length
+      )
+      if (userBubbles !== 1) throw new Error(`发出去的提问没留在历史里：user 气泡 ${userBubbles} 个`)
+      await snap('41-AI出错-气泡内重试按钮', 200)
+
+      // 重试前后消息条数必须一样：只数"提问几条/重试按钮几个"抓不住"每重试一次多堆一条
+      // 原始错误正文"（SDK 出错时先吐 result 再抛异常，走查截图抓到过）
+      const msgsBefore = await win.evaluate(async () => (await window.api.chat.list())[0].messages.length)
+      // 点重试：错误气泡就地换掉、提问只留一条（重发不是"再打一遍"）。
+      // 「确实重发过」用 MutationObserver 抓那一瞬间的"错误气泡消失过"——重试前后两条
+      // 错误消息的 DOM 长得一模一样，只对比最终态区分不出"真重发"和"什么都没发生"
+      await win.evaluate(() => {
+        window.__m11Gone = 0
+        new MutationObserver(() => {
+          if (!document.querySelector('[data-testid="retry-answer"]')) window.__m11Gone++
+        }).observe(document.body, { subtree: true, childList: true })
+      })
+      await win.click('[data-testid="retry-answer"]')
+      await win.waitForTimeout(1200)
+      await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 30000 })
+      const gone = await win.evaluate(() => window.__m11Gone)
+      if (!gone) throw new Error('点了重试，错误气泡从没被撤掉过（这次重发根本没发生）')
+      const counts = await win.evaluate(() => {
+        const bubbles = [...document.querySelectorAll('.max-w-3xl > div')]
+        return {
+          user: bubbles.filter((b) => b.className.includes('justify-end')).length,
+          err: document.querySelectorAll('[data-testid="retry-answer"]').length,
+        }
+      })
+      if (counts.user !== 1) throw new Error(`重试把用户的提问复制成了 ${counts.user} 条`)
+      if (counts.err !== 1) throw new Error(`重试后错误气泡堆成了 ${counts.err} 条（旧的没撤掉）`)
+      const msgsAfter = await win.evaluate(async () => (await window.api.chat.list())[0].messages.length)
+      if (msgsAfter !== msgsBefore)
+        throw new Error(`重试让消息条数变了：${msgsBefore} → ${msgsAfter}（失败那轮的残留没清干净）`)
+      await snap('41b-AI出错-重试后不重复提问', 200)
+      console.log('M-11 错误重试 ✓', JSON.stringify({ ...counts, 气泡撤掉次数: gone }))
+      // 线路切回去，别把后面的步骤带偏
+      await win.evaluate(() => window.api.ai.setProvider('inferera'))
+      await win.waitForTimeout(300)
+
+      // ---- 同一条路的**异步**分支：错误不是预检 bail，而是真的发起了请求之后才失败 ----
+      // key 是好的（过得了预检）、地址指到 127.0.0.1:9（连接被拒），于是 chat:send 已经回执 ok、
+      // 任务也建起来了，错误在之后才异步到达——这正是"提问被错误消息盖掉"那条竞态最宽的窗口。
+      // 只有 E2E_CHAT 跑得到：本地模式压根没有 key，走的是预检那条短路
+      if (CHAT) {
+        // 用一个**秒回 401** 的本地桩当端点，而不是"连接被拒"的端口 9：
+        // ECONNREFUSED 会让 SDK 一路重试退避，实测单次要 2~4 分钟（第一版走查就是这么超时的）；
+        // 401 属于不重试的 4xx，请求发出去就立刻失败——同样是"过了预检之后才出错"，但只要几秒
+        const { createServer: createHttpServer } = await import('http')
+        const stub = createHttpServer((_req, res) => {
+          res.writeHead(401, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'e2e 模拟鉴权失败' } }))
+        })
+        await new Promise((r) => stub.listen(0, '127.0.0.1', r))
+        const stubPort = stub.address().port
+        const origBase = await win.evaluate(async () => {
+          const r = await window.api.ai.providers()
+          return r.providers.find((p) => p.id === 'inferera').baseUrl
+        })
+        await win.click('button[title="新对话"]')
+        await win.waitForTimeout(400)
+        await win.evaluate(
+          (port) => window.api.ai.setProviderConfig('inferera', { baseUrl: `http://127.0.0.1:${port}` }),
+          stubPort
+        )
+        await chatInput.fill('M-11 异步出错走查：这一条连不上服务器')
+        await chatInput.press('Enter')
+        // 任务先建起来（说明过了预检、错误确实来自请求链路），再等错误落成气泡
+        await win.locator('button[title="停止生成"]').waitFor({ timeout: 20000 }).catch(() => {})
+        await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 180000 })
+        const async1 = await win.evaluate(() => ({
+          user: [...document.querySelectorAll('.max-w-3xl > div')].filter((b) => b.className.includes('justify-end')).length,
+          err: document.querySelectorAll('[data-testid="retry-answer"]').length,
+        }))
+        if (async1.user !== 1)
+          throw new Error(`异步出错时提问被盖掉了：user 气泡 ${async1.user} 个（竞态回归）`)
+        await snap('41c-流式出错-提问仍在且可重试', 200)
+        // 重试同样走真实请求链路：还是 401，但提问不许被复制、失败那轮的残留不许越堆越多
+        const asyncMsgsBefore = await win.evaluate(async () => (await window.api.chat.list())[0].messages.length)
+        await win.evaluate(() => {
+          window.__m11bGone = 0
+          new MutationObserver(() => {
+            if (!document.querySelector('[data-testid="retry-answer"]')) window.__m11bGone++
+          }).observe(document.body, { subtree: true, childList: true })
+        })
+        await win.click('[data-testid="retry-answer"]')
+        await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 180000 })
+        const async2 = await win.evaluate(() => ({
+          gone: window.__m11bGone,
+          user: [...document.querySelectorAll('.max-w-3xl > div')].filter((b) => b.className.includes('justify-end')).length,
+          err: document.querySelectorAll('[data-testid="retry-answer"]').length,
+        }))
+        if (!async2.gone) throw new Error('异步出错时点重试，错误气泡从没被撤掉过（重发没发生）')
+        if (async2.user !== 1) throw new Error(`重试把提问复制成了 ${async2.user} 条`)
+        if (async2.err !== 1) throw new Error(`重试后错误气泡堆成了 ${async2.err} 条`)
+        const asyncMsgsAfter = await win.evaluate(async () => (await window.api.chat.list())[0].messages.length)
+        if (asyncMsgsAfter !== asyncMsgsBefore)
+          throw new Error(
+            `异步出错重试让消息条数变了：${asyncMsgsBefore} → ${asyncMsgsAfter}（SDK 先吐的那条原始错误正文没被清掉）`
+          )
+        await snap('41d-流式出错-重试后不重复提问', 200)
+        console.log('M-11 异步出错分支 ✓', JSON.stringify({ 首次: async1, 重试后: async2 }))
+
+        // 端点恢复后再点一次重试：这次必须真的拿到回答。
+        // 这条不只是"锦上添花"——失败的 agent 任务会一直挂在 Dock 上（按钮文案里失败优先于
+        // 「N 条待同步」），不收干净的话后面 M-03 的可见性断言会被它挡掉
+        stub.close()
+        await win.evaluate((b) => window.api.ai.setProviderConfig('inferera', { baseUrl: b }), origBase)
+        await win.waitForTimeout(300)
+        const restored = await win.evaluate(async () => {
+          const r = await window.api.ai.providers()
+          return r.providers.find((p) => p.id === 'inferera').baseUrl
+        })
+        if (restored !== origBase) throw new Error(`base URL 没还原：${restored}`)
+        await win.click('[data-testid="retry-answer"]')
+        await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 300000 }).catch(() => {})
+        const healed = await win.evaluate(async () => {
+          const c = (await window.api.chat.list())[0]
+          return {
+            msgs: c.messages.length,
+            hasErr: c.messages.some((m) => m.error),
+            last: (c.messages[c.messages.length - 1]?.text ?? '').slice(0, 30),
+          }
+        })
+        if (healed.hasErr) throw new Error('端点恢复后重试仍然是错误：' + JSON.stringify(healed))
+        if (healed.msgs !== 2) throw new Error(`恢复后的对话应当只剩「提问 + 回答」两条：${JSON.stringify(healed)}`)
+        await snap('41e-出错重试-端点恢复后成功', 300)
+        // Dock 上不能再挂着「AI 回答出错」
+        const dockAfter = await win.evaluate(async () => {
+          const s = await window.api.tasks.list()
+          return s.tasks.filter((t) => t.status === 'failed').map((t) => t.title)
+        })
+        if (dockAfter.length) throw new Error('重试成功后仍有失败任务残留：' + JSON.stringify(dockAfter))
+        console.log('M-11 恢复后重试成功 ✓', JSON.stringify(healed))
+      }
+    }
+
     // ＋新对话必须复位：空态问候可见 + 输入框清空（回归 2026-07-16 用户报障）
     await win.click('button[title="新对话"]')
     await win.waitForTimeout(500)
@@ -624,9 +871,61 @@ try {
     throw new Error('删除后文件树里还留着这篇笔记')
   console.log('新建 → ··· → 删除（含二次确认）✓')
 
-  // 搜索：摘要必须是正文纯文本（不带 frontmatter/双链括号/表格竖线）
-  await win.fill('input[placeholder="搜索库…"]', '灰太太')
+  // ---- H-11 搜索三态 + M-13 结果计数 ----
+  // 旧版是 `hits.length > 0 ? 结果 : <Tree/>`：搜一个库里没有的词，左栏显示整棵文件树，
+  // 和没搜一样——用户只会以为搜索框坏了。检索期间也没有加载态。
+  {
+    // 未搜索态：文件树在，计数/空态都不该出现
+    if (await win.locator('[data-testid="search-count"], [data-testid="search-empty"]').count())
+      throw new Error('还没搜索就出现了搜索结果态')
+    // 检索中：探针先跑起来再输入（探针内部会 await，React 有机会渲染），
+    // 断言"输入框有词之后，左栏一次都不许再出现文件树叶子"——这正是 H-11 的病灶
+    const probe = win.evaluate(async () => {
+      const seen = { loading: false, treeWhileSearching: false }
+      for (let i = 0; i < 200; i++) {
+        const q = document.querySelector('input[placeholder="搜索库…"]')?.value ?? ''
+        if (q) {
+          if (document.querySelector('[data-testid="search-loading"]')) seen.loading = true
+          if (document.querySelectorAll('[data-testid="tree-col"] button.block.truncate').length)
+            seen.treeWhileSearching = true
+          if (document.querySelector('[data-testid="search-count"]')) break
+        }
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      return seen
+    })
+    await win.fill('input[placeholder="搜索库…"]', '灰太太')
+    const seen = await probe
+    if (seen.treeWhileSearching) throw new Error('有搜索词时左栏还在显示整棵文件树（H-11 的病灶）')
+    if (!seen.loading) throw new Error('搜索期间没有出现「检索中…」加载态')
+    console.log('H-11 检索中/不落回文件树 ✓', JSON.stringify(seen))
+  }
   await snap('05-搜索结果', 2500)
+  // M-13：结果头部要有「N / 共 M 条」（列表静默截断到 20 条，不给总数就分不清"只有这些"和"还有更多"）
+  if (await win.locator('[data-testid="search-count"]').count()) {
+    const countText = await win.locator('[data-testid="search-count"]').innerText()
+    const m = /^(\d+)\s*\/\s*共\s*(\d+)\s*条/.exec(countText.replace(/\s+/g, ' ').trim())
+    if (!m) throw new Error(`搜索结果头部没有「N / 共 M 条」计数：「${countText}」`)
+    const shown = await win.locator('[data-testid="tree-col"] .line-clamp-2').count()
+    if (Number(m[1]) !== shown) throw new Error(`计数与实际条数对不上：显示 ${m[1]}，列表 ${shown} 条`)
+    if (Number(m[1]) > Number(m[2])) throw new Error(`当前条数比总数还大：${countText}`)
+    // total 必须是**截断前**的命中数：拿一个宽泛的词直接问一次 IPC，
+    // 命中过 20 条时 hits 停在 20 而 total 更大——这才证明「共 M 条」不是把 20 抄了一遍
+    const broad = await win.evaluate(() => window.api.vault.search('的'))
+    if (broad.hits.length > 20) throw new Error(`检索没有截断到 20 条：${broad.hits.length}`)
+    if (broad.total < broad.hits.length) throw new Error('total 比返回的条数还小：' + JSON.stringify(broad.total))
+    if (broad.hits.length === 20 && broad.total <= 20)
+      throw new Error(`total 没有反映截断前的命中数：hits=${broad.hits.length} total=${broad.total}`)
+    console.log(
+      'M-13 结果计数 ✓',
+      JSON.stringify({ 计数: countText.replace(/\s+/g, ' ').trim(), 列表条数: shown, 宽泛词: { hits: broad.hits.length, total: broad.total } })
+    )
+  } else {
+    // 零命中也必须是三态里的一态，绝不能掉回文件树
+    if (!(await win.locator('[data-testid="search-empty"]').count()))
+      throw new Error('搜索既没有结果计数也没有「没找到」（三态缺一）')
+    console.log('⚠️ 「灰太太」零命中（这个库里没有这份数据），M-13 计数断言跳过')
+  }
   const snippets = await win.locator('.line-clamp-2').allInnerTexts()
   const dirty = snippets.filter((s) => /\[\[|\||^---|doc_type:/.test(s))
   if (dirty.length) throw new Error('搜索摘要仍有 md/frontmatter 噪音：' + JSON.stringify(dirty.slice(0, 3)))
@@ -651,6 +950,28 @@ try {
     if (ghostTable) throw new Error('仍然渲染了只有表头的空表格')
     await snap('06d-空值与空表格处理', 300)
     console.log('空值渲染 ✓', JSON.stringify({ 暂无数据: emptyTable, 破折号: hasEmptyMark }))
+  }
+
+  // ---- H-11 第三态：有词但零命中 → 「没找到「X」」+ 清空按钮，绝不能画成整棵文件树 ----
+  {
+    const nonsense = 'zzz这个词库里一定没有zzz'
+    const leavesBefore = await win.locator('[data-testid="tree-col"] button.block.truncate').count()
+    await win.fill('input[placeholder="搜索库…"]', nonsense)
+    await win.locator('[data-testid="search-empty"]').waitFor({ timeout: 15000 })
+    const emptyText = await win.locator('[data-testid="search-empty"]').innerText()
+    if (!emptyText.includes(nonsense)) throw new Error(`「没找到」没带上搜索词：「${emptyText}」`)
+    if (await win.locator('[data-testid="tree-col"] button.block.truncate').count())
+      throw new Error('零命中时左栏还是整棵文件树（H-11 未修复）')
+    await snap('05b-搜索零命中-没找到与清空', 300)
+    // 清空按钮真点：回到文件树，输入框也跟着空
+    await win.click('[data-testid="search-clear"]')
+    await win.waitForTimeout(500)
+    if ((await win.locator('input[placeholder="搜索库…"]').inputValue()) !== '')
+      throw new Error('点「清空搜索」后输入框没清空')
+    if (leavesBefore && !(await win.locator('[data-testid="tree-col"] button.block.truncate').count()))
+      throw new Error('点「清空搜索」后没有回到文件树')
+    await snap('05c-清空搜索-回到文件树', 300)
+    console.log('H-11 零命中三态 ✓', JSON.stringify(emptyText.replace(/\s+/g, ' ').trim()))
   }
 
   // 投递箱：真实拷一个文件进投递箱目录，观察面板
@@ -1237,6 +1558,61 @@ try {
     console.log('M-27 另存为副本 ✓ 两份都在', JSON.stringify({ 副本: copies[0] }))
   }
 
+  // ---- M-02 笔记读取失败：toast + 正文区错误态（带重试），不再"点了没反应" ----
+  // 用 chmod 000 造一次真实的读失败（文件还在树里，只是读不了），比删文件更贴近真实故障
+  {
+    const rel = await win.evaluate(() => window.api.vault.createNote('', 'e2e读取失败'))
+    await win.locator('button.block.truncate:has-text("e2e读取失败")').first().waitFor({ timeout: 10000 })
+    const abs = join(settings.vaultPath, rel)
+    // 先关掉当前笔记，保证点击是一次真正的"打开"
+    const closeBtn = win.locator('button[title="关闭文件"]')
+    if (await closeBtn.count()) await closeBtn.click()
+    await win.waitForTimeout(400)
+    chmodSync(abs, 0o000)
+    await win.locator('button.block.truncate:has-text("e2e读取失败")').first().click()
+    await win.locator('[data-testid="note-error"]').waitFor({ timeout: 10000 })
+    const errToast = await win.locator('[data-testid="toast"]').first().innerText()
+    if (!/打不开这篇笔记/.test(errToast)) throw new Error(`读失败没有 toast：「${errToast}」`)
+    const errBody = await win.locator('[data-testid="note-error"]').innerText()
+    if (!errBody.includes(rel)) throw new Error(`错误态没显示是哪篇笔记：「${errBody}」`)
+    if (!(await win.locator('[data-testid="note-retry"]').count())) throw new Error('错误态没有重试按钮')
+    await snap('42-笔记读取失败-错误态与重试', 200)
+    // 修好权限后点「重试」：正文必须真的出来
+    chmodSync(abs, 0o644)
+    await win.click('[data-testid="note-retry"]')
+    await win.locator('.md-article').first().waitFor({ timeout: 10000 })
+    if (await win.locator('[data-testid="note-error"]').count())
+      throw new Error('重试成功后错误态还挂着')
+    await snap('42b-笔记读取失败-重试成功', 300)
+    console.log('M-02 读取失败三态 ✓', JSON.stringify({ toast: errToast.trim(), 笔记: rel }))
+    await win.evaluate((p) => window.api.vault.deleteNote(p), rel)
+    await win.waitForTimeout(600)
+  }
+
+  // ---- M-04 打开库内附件失败：以前 openFile 返回 false 被直接丢掉，点了纯粹没反应 ----
+  {
+    const rel = await win.evaluate(async () => {
+      const p = await window.api.vault.createNote('', 'e2e断链附件')
+      await window.api.vault.write(
+        p,
+        '# 断链附件\n\n[打不开的附件](./e2e这个附件不存在.pdf)\n'
+      )
+      return p
+    })
+    await win.locator('button.block.truncate:has-text("e2e断链附件")').first().click()
+    await win.locator('.md-article a').first().waitFor({ timeout: 10000 })
+    await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
+    await win.locator('.md-article a').first().click()
+    await win.locator('[data-testid="toast"]').first().waitFor({ timeout: 8000 })
+    const linkToast = await win.locator('[data-testid="toast"]').first().innerText()
+    if (!/找不到文件/.test(linkToast)) throw new Error(`断链附件点击没有提示：「${linkToast}」`)
+    if (!/e2e这个附件不存在\.pdf/.test(linkToast)) throw new Error(`提示里没写是哪个文件：「${linkToast}」`)
+    await snap('43-断链附件-找不到文件提示', 200)
+    console.log('M-04 附件断链提示 ✓', JSON.stringify(linkToast.trim()))
+    await win.evaluate((p) => window.api.vault.deleteNote(p), rel)
+    await win.waitForTimeout(600)
+  }
+
   // ---- H-02 换库出口：换库要先确认，向导里要有「返回当前库」能退回来 ----
   {
     await win.click('button[title="切换知识库"]')
@@ -1551,6 +1927,27 @@ try {
   await snapHover('13-产物卡片-hover操作')
   console.log('产物卡片 hover ✓（静态隐藏 → hover 出「打开/入库」）')
 
+  // ---- M-05 产物「打开」失败：以前 shell.openPath 的错误被丢掉，点了毫无反应 ----
+  // 把磁盘上那个产物删掉（面板列表还留着这张卡，正是"链接指向已不在的文件"这个真实场景）
+  {
+    const gone = 'e2e数据表.xlsx'
+    rmSync(join(artifactDir, gone), { force: true })
+    const cardGone = win.locator(`div.group:has([title="${gone}"])`).first()
+    if (!(await cardGone.count())) throw new Error('产物面板里找不到 e2e数据表.xlsx 卡片')
+    await cardGone.hover()
+    await win.waitForTimeout(200)
+    await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
+    await cardGone.locator('button:has-text("打开")').click()
+    await win.locator('[data-testid="toast"]').first().waitFor({ timeout: 8000 })
+    const openToast = await win.locator('[data-testid="toast"]').first().innerText()
+    if (!/打不开产物/.test(openToast)) throw new Error(`产物打不开时没有提示：「${openToast}」`)
+    // 光说"不行"不够，得给出口
+    const act = await win.locator('[data-testid="toast-action"]').first().innerText()
+    if (!/Finder/.test(act)) throw new Error(`打不开产物的提示上没有兜底出口：「${act}」`)
+    await snap('44-产物打开失败-提示与Finder出口', 200)
+    console.log('M-05 产物打开失败 ✓', JSON.stringify({ toast: openToast.trim(), 出口: act.trim() }))
+  }
+
   // ---- 产物入库三态：未入库 →（点）入库中 → 已入库 ✓，并能点开落位笔记 ----
   {
     // 用真 docx（假 pptx 转换必失败，测不到「已入库」）
@@ -1712,8 +2109,14 @@ try {
     if (left.length) throw new Error('退出应用后仍有 pipeline 孤儿进程：\n' + left.join('\n'))
     console.log(`before-quit 清理 ✓ pgid=${pgid} 无孤儿（打包形态=${packagedBin ? '是' : '否'}）`)
   }
+} catch (err) {
+  // 先把失败原因打出来：下面的 close 一旦挂住，抛出去的错要等 finally 走完才显示，
+  // 实测被吞过一次（看着像"卡死在某一步"，其实早就断言失败了）
+  console.error('❌ 走查失败：', err?.stack ?? err)
+  throw err
 } finally {
-  if (!closed) await app.close()
+  // app.close() 偶尔挂住（SDK 子进程还在重试连接时），别让它把失败原因一起埋掉
+  if (!closed) await Promise.race([app.close(), new Promise((r) => setTimeout(r, 20000))])
 }
 
 // ---- 收尾体检：shots/ 里凡是本次没刷新的 png 一律报警（旧版本残留会污染验收基线） ----

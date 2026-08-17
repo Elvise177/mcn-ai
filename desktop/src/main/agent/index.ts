@@ -204,7 +204,7 @@ export class AgentManager {
                   .join('\n')
                 return { content: [{ type: 'text', text }] }
               }
-              const hits = await vaultManager.search(q)
+              const { hits } = await vaultManager.search(q)
               const text = hits.length
                 ? hits.slice(0, 6).map((h, i) => `${i + 1}. [[${h.title}]] (${h.path})\n   ${h.snippet}`).join('\n')
                 : '（无命中）'

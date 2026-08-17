@@ -36,6 +36,59 @@ export const ui = {
     pushToast?.({ msg, type, action }),
 }
 
+/** 同屏 toast 上限：再多就该用别的形式说话了 */
+const MAX_TOASTS = 3
+
+/**
+ * 单条 toast 的生命周期（L-03）。倒计时放在这里而不是 pushToast 里，是为了
+ * ① 鼠标悬停时暂停——长句 3.2 秒读不完，读到一半消失比不提示还气人；
+ * ② 点击立刻关掉——用户已经看完了，不该被迫等它自己淡出。
+ */
+function ToastRow({ t, onClose }: { t: ToastItem; onClose: () => void }) {
+  const [paused, setPaused] = useState(false)
+  // 剩余时间跨暂停累计：悬停 → 移开之后接着走，而不是重新计时
+  const left = useRef(t.action ? 8000 : 3200)
+
+  useEffect(() => {
+    if (paused) return
+    const startedAt = Date.now()
+    const timer = setTimeout(onClose, left.current)
+    return () => {
+      clearTimeout(timer)
+      left.current = Math.max(0, left.current - (Date.now() - startedAt))
+    }
+  }, [paused, onClose])
+
+  return (
+    <div
+      data-testid="toast"
+      title="点击关闭"
+      onMouseEnter={() => setPaused(true)}
+      onMouseLeave={() => setPaused(false)}
+      onClick={onClose}
+      className={`fade-up pointer-events-auto flex cursor-pointer items-center gap-3 rounded-full px-4 py-2 text-base text-on-solid shadow-pop ${
+        t.type === 'error' ? 'bg-danger' : 'bg-ink'
+      }`}
+    >
+      <span>{t.msg}</span>
+      {/* 动作按钮：拒绝一件事的同时给出出口（如「停止当前生成」） */}
+      {t.action && (
+        <button
+          data-testid="toast-action"
+          onClick={(e) => {
+            e.stopPropagation() // 别让"点动作"顺带被当成"点关闭"
+            t.action?.onClick()
+            onClose()
+          }}
+          className="shrink-0 rounded-full border border-on-solid px-2.5 py-0.5 text-sm transition-opacity hover:opacity-80"
+        >
+          {t.action.label}
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function UiHost() {
   const [modal, _setModal] = useState<ModalState>(null)
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -53,9 +106,9 @@ export function UiHost() {
     }
     pushToast = (t) => {
       const id = ++seq.current
-      setToasts((old) => [...old, { ...t, id }])
-      // 带动作按钮的多留一会儿：3.2 秒不够读完再抬手点一下
-      setTimeout(() => setToasts((old) => old.filter((x) => x.id !== id)), t.action ? 8000 : 3200)
+      // 同屏最多 3 条（L-03）：连点几次「打开」之类的操作会一口气推十几条，
+      // 糊满顶部之后连界面都看不见了。挤掉的是最老的那条
+      setToasts((old) => [...old, { ...t, id }].slice(-MAX_TOASTS))
     }
     return () => {
       setModal = null
@@ -77,28 +130,7 @@ export function UiHost() {
       {/* Toast */}
       <div className="pointer-events-none fixed left-1/2 top-4 z-[100] flex -translate-x-1/2 flex-col items-center gap-2">
         {toasts.map((t) => (
-          <div
-            key={t.id}
-            data-testid="toast"
-            className={`fade-up pointer-events-auto flex items-center gap-3 rounded-full px-4 py-2 text-base text-on-solid shadow-pop ${
-              t.type === 'error' ? 'bg-danger' : 'bg-ink'
-            }`}
-          >
-            <span>{t.msg}</span>
-            {/* 动作按钮：拒绝一件事的同时给出出口（如「停止当前生成」） */}
-            {t.action && (
-              <button
-                data-testid="toast-action"
-                onClick={() => {
-                  t.action?.onClick()
-                  setToasts((old) => old.filter((x) => x.id !== t.id))
-                }}
-                className="shrink-0 rounded-full border border-on-solid px-2.5 py-0.5 text-sm transition-opacity hover:opacity-80"
-              >
-                {t.action.label}
-              </button>
-            )}
-          </div>
+          <ToastRow key={t.id} t={t} onClose={() => setToasts((old) => old.filter((x) => x.id !== t.id))} />
         ))}
       </div>
 

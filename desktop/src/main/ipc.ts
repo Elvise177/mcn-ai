@@ -107,6 +107,14 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('vault:createNew', async () => {
+    // MCNAI_E2E_VAULT_FAIL（值 = 先卡住多少毫秒）只给走查用：验 H-12 的「失败/耗时」分支。
+    // 真让 createVault 失败得造只读盘，而系统保存框一弹起来 Playwright 就没法继续了。
+    // 生产不读这个变量（同 MCNAI_SUPABASE_URL 的用法，见 HANDOFF §4-21/§4-22）
+    const e2eFail = process.env.MCNAI_E2E_VAULT_FAIL
+    if (e2eFail) {
+      await new Promise((r) => setTimeout(r, Number(e2eFail) || 0))
+      throw new Error('磁盘不可写（e2e 模拟）')
+    }
     const r = await dialog.showSaveDialog({
       title: '新建知识库',
       nameFieldLabel: '库名称',
@@ -181,6 +189,7 @@ export function registerIpc(): void {
   // ---- artifacts ----
   ipcMain.handle('artifacts:list', () => artifactsWatcher.list())
   ipcMain.handle('artifacts:open', (_e, relPath: string) => artifactsWatcher.open(relPath))
+  ipcMain.handle('artifacts:reveal', (_e, relPath: string) => artifactsWatcher.reveal(relPath))
   ipcMain.handle('artifacts:readText', (_e, relPath: string) => artifactsWatcher.readText(relPath))
   // 显式入库（带任务身份），取代过去借道 inbox:enqueue 的发射后不管
   ipcMain.handle('artifacts:ingest', (_e, relPath: string) => artifactsWatcher.ingest(relPath))

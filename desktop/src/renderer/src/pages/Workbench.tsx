@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check } from 'lucide-react'
+import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check, RotateCcw } from 'lucide-react'
 import { FastMarkdown } from '../components/Markdown'
 import { FileIcon } from '../components/FileIcon'
 import { ui } from '../components/ui'
@@ -18,6 +18,19 @@ const TOOL_ZH: Record<string, string> = {
   Write: '写入产物',
 }
 
+/**
+ * 打开产物（M-05）。`shell.openPath` 失败（没装 Keynote/Office、产物已被删）以前是静默的，
+ * 点「打开」毫无反应。除了报错还得给出口：至少能在 Finder 里看到这个文件。
+ */
+const openArtifact = async (relPath: string): Promise<void> => {
+  const r = await window.api.artifacts.open(relPath)
+  if (r?.ok) return
+  ui.toast(`打不开产物：${r?.error ?? '未知错误'}`, 'error', {
+    label: '在 Finder 中显示',
+    onClick: () => void window.api.artifacts.reveal(relPath),
+  })
+}
+
 /** 卡片区/产物面板共用的时间格式 */
 const shortTime = (ms: number): string =>
   new Date(ms).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -25,6 +38,7 @@ const shortTime = (ms: number): string =>
 export default function Workbench({
   conv,
   onSend,
+  onRetry,
   onOpenNote,
   nickname,
   recentConvs,
@@ -33,6 +47,8 @@ export default function Workbench({
   conv: Conversation
   /** 返回 false = 主进程拒了这次发送（同一会话已在生成中，H-10），输入框内容要留着 */
   onSend: (text: string) => Promise<boolean>
+  /** M-11：重发错误气泡前面那条 user 消息，并把错误气泡就地撤掉 */
+  onRetry: (index: number) => Promise<boolean>
   onOpenNote: (wikiTarget: string) => void
   nickname?: string
   recentConvs: Conversation[]
@@ -112,6 +128,21 @@ export default function Workbench({
       else if (!busy) setSending(false)
     },
     [streaming, onSend]
+  )
+
+  /**
+   * M-11 重试。以前 AI 出错只留一条 `⚠️ …` 的气泡，用户要重试只能把刚才那段话重新打一遍
+   * （长提示词尤其致命）。这里复用上一条 user 消息重发，错误气泡由 App 侧就地撤掉。
+   */
+  const retry = useCallback(
+    async (index: number) => {
+      if (streaming) return
+      setSending(true)
+      setDraft('')
+      const ok = await onRetry(index)
+      if (!ok) setSending(false)
+    },
+    [streaming, onRetry]
   )
 
   const handleLink = useCallback(
@@ -203,15 +234,29 @@ export default function Workbench({
                       <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
                       <div className="min-w-0 flex-1">
                         <FastMarkdown body={m.text} onLink={handleLink} />
-                        <button
-                          onClick={() => {
-                            navigator.clipboard.writeText(m.text)
-                            ui.toast('已复制')
-                          }}
-                          className="mt-1 hidden items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-muted hover:text-accent group-hover:inline-flex"
-                        >
-                          <Copy size={11} /> 复制
-                        </button>
+                        <div className="mt-1 flex items-center gap-2">
+                          {/* 错误气泡里的「重试」常驻（不是 hover 才出）：这是用户此刻唯一想点的东西。
+                              前面没有可复用的提问时不给按钮——按了什么都不会发生的按钮比没有更糟 */}
+                          {m.error && messages.slice(0, i).some((x) => x.role === 'user') && (
+                            <button
+                              data-testid="retry-answer"
+                              disabled={streaming}
+                              onClick={() => void retry(i)}
+                              className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-accent hover:bg-accent-soft disabled:opacity-50"
+                            >
+                              <RotateCcw size={11} /> 重试
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(m.text)
+                              ui.toast('已复制')
+                            }}
+                            className="hidden items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-muted hover:text-accent group-hover:inline-flex"
+                          >
+                            <Copy size={11} /> 复制
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )
@@ -284,7 +329,7 @@ function RecentDock({ convs, onOpenConv }: { convs: Conversation[]; onOpenConv: 
             {artifacts.map((a) => (
               <button
                 key={a.path}
-                onClick={() => window.api.artifacts.open(a.path)}
+                onClick={() => void openArtifact(a.path)}
                 title={a.name}
                 className="flex w-full items-center gap-2.5 rounded-md border border-line bg-card px-3 py-2 text-left hover:bg-hover"
               >
@@ -544,7 +589,7 @@ function ArtifactPanel({ homeEmpty, onOpenNote }: { homeEmpty: boolean; onOpenNo
             {/* 操作按钮只在 hover 时露出，静态时列表保持干净 */}
             <div className="ml-6 mt-1.5 hidden gap-2 text-sm group-hover:flex">
               <button
-                onClick={() => window.api.artifacts.open(a.path)}
+                onClick={() => void openArtifact(a.path)}
                 className="rounded-full border border-line px-2.5 py-0.5 hover:bg-hover"
               >
                 打开

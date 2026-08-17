@@ -194,9 +194,27 @@ export class ArtifactsWatcher {
     return out
   }
 
-  async open(relPath: string): Promise<void> {
+  /**
+   * 打开产物（M-05）。以前 `shell.openPath` 的返回值被直接丢掉——它失败时返回的是错误字符串，
+   * 结果"系统里没装 Keynote/Office"或"产物已被删掉"时点「打开」纯粹没反应。
+   * 现在把失败原因回给渲染层，由它 toast 并给「在 Finder 中显示」兜底。
+   */
+  async open(relPath: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.dir) return { ok: false, error: '请先打开知识库' }
+    const abs = join(this.dir, relPath)
+    try {
+      await fs.access(abs)
+    } catch {
+      return { ok: false, error: '文件不存在（可能已被移动或删除）' }
+    }
+    const err = await shell.openPath(abs)
+    return err ? { ok: false, error: err } : { ok: true }
+  }
+
+  /** 打不开时的兜底出口：至少让用户在 Finder 里看到这个文件 */
+  reveal(relPath: string): void {
     if (!this.dir) return
-    await shell.openPath(join(this.dir, relPath))
+    shell.showItemInFolder(join(this.dir, relPath))
   }
 
   async readText(relPath: string): Promise<string> {

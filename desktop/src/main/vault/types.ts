@@ -26,3 +26,13 @@ export interface SearchHit {
   title: string
   snippet: string
 }
+
+/**
+ * 检索结果。**必须带总数**：结果被静默截断到 20 条，UI 只显示前 20 条时
+ * 用户无从知道"还有更多"（M-13），也分不清「只有这些」和「太多了先给你看一部分」
+ */
+export interface SearchResult {
+  hits: SearchHit[]
+  /** 命中总数（未截断前） */
+  total: number
+}

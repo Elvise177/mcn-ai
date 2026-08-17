@@ -3,7 +3,7 @@ import { Library, Settings as SettingsIcon, Plus } from 'lucide-react'
 import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
 import LoginGate from './pages/LoginGate'
-import { UiHost, ui } from './components/ui'
+import { ui } from './components/ui'
 import { VaultWizard } from './components/VaultWizard'
 import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
@@ -52,7 +52,14 @@ export default function App() {
     window.api.chat.save(c)
     convsRef.current = [c, ...convsRef.current.filter((x) => x.id !== c.id)]
     setConvs(convsRef.current)
-    if (activeRef.current.id === c.id) setActive(c)
+    if (activeRef.current.id === c.id) {
+      // **同步更新 ref**，不能只等 setActive：`activeRef.current = active` 是在渲染里赋值的，
+      // React 提交之前 ref 还是旧对象。主进程的预检错误是同步发回来的（bail 在 handle 返回前
+      // 就 emit 了），那一下 appendMessage 拿到的就是没有这条提问的旧快照，
+      // 结果用户刚发出去的问题被错误消息整条盖掉（走查抓到：历史里只剩一条 ⚠️）
+      activeRef.current = c
+      setActive(c)
+    }
   }, [])
 
   const appendMessage = useCallback(
@@ -98,7 +105,9 @@ export default function App() {
       if (p.kind === 'assistant' && p.text != null) {
         appendMessage(p.sessionId, { role: 'assistant', text: p.text }, p.sdkSessionId)
       } else if (p.kind === 'error') {
-        appendMessage(p.sessionId, { role: 'assistant', text: `⚠️ ${p.text}` })
+        // error:true → 气泡里挂「重试」（M-11）。以前出错只留一段 ⚠️ 文字，
+        // 用户要重试只能把刚才那段话重新打一遍
+        appendMessage(p.sessionId, { role: 'assistant', text: `⚠️ ${p.text}`, error: true })
       }
     })
     return () => {
@@ -109,7 +118,7 @@ export default function App() {
   }, [appendMessage])
 
   // AI key 下发失败以前是全程静默 catch，用户只在发第一条消息时撞到「请先配置 API Key」。
-  // 主 UI（含 UiHost）挂上之后再报：启动那次 provision 早于渲染层，所以还要补查一次原因
+  // 主 UI 挂上之后再报：启动那次 provision 早于渲染层，所以还要补查一次原因（UiHost 在 main.tsx 根部）
   const mainVisible =
     account !== null &&
     (account.loggedIn || localMode || !!account.degraded) &&
@@ -149,12 +158,47 @@ export default function App() {
         })
         return false
       }
+      // 等 send 回话的这段时间里可能已经落进来别的消息（预检失败时错误甚至先于回执到达），
+      // 所以按"发送前的快照 + 我这条提问 + 等待期间到的"拼，而不是拿旧快照整条覆盖
+      const cur = convsRef.current.find((x) => x.id === base.id) ?? base
+      const arrived = cur.messages.slice(base.messages.length)
       upsert({
-        ...base,
-        messages: [...base.messages, { role: 'user', text }],
-        title: base.title === '新对话' ? text.slice(0, 18) : base.title,
+        ...cur,
+        messages: [...base.messages, { role: 'user', text }, ...arrived],
+        title: base.title === '新对话' ? text.slice(0, 18) : cur.title,
         updatedAt: Date.now(),
       })
+      return true
+    },
+    [upsert]
+  )
+
+  /**
+   * M-11 重试：复用错误气泡前面那条 user 消息重发，成功受理后把错误气泡从历史里去掉
+   * （用户那条提问原样留着，等新回答落进来）。顺序同 handleSend——先问主进程收不收。
+   */
+  const handleRetry = useCallback(
+    async (index: number): Promise<boolean> => {
+      const base = activeRef.current
+      // 撤的是**这一轮失败留下的全部内容**，不只是 ⚠️ 那一条：SDK 出错时往往先吐一条
+      // 原始错误正文（英文 result）再抛异常，只删 ⚠️ 的话每重试一次就多堆一条（走查截图抓到）。
+      // 回到"最后一条提问"那里重发，语义正好是「复用上一条 user 消息」
+      const lastUserIdx = base.messages.slice(0, index).map((m) => m.role).lastIndexOf('user')
+      if (lastUserIdx < 0) return false
+      const lastUser = base.messages[lastUserIdx]
+      // **先撤气泡再发**：send 的 await 还没返回，新的 error/assistant 事件就可能已经落进来了，
+      // 那时再拿发送前的快照 upsert，等于把刚到的新回答一起抹掉
+      upsert({ ...base, messages: base.messages.slice(0, lastUserIdx + 1), updatedAt: Date.now() })
+      const r = await window.api.chat.send(base.id, lastUser.text, base.sdkSessionId)
+      if (r && r.ok === false) {
+        // 被拒就把错误气泡放回去，别让用户以为重试已经发出去了
+        upsert({ ...base, updatedAt: Date.now() })
+        ui.toast(r.error ?? '这个对话还在生成中', 'error', {
+          label: '停止当前生成',
+          onClick: () => void window.api.chat.stop(base.id),
+        })
+        return false
+      }
       return true
     },
     [upsert]
@@ -212,7 +256,6 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <UiHost />
       <aside className="flex w-sidebar shrink-0 flex-col border-r border-line bg-sidebar">
         <div className="titlebar-drag px-5 pb-4 pt-10">
           <div className="text-xl font-semibold">mcn-ai</div>
@@ -306,6 +349,7 @@ export default function App() {
             <Workbench
               conv={active}
               onSend={handleSend}
+              onRetry={handleRetry}
               onOpenNote={openNoteFromChat}
               nickname={nickname}
               recentConvs={convs}

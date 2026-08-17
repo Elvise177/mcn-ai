@@ -1,7 +1,7 @@
 import { Worker } from 'worker_threads'
 import { join } from 'path'
 import { existsSync } from 'fs'
-import type { VaultNote, SearchHit } from './types'
+import type { VaultNote, SearchHit, SearchResult } from './types'
 
 function workerPath(): string {
   // 本模块可能被 rollup 打进 chunks/，worker 文件始终在 out/main/ 根：两级探测
@@ -16,13 +16,13 @@ function workerPath(): string {
 export class VaultSearcher {
   private worker: Worker
   private seq = 0
-  private pending = new Map<number, (hits: SearchHit[]) => void>()
+  private pending = new Map<number, (r: SearchResult) => void>()
 
   constructor() {
     this.worker = new Worker(workerPath())
-    this.worker.on('message', (m: { type: string; id?: number; hits?: SearchHit[] }) => {
+    this.worker.on('message', (m: { type: string; id?: number; hits?: SearchHit[]; total?: number }) => {
       if (m.type === 'results' && m.id != null) {
-        this.pending.get(m.id)?.(m.hits ?? [])
+        this.pending.get(m.id)?.({ hits: m.hits ?? [], total: m.total ?? m.hits?.length ?? 0 })
         this.pending.delete(m.id)
       }
     })
@@ -50,14 +50,14 @@ export class VaultSearcher {
     this.worker.postMessage({ type: 'remove', path })
   }
 
-  search(q: string): Promise<SearchHit[]> {
+  search(q: string): Promise<SearchResult> {
     const id = ++this.seq
     return new Promise((resolve) => {
       this.pending.set(id, resolve)
       this.worker.postMessage({ type: 'search', id, q })
       // 兜底超时：索引重建期间查询会排队（大库可达数秒），给足余量
       setTimeout(() => {
-        if (this.pending.delete(id)) resolve([])
+        if (this.pending.delete(id)) resolve({ hits: [], total: 0 })
       }, 20000)
     })
   }

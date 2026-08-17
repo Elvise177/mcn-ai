@@ -87,7 +87,9 @@ parentPort!.on('message', (msg: { type: string; [k: string]: unknown }) => {
     }
     case 'search': {
       const q = msg.q as string
-      const hits = mini.search(q).slice(0, 20).map((r) => {
+      // 总数取截断前的命中数：UI 要显示「20 / 共 137 条」，否则截断是静默的（M-13）
+      const all = mini.search(q)
+      const hits = all.slice(0, 20).map((r) => {
         const body = bodies.get(String(r.id)) ?? ''
         const idx = body.indexOf(q.slice(0, 12))
         const at = idx >= 0 ? idx : 0
@@ -99,7 +101,7 @@ parentPort!.on('message', (msg: { type: string; [k: string]: unknown }) => {
           snippet: (from > 0 ? '…' : '') + body.slice(from, to).trim() + (to < body.length ? '…' : ''),
         }
       })
-      parentPort!.postMessage({ type: 'results', id: msg.id, hits })
+      parentPort!.postMessage({ type: 'results', id: msg.id, hits, total: all.length })
       break
     }
   }

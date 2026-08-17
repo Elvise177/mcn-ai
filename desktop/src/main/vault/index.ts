@@ -6,7 +6,7 @@ import { shell, type BrowserWindow } from 'electron'
 import { scanVault, parseNote, readNoteBody, buildTree, IGNORE } from './reader'
 import { buildGraph, makeResolver } from './graph'
 import { VaultSearcher } from './searcher'
-import type { VaultNote, VaultTreeNode, GraphData, SearchHit } from './types'
+import type { VaultNote, VaultTreeNode, GraphData, SearchResult } from './types'
 
 /** 编辑冲突检测（M-27）用的内容指纹。用内容 hash 而不是 mtime——见 startWatcher 的注释 */
 const hashOf = (raw: string): string => createHash('sha256').update(raw, 'utf-8').digest('hex')
@@ -117,7 +117,7 @@ export class VaultManager {
     return buildGraph(this.notes)
   }
 
-  search(q: string): Promise<SearchHit[]> {
+  search(q: string): Promise<SearchResult> {
     return this.searcher.search(q)
   }
 

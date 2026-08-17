@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   const graph = vm.graph()
   // 检索索引在后台分片构建，等它完成再断言全量命中
   await new Promise((r) => setTimeout(r, 6000))
-  const hits = await vm.search(process.argv[3] || '引流课')
+  const { hits } = await vm.search(process.argv[3] || '引流课')
   const resolved = vm.resolveLink('灰太太')
   const tree = vm.tree()
   const sample = noteCount > 0 ? await vm.read(graph.nodes[0].id) : null

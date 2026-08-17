@@ -7,7 +7,7 @@ import { FastMarkdown } from '../components/Markdown'
 import { VaultWizard } from '../components/VaultWizard'
 import { ConflictBar } from '../components/ConflictBar'
 import { ui } from '../components/ui'
-import { X, Inbox, MoveUpLeft, MoreHorizontal } from 'lucide-react'
+import { X, Inbox, MoveUpLeft, MoreHorizontal, Loader2, FileWarning, RotateCcw } from 'lucide-react'
 import { pendingNote } from '../lib/bus'
 import { GRAPH_GROUP_TOKENS, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
@@ -18,6 +18,15 @@ const colorOf = (group: string): string => {
   let h = 0
   for (const c of group) h = (h * 31 + c.charCodeAt(0)) % 9973
   return token(GRAPH_GROUP_TOKENS[h % GRAPH_GROUP_TOKENS.length])
+}
+
+/** 链接里的 %20 之类还原成可读文案；坏的百分号编码会抛，原样显示即可 */
+const safeDecode = (s: string): string => {
+  try {
+    return decodeURIComponent(s)
+  } catch {
+    return s
+  }
 }
 
 /** 超过该长度改走 marked 快速渲染（remark 管线解析大表会卡界面 2-4 秒；marked 快一个数量级） */
@@ -304,8 +313,15 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   const [current, setCurrent] = useState<string | null>(null)
   const currentRef = useRef<string | null>(null)
   const [note, setNote] = useState<NoteContent | null>(null)
+  // M-02：读失败以前是 `.catch(() => setNote(null))`，而正文区的渲染条件是 `current && note`，
+  // 于是"读失败 = 什么都不出现"，用户只会反复点同一条
+  const [noteErr, setNoteErr] = useState<string | null>(null)
   const [query, setQuery] = useState('')
-  const [hits, setHits] = useState<SearchHit[]>([])
+  // 搜索三态（H-11）：null=还没有结果（未搜索/检索中），有值才是"这就是全部结果"
+  const [result, setResult] = useState<SearchResult | null>(null)
+  const [searching, setSearching] = useState(false)
+  /** 丢弃迟到的检索响应：输入框改得快时，前一次的结果回来会盖掉后一次 */
+  const searchSeq = useRef(0)
   const [showGraph, setShowGraph] = useState(() => localStorage.getItem('vault.showGraph') !== '0')
   // 三栏宽度：拖过就记住（默认值/上下限见 theme.css 的 --size-tree* / --size-graph-panel*）
   const [treeW, setTreeW] = useState(() => readWidth('vault.treeWidth', '--size-tree', 220))
@@ -362,6 +378,25 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   // 用树里的叶子（= 笔记，原件不进树）计数，入库成功后 watcher 刷新树，引导自动消失
   const vaultEmpty = treeLoaded && countNotes(tree) === 0 && !current
 
+  /**
+   * 读一篇笔记（M-02）。失败时不再一声不吭：正文区渲染错误态（带重试），
+   * 用户点出来的那次还额外给一条 toast——watcher 触发的重读不 toast，
+   * 投递箱跑批期间文件被反复重写，那会变成一串没人看得懂的报错
+   */
+  const readNote = useCallback((path: string, silent = false) => {
+    window.api.vault
+      .read(path)
+      .then((n) => {
+        setNote(n)
+        setNoteErr(null)
+      })
+      .catch((e) => {
+        setNote(null)
+        setNoteErr(errText(e))
+        if (!silent) ui.toast(`打不开这篇笔记：${errText(e)}`, 'error')
+      })
+  }, [])
+
   useEffect(() => {
     if (pendingNote.path) {
       openNote(pendingNote.path, true)
@@ -371,12 +406,12 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     const off = window.api.vault.onChanged(({ path }) => {
       refreshTree()
       setCurrent((cur) => {
-        if (cur === path) window.api.vault.read(path).then(setNote).catch(() => setNote(null))
+        if (cur === path) readNote(path, true)
         return cur
       })
     })
     return off
-  }, [refreshTree])
+  }, [refreshTree, readNote])
 
   // 编辑态的「有未保存改动」提到这一层：NoteView 是 key={current} 挂载的，
   // 换一篇笔记它整个销毁，局部 dirty 跟着没了 —— 改动就这么静默丢掉
@@ -400,7 +435,8 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   const openNoteRaw = useCallback((path: string, reveal = false) => {
     setCurrent(path)
     currentRef.current = path
-    setHits([])
+    setNoteErr(null)
+    setResult(null)
     setQuery('')
     if (reveal) {
       const parts = path.split('/')
@@ -414,8 +450,8 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         return next
       })
     }
-    window.api.vault.read(path).then(setNote).catch(() => setNote(null))
-  }, [])
+    readNote(path)
+  }, [readNote])
 
   const openNote = useCallback(
     async (path: string, reveal = false) => {
@@ -431,6 +467,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     setCurrent(null)
     currentRef.current = null
     setNote(null)
+    setNoteErr(null)
   }, [confirmDiscard])
 
   /** 换库：先问未保存的改动，再确认这次切换本身（H-02 的确认在这里） */
@@ -468,12 +505,37 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     void closeNote()
   }
 
+  /**
+   * H-11 搜索三态。以前是 `hits.length > 0 ? 结果 : <Tree/>`，把「没找到」和「没搜索」
+   * 画成了同一个状态——搜一个库里没有的词，左栏显示的是整棵树，和没搜一样，
+   * 用户只会以为搜索框坏了。现在按 query 分：未搜索→树／检索中→加载态／有词无结果→「没找到」
+   */
   useEffect(() => {
-    if (!query.trim()) {
-      setHits([])
+    const q = query.trim()
+    const my = ++searchSeq.current
+    if (!q) {
+      setResult(null)
+      setSearching(false)
       return
     }
-    const t = setTimeout(() => window.api.vault.search(query).then(setHits), 200)
+    // 防抖那 200ms 加上 worker 排队（大库重建索引时可达数秒）都算"检索中"，
+    // 这段时间必须先把树换下去，否则用户以为输入没生效
+    setSearching(true)
+    const t = setTimeout(() => {
+      window.api.vault
+        .search(q)
+        .then((r) => {
+          if (my !== searchSeq.current) return
+          setResult(r)
+          setSearching(false)
+        })
+        .catch((e) => {
+          if (my !== searchSeq.current) return
+          setResult({ hits: [], total: 0 })
+          setSearching(false)
+          ui.toast(`检索失败：${errText(e)}`, 'error')
+        })
+    }, 200)
     return () => clearTimeout(t)
   }, [query])
 
@@ -589,19 +651,55 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
           </div>
         </div>
         <div className="flex-1 overflow-auto p-2">
-          {hits.length > 0 ? (
-            hits.map((h) => (
-              <button
-                key={h.path}
-                onClick={() => openNote(h.path)}
-                className="mb-1 w-full rounded-lg bg-card p-2 text-left hover:bg-accent-soft"
-              >
-                <div className="text-base font-medium">{h.title}</div>
-                <div className="line-clamp-2 text-xs text-muted">{h.snippet}</div>
-              </button>
-            ))
-          ) : (
+          {!query.trim() ? (
             <Tree nodes={tree} current={current} onOpen={openNote} depth={0} expanded={expanded} onToggle={toggleDir} />
+          ) : searching || !result ? (
+            <div data-testid="search-loading" className="flex items-center gap-2 px-2 py-3 text-sm text-muted">
+              <Loader2 size={13} className="animate-spin" /> 检索中…
+            </div>
+          ) : result.hits.length === 0 ? (
+            <div data-testid="search-empty" className="px-2 py-3">
+              <div className="text-base">
+                没找到「<span className="text-accent">{query.trim()}</span>」
+              </div>
+              <div className="mt-1 text-xs text-muted">换个说法，或清空搜索回到文件树</div>
+              <button
+                data-testid="search-clear"
+                onClick={() => setQuery('')}
+                className="mt-2.5 rounded-full border border-line px-2.5 py-0.5 text-xs hover:bg-hover"
+              >
+                清空搜索
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* M-13：结果静默截断到 20 条，不给总数的话"只有这些"和"还有很多"长得一样 */}
+              <div
+                data-testid="search-count"
+                className="mb-1.5 flex items-center justify-between px-1 text-xs text-muted"
+              >
+                <span>
+                  {result.hits.length} / 共 {result.total} 条
+                </span>
+                <button
+                  data-testid="search-clear"
+                  onClick={() => setQuery('')}
+                  className="shrink-0 hover:text-accent"
+                >
+                  清空
+                </button>
+              </div>
+              {result.hits.map((h) => (
+                <button
+                  key={h.path}
+                  onClick={() => openNote(h.path)}
+                  className="mb-1 w-full rounded-lg bg-card p-2 text-left hover:bg-accent-soft"
+                >
+                  <div className="text-base font-medium">{h.title}</div>
+                  <div className="line-clamp-2 text-xs text-muted">{h.snippet}</div>
+                </button>
+              ))}
+            </>
           )}
         </div>
       </div>
@@ -615,18 +713,22 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         onCommit={(w) => localStorage.setItem('vault.treeWidth', String(Math.round(w)))}
       />
 
-      {/* 正文（可关闭） */}
-      {current && note && (
+      {/* 正文（可关闭）；读不出来时占同一块位置给错误态，而不是一片空白 */}
+      {current && (note || noteErr) && (
         <div className="min-w-0 flex-1 overflow-hidden">
-          <NoteView
-            key={current}
-            path={current}
-            note={note}
-            onOpenLink={openNote}
-            onDelete={deleteNote}
-            onClose={closeNote}
-            onDirty={onDirty}
-          />
+          {note ? (
+            <NoteView
+              key={current}
+              path={current}
+              note={note}
+              onOpenLink={openNote}
+              onDelete={deleteNote}
+              onClose={closeNote}
+              onDirty={onDirty}
+            />
+          ) : (
+            <NoteError path={current} error={noteErr!} onRetry={() => readNote(current)} onClose={closeNote} />
+          )}
         </div>
       )}
 
@@ -665,6 +767,49 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
           </div>
         )
       )}
+    </div>
+  )
+}
+
+/**
+ * 笔记读取失败的正文区（M-02）。失败原因大多是可恢复的（文件被 Obsidian 锁着、
+ * 权限不对、库被移走），所以主操作是「重试」而不是让用户自己去猜。
+ */
+function NoteError({
+  path,
+  error,
+  onRetry,
+  onClose,
+}: {
+  path: string
+  error: string
+  onRetry: () => void
+  onClose: () => void
+}) {
+  return (
+    <div
+      data-testid="note-error"
+      className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center"
+    >
+      <FileWarning size={26} className="text-danger" />
+      <div className="text-lg font-medium">这篇笔记打不开</div>
+      <div className="max-w-md break-all text-sm text-muted">{path}</div>
+      <div className="max-w-md break-all text-sm text-danger">{error}</div>
+      <div className="mt-1 flex gap-2">
+        <button
+          data-testid="note-retry"
+          onClick={onRetry}
+          className="flex items-center gap-1.5 rounded-full bg-accent px-4 py-1.5 text-base text-on-solid hover:opacity-90"
+        >
+          <RotateCcw size={13} /> 重试
+        </button>
+        <button
+          onClick={onClose}
+          className="rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover"
+        >
+          关闭
+        </button>
+      </div>
     </div>
   )
 }
@@ -922,7 +1067,10 @@ function NoteView({
           return
         }
       }
-      await window.api.vault.openFile(href, path)
+      // M-04：openFile 的返回值以前被直接丢掉——链接指向已移动/改名的附件时，
+      // 点了纯粹没反应，用户只会以为是应用坏了
+      const ok = await window.api.vault.openFile(href, path)
+      if (!ok) ui.toast(`找不到文件：${safeDecode(href)}`, 'error')
     }
   }
 

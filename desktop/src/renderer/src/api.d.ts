@@ -136,6 +136,8 @@ interface GraphData {
 interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
+  /** 这条 assistant 消息是错误提示（M-11）：气泡里要挂「重试」，复用上一条 user 消息重发 */
+  error?: boolean
 }
 
 interface Conversation {
@@ -170,6 +172,12 @@ interface SearchHit {
   path: string
   title: string
   snippet: string
+}
+
+/** 检索结果：hits 被截断到 20 条，total 是截断前的命中总数（M-13，UI 显示「20 / 共 137 条」） */
+interface SearchResult {
+  hits: SearchHit[]
+  total: number
 }
 
 interface Window {
@@ -209,7 +217,7 @@ interface Window {
       openStored: () => Promise<VaultOpenResult | null>
       tree: () => Promise<VaultTreeNode[]>
       graph: () => Promise<GraphData>
-      search: (q: string) => Promise<SearchHit[]>
+      search: (q: string) => Promise<SearchResult>
       read: (relPath: string) => Promise<NoteContent>
       resolveLink: (target: string) => Promise<string | null>
       readRaw: (relPath: string) => Promise<string>
@@ -279,7 +287,10 @@ interface Window {
     }
     artifacts: {
       list: () => Promise<ArtifactInfo[]>
-      open: (relPath: string) => Promise<void>
+      /** ok=false 时 error 是原因（没装对应应用 / 文件已被删），渲染层要 toast（M-05） */
+      open: (relPath: string) => Promise<{ ok: boolean; error?: string }>
+      /** 打不开时的兜底：在 Finder 里定位这个产物 */
+      reveal: (relPath: string) => Promise<void>
       readText: (relPath: string) => Promise<string>
       ingest: (relPath: string) => Promise<{ ok: boolean; error?: string }>
       ingested: () => Promise<Record<string, { at: number; noteRel?: string }>>

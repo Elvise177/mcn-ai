@@ -2,7 +2,7 @@
 
 > 日期：2026-08-16 ｜ 范围：`desktop/` 渲染层 + 与之直接相关的主进程链路 ｜ 性质：**只读审计，未改任何代码**
 > 方法：从代码出发，遍历渲染层所有会触发主进程异步操作的交互，逐个核对「进行中 / 成功 / 失败+重试」三态；再按状态覆盖、可达性与可逆性、一致性、键盘效率四个维度扫一遍全部页面与组件。
-> **状态（2026-08-16 更新）**：H-01 ~ H-06 已修复（HANDOFF §2-10）；H-07 / H-08 / 产物入库反馈 随「全局任务状态层一期」落地（§2-11）；**H-09 / H-10 / H-13 / M-01 / M-03 / M-27 随二期落地（§2-14）**，均已跑完打包形态 + 真实 AI 的 GUI 走查。其余条目仍未动。
+> **状态（2026-08-16 更新）**：H-01 ~ H-06 已修复（HANDOFF §2-10）；H-07 / H-08 / 产物入库反馈 随「全局任务状态层一期」落地（§2-11）；**H-09 / H-10 / H-13 / M-01 / M-03 / M-27 随二期落地（§2-14）**，均已跑完打包形态 + 真实 AI 的 GUI 走查。**批次三（精选包，§2-15）再做掉 H-11 / H-12 / M-02 / M-04 / M-05 / M-11 / M-13 / L-03**。至此高严重度 13 条全部清零。其余条目仍未动。
 > 未复核（按要求跳过）：**产物入库后工作台无进度反馈**（已有修复方案待执行）。
 > 关联已知问题：**无离线降级（HANDOFF bug#1，P0）** 不重复分析，但下文 M-01 记录了它在登录界面的一个未被 bug#1 覆盖的表现（无超时/无取消）。
 
@@ -80,13 +80,13 @@
 - **建议**：「哪些 session 正在流」提到 `App` 层由主进程事件驱动；`send` 时若该 session 已在跑则拒绝或先 abort。
 - **维度**：1 三态 / 2 状态覆盖 ｜ **严重度：高**
 
-### H-11 搜索没有结果时，直接显示完整文件树，没有「没找到」
+### H-11 搜索没有结果时，直接显示完整文件树，没有「没找到」 ✅ 2026-08-16 已修（批次三：三态 + 结果计数）
 - **现象**：在知识库搜一个库里没有的词，左栏显示的是整棵文件树 —— 和没搜一样，用户以为搜索框坏了或者没生效。
 - **根因**：[VaultPage.tsx:535](desktop/src/renderer/src/pages/VaultPage.tsx:535) `hits.length > 0 ? 结果列表 : <Tree/>`，把「无结果」和「未搜索」画成了同一个状态；搜索期间也没有加载态（200ms 防抖 + worker 可能排队数秒，[searcher.ts:59](desktop/src/main/vault/searcher.ts:59)）。
 - **建议**：按 `query.trim()` 是否为空分三态：未搜索→树；搜索中→骨架/「检索中…」；有词无结果→「没找到『X』」+ 清空按钮。
 - **维度**：2 状态覆盖 ｜ **严重度：高**
 
-### H-12 建库/选库失败或耗时长，向导会永久卡在灰掉的状态
+### H-12 建库/选库失败或耗时长，向导会永久卡在灰掉的状态 ✅ 2026-08-16 已修（批次三：try/finally + 错误 toast + busy 文案）
 - **现象**：点「新建库」，如果创建或首次索引出错，两张卡片就一直是半透明不可点，没有任何报错，只能重启。大库正常扫描时也只是 opacity-60，没有「正在索引…」，容易被当成卡死而反复点。
 - **根因**：[VaultWizard.tsx:12](desktop/src/renderer/src/components/VaultWizard.tsx:12)–17 的 `pick()` 无 try/catch/finally，`vault:createNew` 抛错时 `setBusy(false)` 不会执行；busy 态也没有文案变化。
 - **建议**：`try/finally` + 错误 toast；busy 时把卡片文案换成「正在创建/索引…」并给 spinner。
@@ -107,16 +107,16 @@
 **M-01 登录没有超时，也不能取消** ✅ 2026-08-16 已修（10s 超时 + 可取消 + network/credential/timeout 分类）
 Supabase 暂停或断网时 `signInWithPassword` 会长时间挂起，按钮定格在「登录中…」（[LoginGate.tsx:17](desktop/src/renderer/src/pages/LoginGate.tsx:17)–25），没有超时、没有取消、没有「网络不通」的区分文案。属于已知 bug#1 的表现之一，但 bug#1 记的是启动链路，这一条在登录界面。**建议**：加 10s 超时 + 可取消 + 明确区分「网络不可达」和「账号密码错」。
 
-**M-02 点了文件树里的笔记，读取失败时界面毫无反应**
+**M-02 点了文件树里的笔记，读取失败时界面毫无反应** ✅ 2026-08-16 已修（toast + 正文区错误态带重试）
 [VaultPage.tsx:382](desktop/src/renderer/src/pages/VaultPage.tsx:382) `.catch(() => setNote(null))`，而正文区的渲染条件是 `current && note`（:562），所以读失败=什么都不出现，用户会反复点同一条。**建议**：catch 里 toast + 在正文区渲染错误态。
 
 **M-03 云端同步失败完全无感知，且 HANDOFF 说的重试队列在代码里不存在** ✅ 2026-08-16 已修（队列 + 退避 1m/5m/30m→转手动 + Dock「重试同步」）
 `syncConversation` 整个 try 包一个空 catch（[client.ts:93](desktop/src/main/knowledge/client.ts:93)），设置页却写着「账号（云端同步：私人知识层 + 聊天记录）」。离线一整天，用户以为记录都在云上。**建议**：同步状态提到 UI（侧栏一个小圆点足够），失败落队列或至少给一次提示。
 
-**M-04 打开库内附件（PDF 等）失败无提示**
+**M-04 打开库内附件（PDF 等）失败无提示** ✅ 2026-08-16 已修（`找不到文件：<路径>`）
 `vault.openFile` 返回 boolean 表示是否找到文件，调用方直接丢弃（[VaultPage.tsx:773](desktop/src/renderer/src/pages/VaultPage.tsx:773)）。链接指向已移动的文件时，点了纯粹没反应。**建议**：`if (!ok) ui.toast('找不到文件：…','error')`。
 
-**M-05 产物「打开」失败无提示**
+**M-05 产物「打开」失败无提示** ✅ 2026-08-16 已修（错误回传 + toast 附「在 Finder 中显示」）
 `shell.openPath` 的返回值（失败时是错误字符串）被忽略（[artifacts.ts:64](desktop/src/main/agent/artifacts.ts:64)–67）。系统里没装 Keynote/Office 时点「打开」毫无反应。**建议**：把 openPath 的错误回传并 toast，附「在 Finder 中显示」兜底。
 
 **M-06 拖拽入库失败是静默的**
@@ -136,13 +136,13 @@ Supabase 暂停或断网时 `signInWithPassword` 会长时间挂起，按钮定�
 **M-10 上次的库找不到了 → 一声不吭掉进建库向导，且与工作台状态不一致**
 `vault:openStored` 内部 try/catch 返回 null（[ipc.ts:147](desktop/src/main/ipc.ts:147)–155），知识库页据此渲染向导（[VaultPage.tsx:99](desktop/src/renderer/src/pages/VaultPage.tsx:99)–106），不说明"库路径已失效"；与此同时 App 只看 `settings.get().vaultPath` 是否存在就判定 `vaultState='ready'`（[App.tsx:77](desktop/src/renderer/src/App.tsx:77)），工作台照常表现为有库。**建议**：openStored 返回失败原因，向导顶部给「上次的库（路径）打不开了」。
 
-**M-11 AI 回答出错后没有重试入口**
+**M-11 AI 回答出错后没有重试入口** ✅ 2026-08-16 已修（错误气泡内「重试」，复用上一条 user 消息，不复制提问）
 错误只作为一条 `⚠️ …` 的 assistant 消息落进历史（[App.tsx:87](desktop/src/renderer/src/App.tsx:87)–89），用户要重试只能把刚才那段话重新打一遍。**建议**：错误气泡内附「重试」按钮，复用上一条 user 消息。
 
 **M-12 产物列表被硬截断到 30 条，界面上看不出还有更多**
 [artifacts.ts:61](desktop/src/main/agent/artifacts.ts:61) `.slice(0, 30)`，面板既没有"更多"，也没有"打开 90_产物 目录"的入口。用久了旧产物就从界面上消失了。**建议**：面板底部加「在 Finder 中打开 90_产物」。
 
-**M-13 搜索结果同样静默截断到 20 条，且没有结果计数**
+**M-13 搜索结果同样静默截断到 20 条，且没有结果计数** ✅ 2026-08-16 已修（`vault:search` 返回 total，头部显示「N / 共 M 条」）
 [search-worker.ts:90](desktop/src/main/vault/search-worker.ts:90) `.slice(0, 20)`；UI 也不显示"共 N 条"。**建议**：返回总数，列表头显示「20 / 137 条」。
 
 **M-14 点开搜索结果，查询词被清空、结果列表消失，回不去**
@@ -227,7 +227,7 @@ watcher 触发时会重新 `read` 并 `setNote`（[VaultPage.tsx:355](desktop/sr
 |---|---|---|---|
 | L-01 | 目录名过长会折行成多行（叶子节点有 truncate，目录节点没有） | [VaultPage.tsx:634](desktop/src/renderer/src/pages/VaultPage.tsx:634) | 加 `truncate` + `title` |
 | L-02 | 深层目录缩进无上限，`8 + depth*14`，220px 栏里第 8 层几乎没有可读宽度 | [VaultPage.tsx:637](desktop/src/renderer/src/pages/VaultPage.tsx:637) | 缩进封顶或超深时折叠中间层 |
-| L-03 | toast 固定 3.2s、点不掉、堆叠无上限，连点多次会糊满顶部 | [ui.tsx:44](desktop/src/renderer/src/components/ui.tsx:44)–48 | 点击关闭 + 最多 3 条 |
+| ~~L-03~~ ✅ | toast 固定 3.2s、点不掉、堆叠无上限，连点多次会糊满顶部 | [ui.tsx](desktop/src/renderer/src/components/ui.tsx) | **已修**：同屏最多 3 条 + 点击关闭 + 悬停暂停倒计时 |
 | L-04 | 产物「预览」展开后没有收起入口，只能预览另一篇来换掉 | [Workbench.tsx:435](desktop/src/renderer/src/pages/Workbench.tsx:435) | 按钮改切换态「预览 / 收起」 |
 | L-05 | 附件按钮是假控件（点了 toast「即将支持」），且提示语引导了 H-01 的危险动作 | [Workbench.tsx:285](desktop/src/renderer/src/pages/Workbench.tsx:285)–291 | 改 disabled + tooltip，删掉"拖进窗口"的措辞 |
 | L-06 | 新建笔记落在"当前打开笔记所在目录"，弹窗里不说落到哪 | [VaultPage.tsx:391](desktop/src/renderer/src/pages/VaultPage.tsx:391)–397 | 弹窗副标题显示目标目录 |
@@ -273,4 +273,9 @@ watcher 触发时会重新 `read` 并 `setNote`（[VaultPage.tsx:355](desktop/sr
 设计 `docs/DESIGN-task-state.md` §3.3 原本把它和 H-09 绑在一起放二期，二期实施时只做了 H-09 那半——**停止生成保留半截靠的是主进程内存里的 draft，够用**；落盘那半只服务另一个场景：**生成中应用崩溃/被强杀，重启后把 `tasks.json` 里未完成的 draft 补成一条尾标「（应用重启，本次回答已中断）」的 assistant 消息**。
 现状是那段正文随进程一起没了，用户重开只看到自己那条提问、没有任何回答，也不知道发生过什么。
 不排期的理由：触发条件是崩溃，而崩溃本身在当前版本没有已知的高频来源；单独做要新开一张落盘表 + 一条启动时的补写路径，性价比低。
+**T-02 同一次 AI 失败会显示两条气泡，其中一条是英文原始错误**（低优先级，2026-08-16 批次三走查发现）
+SDK 出错时先吐一条 `result` 消息（内容就是英文报错，如 `Failed to authenticate. API Error: 401 …`），我们把它当成正常回答落进对话；紧接着 `for await` 抛出，又落一条 `⚠️ Error: …`。用户看到的是同一件事说两遍，且第一条是纯英文技术文案（截图 41c/41d 里看得很清楚）。
+M-11 的重试已经会把这一轮的两条一并撤掉，所以不会越堆越多；剩下的是「一次失败该显示成什么样」。
+**建议**：`result` 分支在 `subtype !== 'success'` 时不落普通气泡（或直接并进 ⚠️ 那条），并把 SDK 的英文报错映射成中文说明（鉴权失败 / 额度不足 / 连不上），原文收进诊断日志。
+
 **建议**：与将来任何 agent 相关的改动顺手做——那时 `AgentTask` 已经在手边，落盘 + 启动补写合起来是几十行。落地时注意设计 §3.3 的判据：**「进行中」永不落盘**，这里落的是"上次退出时残留的 draft"，启动读完即清，不能变成一个永不结束的幽灵任务。

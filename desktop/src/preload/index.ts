@@ -79,6 +79,7 @@ const chat = {
 const artifacts = {
   list: () => ipcRenderer.invoke('artifacts:list'),
   open: (relPath: string) => ipcRenderer.invoke('artifacts:open', relPath),
+  reveal: (relPath: string) => ipcRenderer.invoke('artifacts:reveal', relPath),
   readText: (relPath: string) => ipcRenderer.invoke('artifacts:readText', relPath),
   ingest: (relPath: string) => ipcRenderer.invoke('artifacts:ingest', relPath),
   ingested: () => ipcRenderer.invoke('artifacts:ingested'),
