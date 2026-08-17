@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Library, Settings as SettingsIcon, Plus } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Library, Settings as SettingsIcon, Plus, ChevronRight, AlertTriangle } from 'lucide-react'
 import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
+import UsagePage from './pages/UsagePage'
 import LoginGate from './pages/LoginGate'
 import { ui } from './components/ui'
 import { VaultWizard } from './components/VaultWizard'
@@ -13,7 +14,7 @@ import { startTaskSync, useTask } from './hooks/useTasks'
 import { TaskDock } from './components/TaskDock'
 import { OfflineBar } from './components/OfflineBar'
 
-type Page = 'workbench' | 'vault' | 'settings'
+type Page = 'workbench' | 'vault' | 'settings' | 'usage'
 
 const APP_VERSION = 'v0.1.0'
 
@@ -27,6 +28,9 @@ const newConv = (): Conversation => ({
   title: '新对话',
   messages: [],
   updatedAt: Date.now(),
+  // 档位按会话记忆，新会话一律回到标准档——上一个会话开了增强就一直增强下去，
+  // 是最容易把钱烧掉又没人察觉的形态
+  tier: 'standard',
 })
 
 export default function App() {
@@ -39,6 +43,9 @@ export default function App() {
   const [localMode, setLocalMode] = useState(() => localStorage.getItem('localMode') === '1')
   const [vaultState, setVaultState] = useState<'loading' | 'none' | 'ready'>('loading')
   const [vaultSkipped, setVaultSkipped] = useState(() => localStorage.getItem('vaultSkipped') === '1')
+  // 管理员区解锁态：**只存内存**，重启即复位。放在 App 而不是设置页里，
+  // 是为了让"去用量页看一眼再回来"不至于把刚解开的锁又锁上
+  const [adminUnlocked, setAdminUnlocked] = useState(false)
   // 昵称是渲染层自己的资料（云端只给邮箱），设置页可改，问候语与侧栏身份行都用它
   const [nickname, setNick] = useState<string | undefined>(getNickname)
 
@@ -150,7 +157,7 @@ export default function App() {
   const handleSend = useCallback(
     async (text: string): Promise<boolean> => {
       const base = activeRef.current
-      const r = await window.api.chat.send(base.id, text, base.sdkSessionId)
+      const r = await window.api.chat.send(base.id, text, base.sdkSessionId, base.tier ?? 'standard')
       if (r && r.ok === false) {
         ui.toast(r.error ?? '这个对话还在生成中', 'error', {
           label: '停止当前生成',
@@ -173,12 +180,23 @@ export default function App() {
     [upsert]
   )
 
+  /** 改档位：落到会话对象上（随对话一起持久化），下一次发送才生效 */
+  const handleTierChange = useCallback(
+    (tier: TierId) => {
+      const base = activeRef.current
+      if ((base.tier ?? 'standard') === tier) return
+      upsert({ ...base, tier, updatedAt: Date.now() })
+    },
+    [upsert]
+  )
+
   /**
    * M-11 重试：复用错误气泡前面那条 user 消息重发，成功受理后把错误气泡从历史里去掉
    * （用户那条提问原样留着，等新回答落进来）。顺序同 handleSend——先问主进程收不收。
+   * `tier` 传值 = 换档重试（增强档线路挂了时的出口），换档同时也改掉会话的记忆值。
    */
   const handleRetry = useCallback(
-    async (index: number): Promise<boolean> => {
+    async (index: number, tier?: TierId): Promise<boolean> => {
       const base = activeRef.current
       // 撤的是**这一轮失败留下的全部内容**，不只是 ⚠️ 那一条：SDK 出错时往往先吐一条
       // 原始错误正文（英文 result）再抛异常，只删 ⚠️ 的话每重试一次就多堆一条（走查截图抓到）。
@@ -186,10 +204,16 @@ export default function App() {
       const lastUserIdx = base.messages.slice(0, index).map((m) => m.role).lastIndexOf('user')
       if (lastUserIdx < 0) return false
       const lastUser = base.messages[lastUserIdx]
+      const nextTier = tier ?? base.tier ?? 'standard'
       // **先撤气泡再发**：send 的 await 还没返回，新的 error/assistant 事件就可能已经落进来了，
       // 那时再拿发送前的快照 upsert，等于把刚到的新回答一起抹掉
-      upsert({ ...base, messages: base.messages.slice(0, lastUserIdx + 1), updatedAt: Date.now() })
-      const r = await window.api.chat.send(base.id, lastUser.text, base.sdkSessionId)
+      upsert({
+        ...base,
+        tier: nextTier,
+        messages: base.messages.slice(0, lastUserIdx + 1),
+        updatedAt: Date.now(),
+      })
+      const r = await window.api.chat.send(base.id, lastUser.text, base.sdkSessionId, nextTier)
       if (r && r.ok === false) {
         // 被拒就把错误气泡放回去，别让用户以为重试已经发出去了
         upsert({ ...base, updatedAt: Date.now() })
@@ -357,6 +381,7 @@ export default function App() {
                 setActive(c)
                 setPage('workbench')
               }}
+              onTierChange={handleTierChange}
             />
           )}
           {page === 'vault' && <VaultPage />}
@@ -369,8 +394,12 @@ export default function App() {
                 setNickname(v)
                 setNick(getNickname())
               }}
+              onOpenUsage={() => setPage('usage')}
+              adminUnlocked={adminUnlocked}
+              onUnlockAdmin={() => setAdminUnlocked(true)}
             />
           )}
+          {page === 'usage' && <UsagePage onBack={() => setPage('settings')} />}
         </div>
       </main>
     </div>
@@ -378,124 +407,96 @@ export default function App() {
 }
 
 /**
- * 模型线路（provider）：inferera 中转站 / DeepSeek 官方 / 自定义 base URL。
- * 模型名显式可见可改——DeepSeek 官方端点对不认识的模型名是**静默降级到 flash**，
- * 不显示出来用户永远不知道自己在用哪个模型。
+ * 设置页四组卡片共用的外壳。样式沿用现有 design token，不新造。
  */
-function ProviderCard({ onChanged, tick }: { onChanged: () => void; tick: number }) {
-  const [current, setCurrent] = useState<ProviderId>('inferera')
-  const [providers, setProviders] = useState<AiProvider[]>([])
-  const [draft, setDraft] = useState({ baseUrl: '', model: '', fastModel: '' })
-
-  const load = useCallback((): void => {
-    void window.api.ai.providers().then((r) => {
-      setCurrent(r.current)
-      setProviders(r.providers)
-      const active = r.providers.find((p) => p.id === r.current)
-      if (active) setDraft({ baseUrl: active.baseUrl, model: active.model, fastModel: active.fastModel })
-    })
-  }, [])
-  // tick 由设置页在「保存 key / 重新获取配置」之后 +1：否则卡片上的「未配置 key」
-  // 会一直停在挂载那一刻的状态，跟上面那行「已就绪 ✓」自相矛盾
-  useEffect(load, [load, tick])
-
-  const active = providers.find((p) => p.id === current)
-
-  const switchTo = async (id: ProviderId): Promise<void> => {
-    const r = await window.api.ai.setProvider(id)
-    setCurrent(id)
-    setDraft({ baseUrl: r.provider.baseUrl, model: r.provider.model, fastModel: r.provider.fastModel })
-    load()
-    onChanged()
-    ui.toast(`已切换到「${r.provider.label}」`)
-  }
-
-  const saveConfig = async (): Promise<void> => {
-    const r = await window.api.ai.setProviderConfig(current, draft)
-    setDraft({ baseUrl: r.provider.baseUrl, model: r.provider.model, fastModel: r.provider.fastModel })
-    load()
-  }
-
+function Card({ title, testId, children }: { title: string; testId?: string; children: ReactNode }) {
   return (
-    <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6" data-testid="provider-card">
-      <div className="text-md font-medium">模型线路</div>
-      <div className="space-y-1.5">
-        {providers.map((p) => (
-          <button
-            key={p.id}
-            data-testid={`provider-${p.id}`}
-            onClick={() => void switchTo(p.id)}
-            className={`flex w-full items-start gap-2.5 rounded-md border px-3 py-2 text-left ${
-              p.id === current ? 'border-accent bg-accent-soft' : 'border-line bg-bg hover:bg-hover'
-            }`}
-          >
-            <span className="mt-1 h-2 w-2 shrink-0 rounded-full" style={{ background: p.id === current ? 'var(--color-accent)' : 'var(--color-line)' }} />
-            <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-2 text-base font-medium">
-                {p.label}
-                {p.hasKey ? (
-                  <span className="text-xs text-muted">key 已配置</span>
-                ) : (
-                  <span className="text-xs text-warn">未配置 key</span>
-                )}
-              </span>
-              <span className="block text-sm leading-5 text-muted">{p.hint}</span>
-            </span>
-          </button>
-        ))}
-      </div>
-      {active && (
-        <div className="space-y-2 border-t border-line pt-3">
-          <div className="flex items-center gap-2 text-md">
-            <span className="w-20 shrink-0 text-muted">base URL</span>
-            <input
-              data-testid="provider-baseurl"
-              value={draft.baseUrl}
-              onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
-              onBlur={() => void saveConfig()}
-              placeholder="https://…"
-              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
-            />
-          </div>
-          <div className="flex items-center gap-2 text-md">
-            <span className="w-20 shrink-0 text-muted">主模型</span>
-            <input
-              data-testid="provider-model"
-              value={draft.model}
-              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-              onBlur={() => void saveConfig()}
-              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
-            />
-          </div>
-          <div className="flex items-center gap-2 text-md">
-            <span className="w-20 shrink-0 text-muted">轻量模型</span>
-            <input
-              data-testid="provider-fastmodel"
-              value={draft.fastModel}
-              onChange={(e) => setDraft({ ...draft, fastModel: e.target.value })}
-              onBlur={() => void saveConfig()}
-              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
-            />
-          </div>
-          <div className="text-sm leading-5 text-muted">
-            模型名会显式发给服务端，不依赖线路的自动映射（DeepSeek 官方端点遇到不认识的模型名会静默降级到
-            deepseek-v4-flash）。留空则回到该线路的默认值。
-          </div>
-        </div>
-      )}
+    <div data-testid={testId} className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
+      <div className="text-md font-medium">{title}</div>
+      {children}
     </div>
   )
 }
 
-/** 知识入库设置：AI 产物是否自动送入投递箱转为可检索知识 */
-function IngestCard() {
+/**
+ * 模型服务（普通模式）。
+ *
+ * 这里**只说一句话**：好，或者不好。线路地址、模型串、各线路的 key 全部下沉到管理员区——
+ * 老板需要知道的是"能不能用"，让他在一堆 base URL 里判断服务健康度只会产生误操作。
+ */
+function ModelServiceCard({ ready, onRefresh }: { ready: boolean; onRefresh: () => void }) {
+  const [busy, setBusy] = useState(false)
+  return (
+    <Card title="模型服务" testId="settings-group-model">
+      {ready ? (
+        <div data-testid="ai-ready" className="text-md">
+          AI 服务：<span className="text-accent">已就绪 ✓</span>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-3">
+          <span data-testid="ai-broken" className="flex items-center gap-1.5 text-md">
+            <AlertTriangle size={14} className="shrink-0 text-warn" />
+            AI 服务：<span className="text-warn">服务异常</span>
+          </span>
+          <button
+            data-testid="ai-reconnect"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true)
+              const r = await window.api.auth.provision()
+              setBusy(false)
+              onRefresh()
+              if (r.ok) ui.toast('AI 服务已恢复')
+              else ui.toast(`重新连接失败：${r.error ?? '未知原因'}`, 'error')
+            }}
+            className="shrink-0 rounded-full border border-line px-3 py-1 text-sm hover:bg-hover disabled:opacity-60"
+          >
+            {busy ? '连接中…' : '重新连接'}
+          </button>
+        </div>
+      )}
+      <div className="text-sm leading-5 text-muted">
+        {ready
+          ? '对话与产物生成随时可用。发消息时可在输入框左侧切换「标准 / 增强」两种模式。'
+          : '暂时无法对话。点「重新连接」重新获取配置；仍不行请联系管理员。'}
+      </div>
+    </Card>
+  )
+}
+
+/** 用量入口卡片：一行摘要 + 进详情页。气泡里不显示任何用量数字（那是干扰） */
+function UsageCard({ onOpen }: { onOpen: () => void }) {
+  const [s, setS] = useState<UsageSummary | null>(null)
+  useEffect(() => {
+    void window.api.usage.summary().then(setS)
+  }, [])
+  return (
+    <Card title="用量" testId="settings-group-usage">
+      <button
+        data-testid="open-usage"
+        onClick={onOpen}
+        className="flex w-full items-center justify-between rounded-md bg-bg px-3 py-2.5 text-left hover:bg-hover"
+      >
+        <span data-testid="usage-brief" className="text-md">
+          本月对话 {s?.chatCount ?? 0} 次 · 产物 {s?.artifactCount ?? 0} 个
+        </span>
+        <ChevronRight size={15} className="shrink-0 text-muted" />
+      </button>
+      <div className="text-sm leading-5 text-muted">
+        用量记录只保存在本机，用来估算消耗；两种模式的差距可在详情页对比。
+      </div>
+    </Card>
+  )
+}
+
+/** 知识入库：AI 产物是否自动送入投递箱转为可检索知识 */
+function IngestSection() {
   const [auto, setAuto] = useState(false)
   useEffect(() => {
     window.api.settings.get().then((s) => setAuto(s.artifactAutoIngest))
   }, [])
   return (
-    <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
-      <div className="text-md font-medium">知识入库</div>
+    <div className="space-y-2">
       <label className="flex cursor-pointer items-center gap-2 text-md">
         <input
           type="checkbox"
@@ -516,7 +517,7 @@ function IngestCard() {
 }
 
 /** 投递箱分流：客户可自助配置「投递箱子文件夹 → 落位目录」规则，无需碰配置文件 */
-function RoutesCard() {
+function RoutesSection() {
   const [routes, setRoutesState] = useState<Array<{ name: string; dest: string; builtin?: boolean }>>([])
   const [newName, setNewName] = useState('')
   const [newDest, setNewDest] = useState('')
@@ -537,8 +538,8 @@ function RoutesCard() {
   }
 
   return (
-    <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
-      <div className="text-md font-medium">投递箱分流</div>
+    <div className="space-y-3 border-t border-line pt-4">
+      <div className="text-md">投递箱分流</div>
       <div className="text-sm leading-5 text-muted">
         往「投递箱 / 某文件夹」丢文件，会自动转成笔记放进对应目录（不做业务打标）。适合参考书、竞品资料等外部内容。
       </div>
@@ -595,28 +596,195 @@ function RoutesCard() {
   )
 }
 
-function SettingsPage({
-  account,
-  onLogout,
-  nickname,
-  onNickname,
-}: {
-  account: { loggedIn: boolean; email?: string }
-  onLogout: () => void
-  nickname?: string
-  onNickname: (v: string) => void
-}) {
-  const [hasKey, setHasKey] = useState(false)
-  const [manualKey, setManualKey] = useState(false)
-  const [apiBase, setApiBase] = useState('')
-  const [nick, setNickDraft] = useState(nickname ?? '')
+/**
+ * 管理员区里的单个档位映射。
+ *
+ * 定位是**运维应急**：换模型串、临时把某一档切到备用线路（如 inferera）。
+ * 界面上的两档语义不变——改的是"这一档走哪条线"，不是"这一档是什么档"。
+ */
+function TierConfigRow({ tier, onChanged }: { tier: AiTier; onChanged: () => void }) {
+  const [draft, setDraft] = useState({ baseUrl: tier.baseUrl, model: tier.model, fastModel: tier.fastModel })
   const [keyDraft, setKeyDraft] = useState('')
+  const [health, setHealth] = useState<TierHealth | null>(null)
+  const [checking, setChecking] = useState(false)
+
+  useEffect(() => {
+    setDraft({ baseUrl: tier.baseUrl, model: tier.model, fastModel: tier.fastModel })
+  }, [tier.baseUrl, tier.model, tier.fastModel])
+
+  const saveConfig = async (): Promise<void> => {
+    const r = await window.api.ai.setTierConfig(tier.id, draft)
+    setDraft({ baseUrl: r.tier.baseUrl, model: r.tier.model, fastModel: r.tier.fastModel })
+    onChanged()
+  }
+
+  const field = (label: string, key: 'baseUrl' | 'model' | 'fastModel'): ReactNode => (
+    <div className="flex items-center gap-2 text-md">
+      <span className="w-20 shrink-0 text-muted">{label}</span>
+      <input
+        data-testid={`tier-${key.toLowerCase()}-${tier.id}`}
+        value={draft[key]}
+        onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+        onBlur={() => void saveConfig()}
+        placeholder={key === 'baseUrl' ? 'https://…' : ''}
+        className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+      />
+    </div>
+  )
+
+  return (
+    <div data-testid={`tier-config-${tier.id}`} className="space-y-2 rounded-lg bg-bg p-4">
+      <div className="flex items-center gap-2">
+        <span className="text-base font-medium">{tier.label}</span>
+        {tier.usingSharedKey ? (
+          // 回落态要说清楚：这一档用的是中转站那把共享 key，不是它自己的
+          <span className="text-xs text-muted" data-testid={`tier-shared-key-${tier.id}`}>
+            复用中转站密钥
+          </span>
+        ) : tier.hasKey ? (
+          <span className="text-xs text-muted">key 已配置</span>
+        ) : (
+          <span className="text-xs text-warn">未配置 key</span>
+        )}
+        {tier.overridden && <span className="text-xs text-muted">已被运维改过</span>}
+      </div>
+      {field('base URL', 'baseUrl')}
+      {field('主模型', 'model')}
+      {field('轻量模型', 'fastModel')}
+      <div className="flex items-center gap-2 text-md">
+        <span className="w-20 shrink-0 text-muted">API Key</span>
+        <input
+          data-testid={`tier-key-input-${tier.id}`}
+          value={keyDraft}
+          onChange={(e) => setKeyDraft(e.target.value)}
+          type="password"
+          placeholder={tier.hasKey ? '已配置（填入新值可覆盖）' : 'sk-…'}
+          className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+        />
+        <button
+          data-testid={`tier-key-save-${tier.id}`}
+          onClick={async () => {
+            const k = keyDraft.trim()
+            if (!k) return ui.toast('请先填写 API Key', 'error')
+            try {
+              const r = await window.api.settings.setKey(k, tier.id)
+              setKeyDraft('')
+              onChanged()
+              ui.toast(
+                r.outcome === 'unchanged' ? 'Key 与当前值相同，未重复写入' : 'Key 已生效，正在后台安全保存'
+              )
+            } catch (e) {
+              ui.toast(`保存失败：${errText(e)}`, 'error')
+            }
+          }}
+          className="shrink-0 rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover"
+        >
+          保存
+        </button>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          data-testid={`tier-check-${tier.id}`}
+          disabled={checking}
+          onClick={async () => {
+            setChecking(true)
+            // force=true：管理员刚改完配置，这里必须绕过那 5 分钟缓存
+            const h = await window.api.ai.tierHealth(tier.id, true)
+            setHealth(h)
+            setChecking(false)
+          }}
+          className="rounded-full border border-line px-3 py-1 text-sm text-muted hover:text-accent disabled:opacity-60"
+        >
+          {checking ? '检测中…' : '检测线路'}
+        </button>
+        {health && (
+          <span data-testid={`tier-health-${tier.id}`} className={`text-sm ${health.ok ? 'text-ok' : 'text-warn'}`}>
+            {health.ok ? '线路可用 ✓' : `不可用：${health.reason ?? '未知原因'}`}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 计价配置（管理员区专用）：各档每百万 token 的**美元**单价 + 美元→人民币汇率。
+ *
+ * 放这里而不是用量页上：老板要看的是"这个月花了多少钱"，不是"输入 0.28 美元每百万"。
+ * 线路加价、官方调价、汇率变动都在这儿改，不用发版；`scripts/usage-report.mjs`
+ * 读的是同一份落盘配置，不会出现"页面一个价、脚本另一个价"。
+ */
+function PricingRow({ tiers }: { tiers: AiTier[] }) {
+  const [p, setP] = useState<UsagePricing | null>(null)
+  useEffect(() => {
+    void window.api.usage.pricing().then(setP)
+  }, [])
+
+  const save = async (next: UsagePricing): Promise<void> => {
+    setP(next)
+    setP(await window.api.usage.setPricing(next))
+  }
+  const numField = (
+    testId: string,
+    value: number,
+    onSave: (v: number) => void,
+    width = 'w-24'
+  ): ReactNode => (
+    <input
+      data-testid={testId}
+      defaultValue={value}
+      key={`${testId}:${value}`}
+      onBlur={(e) => {
+        const v = Number(e.target.value)
+        if (Number.isFinite(v) && v >= 0) onSave(v)
+      }}
+      className={`${width} rounded-md border border-line bg-bg px-2 py-1 text-right font-mono text-sm outline-none focus:border-accent`}
+    />
+  )
+
+  if (!p) return null
+  return (
+    <div data-testid="pricing-config" className="space-y-2 rounded-lg bg-bg p-4">
+      <div className="text-base font-medium">计价（估算用）</div>
+      <div className="text-sm leading-5 text-muted">
+        每百万 token 的美元单价，按档位配；用量页显示的人民币 = 单价 × 用量 × 汇率。与线路的计费页核对后再改。
+      </div>
+      {(['standard', 'enhanced'] as TierId[]).map((id) => (
+        <div key={id} className="flex items-center gap-2 text-md">
+          <span className="w-20 shrink-0 text-muted">
+            {tiers.find((t) => t.id === id)?.label.replace(/（.*?）/g, '') ?? id}
+          </span>
+          <span className="text-sm text-muted">输入 $</span>
+          {numField(`price-in-${id}`, p.usd[id].in, (v) =>
+            void save({ ...p, usd: { ...p.usd, [id]: { ...p.usd[id], in: v } } })
+          )}
+          <span className="text-sm text-muted">输出 $</span>
+          {numField(`price-out-${id}`, p.usd[id].out, (v) =>
+            void save({ ...p, usd: { ...p.usd, [id]: { ...p.usd[id], out: v } } })
+          )}
+        </div>
+      ))}
+      <div className="flex items-center gap-2 text-md">
+        <span className="w-20 shrink-0 text-muted">汇率</span>
+        <span className="text-sm text-muted">1 USD =</span>
+        {numField('price-usdcny', p.usdCny, (v) => void save({ ...p, usdCny: v }), 'w-20')}
+        <span className="text-sm text-muted">CNY</span>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 管理员区（版本号连点 7 次解锁，解锁态存内存、重启复位）。
+ *
+ * 这里全是**运维配置**：地址、模型串、密钥、服务器。放出来给普通用户看，
+ * 唯一的结果是有人把它改坏了再来问为什么用不了。
+ */
+function AdminZone({ tiers, onChanged }: { tiers: AiTier[]; onChanged: () => void }) {
+  const [apiBase, setApiBase] = useState('')
   const [provisioning, setProvisioning] = useState(false)
-  // 「已就绪」必须看**当前线路那把 key**，不能只看中转站那把——切到 DeepSeek 官方却显示
-  // 中转站的状态，用户会以为配好了
-  const [active, setActive] = useState<AiProvider | undefined>()
-  // M-29：写 key 不再挡在这颗按钮后面（明文先进内存，落盘转后台任务），
-  // 但落盘期间主进程会被 safeStorage 冻住，界面必须说清楚"在干嘛、可能要多久"
+  // M-29：写 key 不挡路（明文先进内存，落盘转后台任务），但落盘期间主进程会被
+  // safeStorage 冻住，界面必须说清楚"在干嘛、可能要多久"
   const secretTask = useTask('secret')
   const writing = !!secretTask && (secretTask.status === 'running' || secretTask.status === 'queued')
   // 落盘可能只要几十毫秒（系统缓存热），也可能几十秒（冷）。只在"进行中"显示的话，
@@ -629,32 +797,123 @@ function SettingsPage({
     return () => clearTimeout(t)
   }, [secretTask?.status, secretTask?.endedAt])
 
-  // 每次 refresh 都 +1，用来把「模型线路」卡片一起刷新（key 状态两处显示，不能各说各话）
-  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    void window.api.settings.get().then((s) => setApiBase(s.apiBaseUrl))
+  }, [])
+
+  return (
+    <div
+      data-testid="admin-zone"
+      className="mb-6 max-w-xl space-y-4 rounded-xl border border-warn-line bg-card p-6"
+    >
+      <div className="flex items-center gap-1.5">
+        <AlertTriangle size={14} className="shrink-0 text-warn" />
+        <span className="text-md font-medium text-warn">运维配置，请勿改动</span>
+      </div>
+      <div className="text-sm leading-5 text-muted">
+        档位的两档语义是固定的，这里只决定每一档走哪条线路、用哪个模型串。改错会让对话直接不可用。
+      </div>
+
+      <div className="space-y-3">
+        {tiers.map((t) => (
+          <TierConfigRow key={t.id} tier={t} onChanged={onChanged} />
+        ))}
+        <PricingRow tiers={tiers} />
+      </div>
+
+      {/* 三态：进行中 / 刚存好 / 失败。失败那条不自动消失——它意味着重启后 key 会丢 */}
+      {writing && (
+        <div data-testid="key-writing" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-muted">
+          正在安全保存密钥，首次可能需要较长时间（系统会校验应用签名）。Key 已经可以使用，无需等待。
+        </div>
+      )}
+      {!writing && justSaved && (
+        <div data-testid="key-saved" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-muted">
+          密钥已安全保存 ✓（macOS Keychain 加密，重启不丢）
+        </div>
+      )}
+      {secretTask?.status === 'failed' && (
+        <div data-testid="key-write-failed" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-danger">
+          密钥没能加密落盘：{secretTask.error ?? '未知原因'}。本次仍可正常使用，但重启后需要重新填写。
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-3 border-t border-line pt-4 text-md">
+        <span className="text-muted">从服务端重新拉取密钥与线路配置</span>
+        <button
+          onClick={async () => {
+            setProvisioning(true)
+            const r = await window.api.auth.provision()
+            setProvisioning(false)
+            onChanged()
+            if (r.ok) ui.toast(r.wrote?.length ? '已重新获取服务端配置' : '服务端配置无变化，未重复写入密钥')
+            else ui.toast(`获取失败：${r.error ?? '未知原因'}`, 'error')
+          }}
+          disabled={provisioning}
+          className="shrink-0 rounded-full border border-line px-3 py-1 text-sm text-muted hover:text-accent disabled:opacity-60"
+        >
+          {provisioning ? '获取中…' : '重新获取服务端配置'}
+        </button>
+      </div>
+
+      <div className="flex items-center gap-2 text-md">
+        <span className="shrink-0 text-muted">服务器</span>
+        <input
+          data-testid="admin-apibase"
+          value={apiBase}
+          onChange={(e) => setApiBase(e.target.value)}
+          onBlur={() => window.api.settings.setApiBase(apiBase)}
+          className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+        />
+      </div>
+    </div>
+  )
+}
+
+function SettingsPage({
+  account,
+  onLogout,
+  nickname,
+  onNickname,
+  onOpenUsage,
+  adminUnlocked,
+  onUnlockAdmin,
+}: {
+  account: { loggedIn: boolean; email?: string }
+  onLogout: () => void
+  nickname?: string
+  onNickname: (v: string) => void
+  onOpenUsage: () => void
+  adminUnlocked: boolean
+  onUnlockAdmin: () => void
+}) {
+  const [nick, setNickDraft] = useState(nickname ?? '')
+  const [aiReady, setAiReady] = useState(true)
+  const [tiers, setTiers] = useState<AiTier[]>([])
+  const [taps, setTaps] = useState(0)
+
   const refresh = useCallback(() => {
-    setTick((n) => n + 1)
     void window.api.settings.get().then((s) => {
-      const cur = s.providers.find((p) => p.id === s.aiProvider)
-      setActive(cur)
-      setHasKey(!!cur?.hasKey)
-      // 「手动填写」这个标记只对中转站那把 key 有意义（服务端也只下发它）
-      setManualKey(s.manualApiKey && s.aiProvider === 'inferera')
-      setApiBase(s.apiBaseUrl)
+      setAiReady(s.aiReady)
+      setTiers(s.tiers)
     })
   }, [])
   useEffect(refresh, [refresh])
-  // 后台落盘完成后把「已就绪 ✓」刷新出来（写入期间 hasApiKey 已经是 true，这里是终态对账）
+  // 后台落盘完成后把状态刷新出来（写入期间内存里已经有 key，这里是终态对账）
+  const secretTask = useTask('secret')
   useEffect(() => {
-    if (!writing) refresh()
-  }, [writing, refresh])
+    if (secretTask?.status === 'succeeded' || secretTask?.status === 'failed') refresh()
+  }, [secretTask?.status, refresh])
+
+  const TAPS_TO_UNLOCK = 7
 
   return (
     <div className="h-full overflow-auto p-10">
       <h2 className="mb-1 text-xl font-semibold">设置</h2>
       <p className="mb-6 text-md text-muted">AI 服务随账号自动配置，密钥用 macOS Keychain 加密存储</p>
 
-      <div className="mb-6 max-w-xl space-y-4 rounded-xl border border-line bg-card p-6">
-        <div className="text-md font-medium">账号（云端同步：私人知识层 + 聊天记录）</div>
+      {/* 1. 账号 */}
+      <Card title="账号（云端同步：私人知识层 + 聊天记录）" testId="settings-group-account">
         {account.loggedIn ? (
           <div className="flex items-center justify-between text-md">
             <span>
@@ -670,10 +929,7 @@ function SettingsPage({
         ) : (
           <div className="flex items-center justify-between text-md">
             <span className="text-muted">当前为本地模式（无云端检索与同步）</span>
-            <button
-              onClick={onLogout}
-              className="rounded-full border border-line px-3 py-1 text-sm hover:bg-hover"
-            >
+            <button onClick={onLogout} className="rounded-full border border-line px-3 py-1 text-sm hover:bg-hover">
               去登录
             </button>
           </div>
@@ -689,101 +945,21 @@ function SettingsPage({
             className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-base outline-none focus:border-accent"
           />
         </div>
-        {/* AI 服务：下发失败时这里以前是死路——只有一行只读文字，没有手填入口也没有重试 */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-md">
-            <span>
-              AI 服务{active && `（${active.label}）`}：
-              {hasKey ? (
-                <span className="text-accent">已就绪 ✓（{manualKey ? '手动填写' : '随账号自动配置'}）</span>
-              ) : (
-                <span className="text-muted">未就绪（登录后自动配置，或在下方手动填写）</span>
-              )}
-            </span>
-            <button
-              onClick={async () => {
-                setProvisioning(true)
-                const r = await window.api.auth.provision()
-                setProvisioning(false)
-                refresh()
-                if (r.ok) ui.toast(r.wrote?.length ? '已重新获取服务端配置' : '服务端配置无变化，未重复写入密钥')
-                else ui.toast(`获取失败：${r.error ?? '未知原因'}`, 'error')
-              }}
-              disabled={provisioning}
-              className="shrink-0 rounded-full border border-line px-3 py-1 text-sm text-muted hover:text-accent disabled:opacity-60"
-            >
-              {provisioning ? '获取中…' : '重新获取服务端配置'}
-            </button>
-          </div>
-          <div className="flex items-center gap-2 text-md">
-            <span className="shrink-0 text-muted">API Key</span>
-            <input
-              data-testid="apikey-input"
-              value={keyDraft}
-              onChange={(e) => setKeyDraft(e.target.value)}
-              type="password"
-              placeholder={hasKey ? '已配置（填入新值可覆盖）' : 'sk-… 服务端下发失败时手动填写'}
-              className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
-            />
-            <button
-              data-testid="apikey-save"
-              onClick={async () => {
-                const k = keyDraft.trim()
-                if (!k) return ui.toast('请先填写 API Key', 'error')
-                try {
-                  const r = await window.api.settings.setKey(k)
-                  setKeyDraft('')
-                  refresh()
-                  ui.toast(
-                    r.outcome === 'unchanged'
-                      ? 'Key 与当前值相同，未重复写入'
-                      : 'Key 已生效，正在后台安全保存'
-                  )
-                } catch (e) {
-                  ui.toast(`保存失败：${errText(e)}`, 'error')
-                }
-              }}
-              className="shrink-0 rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover disabled:opacity-60"
-            >
-              保存
-            </button>
-          </div>
-          {/* 三态：进行中 / 刚存好 / 失败。失败那条不自动消失——它意味着重启后 key 会丢 */}
-          {writing && (
-            <div data-testid="key-writing" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-muted">
-              正在安全保存密钥，首次可能需要较长时间（系统会校验应用签名）。Key 已经可以使用，无需等待。
-            </div>
-          )}
-          {!writing && justSaved && (
-            <div data-testid="key-saved" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-muted">
-              密钥已安全保存 ✓（macOS Keychain 加密，重启不丢）
-            </div>
-          )}
-          {secretTask?.status === 'failed' && (
-            <div data-testid="key-write-failed" className="rounded-md bg-bg px-3 py-2 text-sm leading-5 text-danger">
-              密钥没能加密落盘：{secretTask.error ?? '未知原因'}。本次仍可正常使用，但重启后需要重新填写。
-            </div>
-          )}
-          <div className="text-sm leading-5 text-muted">
-            手动填写的 Key 用 macOS Keychain 加密存储，且不会被服务端下发的配置覆盖；填的是上方所选线路的 Key。
-          </div>
-        </div>
-        <div className="flex items-center gap-2 text-md">
-          <span className="shrink-0 text-muted">服务器</span>
-          <input
-            value={apiBase}
-            onChange={(e) => setApiBase(e.target.value)}
-            onBlur={() => window.api.settings.setApiBase(apiBase)}
-            className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
-          />
-        </div>
-      </div>
+      </Card>
 
-      <ProviderCard onChanged={refresh} tick={tick} />
+      {/* 2. 模型服务 */}
+      <ModelServiceCard ready={aiReady} onRefresh={refresh} />
 
-      <IngestCard />
+      {/* 3. 知识库 */}
+      <Card title="知识库" testId="settings-group-vault">
+        <IngestSection />
+        <RoutesSection />
+      </Card>
 
-      <RoutesCard />
+      {/* 4. 用量 */}
+      <UsageCard onOpen={onOpenUsage} />
+
+      {adminUnlocked && <AdminZone tiers={tiers} onChanged={refresh} />}
 
       <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
         <div className="text-md font-medium">遇到问题？</div>
@@ -799,6 +975,23 @@ function SettingsPage({
         </button>
       </div>
 
+      {/* 管理员区入口：版本号连点 7 次。既不占版面，也不会被误触 */}
+      <div
+        data-testid="version-badge"
+        onClick={() => {
+          if (adminUnlocked) return
+          const n = taps + 1
+          setTaps(n)
+          if (n >= TAPS_TO_UNLOCK) {
+            onUnlockAdmin()
+            ui.toast('已进入运维配置模式（重启应用后自动退出）')
+          }
+        }}
+        className="max-w-xl cursor-default select-none pb-6 text-xs text-muted-soft"
+      >
+        mcn-ai {APP_VERSION}
+        {adminUnlocked && ' · 运维配置已解锁'}
+      </div>
     </div>
   )
 }

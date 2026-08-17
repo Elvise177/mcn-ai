@@ -52,6 +52,35 @@ if (!process.env.E2E_VAULT && existsSync(join(root, 'e2e', 'sample.docx'))) {
   copyFileSync(join(root, 'e2e', 'sample.docx'), join(artifactDir, 'e2e产物样例.docx'))
 }
 
+/**
+ * 启动前护栏：**别的 mcn-ai 实例正盯着同一个库**时直接拒跑。
+ *
+ * 踩过一次：开发时用 `npm run dev` 起了一个实例，而它的 vaultPath 恰好也是这个走查库，
+ * 于是两边的投递箱 watcher 抢着起 pipeline。表现是走查跑到最后一条（before-quit 孤儿检查）
+ * 才失败，报的却是"有孤儿进程"——而那个进程属于另一个实例、本来就该活着。
+ * 排查成本极高（12 分钟才撞到，且结论完全指错方向），所以在第一秒就喊停。
+ */
+{
+  const foreign = execSync('ps -eo pid=,command=')
+    .toString()
+    .split('\n')
+    .filter((l) => /electron|mcn-ai/i.test(l) && /mcn-ai\/desktop|mcn-ingest/.test(l))
+    .filter((l) => !/walkthrough\.mjs|electron-vite|Cursor|Claude/.test(l))
+  const onThisVault = execSync('ps -eo pid=,command=')
+    .toString()
+    .split('\n')
+    .filter((l) => /mcn-ingest/.test(l) && l.includes(vaultCopy))
+  if (onThisVault.length) {
+    console.error(
+      `\n❌ 有别的实例正在处理这个走查库（${vaultCopy}），先把它关掉再跑：\n` +
+        onThisVault.map((l) => '   ' + l.trim().slice(0, 160)).join('\n') +
+        '\n（多半是 `npm run dev` 起的实例，它的 vaultPath 也指到了这个库）\n'
+    )
+    process.exit(1)
+  }
+  if (foreign.length) console.log(`ℹ️  另有 ${foreign.length} 个 mcn-ai 相关进程在跑，若走查异常先确认它们没盯着同一个库`)
+}
+
 // MCNAI_APP_BIN 指向打包后的二进制时 = 打包形态回归；否则 dev 形态
 const packagedBin = process.env.MCNAI_APP_BIN
 
@@ -369,10 +398,148 @@ const rawShot = async (cdp, name) => {
   await a4.close()
 }
 
+// ---- 会话级模型档位 · 不可用分支：增强档线路探测失败时必须置灰 + 说「暂时不可用」----
+// 用独立实例把探测强制判死（MCNAI_E2E_TIER_HEALTH=down，走查专用开关，生产不读）：
+// 真造这个分支得把 aihubmix 打挂或断网，走查里做不到（判据同 HANDOFF §4-22）。
+// 主实例反过来强制为可用，那边验的是"能选、能记住、失败有出口"。
+{
+  const downUser = '/tmp/mcnai-e2e-tier-down'
+  rmSync(downUser, { recursive: true, force: true })
+  const aD = await launch({
+    ...process.env,
+    MCNAI_USER_DATA: downUser,
+    MCNAI_VAULT: vaultCopy,
+    MCNAI_E2E_TIER_HEALTH: 'down',
+  })
+  const wD = await aD.firstWindow()
+  await prepWindow(aD, wD)
+  const skipD = wD.locator('text=暂不登录')
+  await skipD.waitFor({ timeout: 20000 })
+  await skipD.click()
+  await wD.locator('[data-testid="tier-selector"]').waitFor({ timeout: 20000 })
+  await wD.click('[data-testid="tier-selector"]')
+  await wD.locator('[data-testid="tier-menu"]').waitFor({ timeout: 8000 })
+  const enh = wD.locator('[data-testid="tier-option-enhanced"]')
+  if ((await enh.getAttribute('data-available')) !== '0') throw new Error('线路探测失败时增强档没有置灰')
+  if (await enh.isEnabled()) throw new Error('置灰的档位还能点（disabled 没生效）')
+  const menuTextD = await wD.locator('[data-testid="tier-menu"]').innerText()
+  if (!menuTextD.includes('暂时不可用')) throw new Error(`置灰的档位没有「暂时不可用」说明：「${menuTextD}」`)
+  await wD.waitForTimeout(300)
+  await wD.screenshot({ path: join(shots, '45b-档位选择器-增强暂时不可用.png') })
+  record('45b-档位选择器-增强暂时不可用')
+  // 点它一下也不许切过去（disabled 之外再验一次结果状态）
+  await enh.click({ force: true }).catch(() => {})
+  await wD.waitForTimeout(300)
+  const stillD = (await wD.locator('[data-testid="tier-selector"]').getAttribute('data-tier')) ?? ''
+  if (stillD !== 'standard') throw new Error(`点了置灰的档位竟然切过去了：${stillD}`)
+  console.log('档位置灰 ✓', JSON.stringify(menuTextD.replace(/\s+/g, ' ').slice(0, 60)))
+  await aD.close()
+}
+
+// ---- 老用户升级机（大头那台的形态）：只有中转站 key，增强档必须靠**回落**可用 ----
+// 实测依据：api.inferera.com 是 aihubmix 的备用域名，服务端下发的 CLIENT_RELAY_API_KEY
+// 与网页版的 AIHUBMIX_API_KEY 是同一把，所以登录过的机器天然就能开增强档（见 ai/tiers.ts）。
+// 这一屏同时把 migrateTiers 的老用户分支也验了——之前它只在真机上跑过。
+{
+  const legacyUser = '/tmp/mcnai-e2e-legacy'
+  rmSync(legacyUser, { recursive: true, force: true })
+  const envL = {
+    ...process.env,
+    MCNAI_USER_DATA: legacyUser,
+    MCNAI_VAULT: vaultCopy,
+    MCNAI_E2E_TIER_HEALTH: 'up',
+  }
+
+  // 第一次启动只为把 vaultPath 落进 store（= 这台机器"以前用过"的判据）
+  const a1 = await launch(envL)
+  const w1 = await a1.firstWindow()
+  await w1.waitForTimeout(2500)
+  await a1.close()
+
+  // 抹掉迁移标记，模拟"这台机器是从旧版升上来的"：下次启动 migrateTiers 会走老用户分支
+  const cfgPath = join(legacyUser, 'config.json')
+  const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+  if (!cfg.vaultPath) throw new Error('第一次启动没把 vaultPath 落盘，老用户判据不成立')
+  delete cfg.tierMigrated
+  delete cfg.tierOverrides
+  writeFileSync(cfgPath, JSON.stringify(cfg))
+
+  const a2 = await launch(envL)
+  const w2 = await a2.firstWindow()
+  await prepWindow(a2, w2)
+  const skipL = w2.locator('text=暂不登录')
+  await skipL.waitFor({ timeout: 20000 })
+  await skipL.click()
+  await w2.locator('[data-testid="tier-selector"]').waitFor({ timeout: 20000 })
+
+  // 迁移：标准档沿用旧线路（中转站），key 槽位也跟着搬过去
+  const migrated = await w2.evaluate(() => window.api.ai.tiers())
+  const std = migrated.tiers.find((t) => t.id === 'standard')
+  if (std.keyField !== 'encryptedApiKey' || !std.baseUrl.includes('inferera'))
+    throw new Error('老用户迁移没生效：' + JSON.stringify(std))
+
+  // 这台机器只有中转站那把 key（模拟服务端下发过、但从没配过增强档的独立 key）
+  await w2.evaluate((k) => window.api.settings.setKey(k, 'standard'), 'sk-e2e-legacy-relay-key-0123456789')
+  // 这里是**直接调 IPC**、不走界面那颗保存按钮，所以不会有 toast——等 toast 会一直等到超时
+  // （第一版就是这么挂住的）。落盘是后台任务，但明文立刻进内存缓存，hasKey 马上就该翻真
+  let tiersNow = null
+  let enh = null
+  for (let i = 0; i < 40; i++) {
+    tiersNow = await w2.evaluate(() => window.api.ai.tiers())
+    enh = tiersNow.tiers.find((t) => t.id === 'enhanced')
+    if (enh.hasKey) break
+    await w2.waitForTimeout(500)
+  }
+  if (!enh.hasKey) throw new Error('只有 relay key 时增强档仍判为没有密钥（回落没生效）')
+  if (!enh.usingSharedKey) throw new Error('增强档没有标出"复用中转站密钥"')
+
+  // 选择器里增强档必须不再置灰
+  await w2.click('[data-testid="tier-selector"]')
+  await w2.locator('[data-testid="tier-menu"]').waitFor({ timeout: 8000 })
+  if ((await w2.locator('[data-testid="tier-option-enhanced"]').getAttribute('data-available')) !== '1')
+    throw new Error('回落生效后增强档还是置灰的')
+  await w2.waitForTimeout(300)
+  await w2.screenshot({ path: join(shots, '45e-老用户机-增强档回落可用.png') })
+  record('45e-老用户机-增强档回落可用')
+  await w2.keyboard.press('Escape')
+
+  // 管理员区要把"复用"这件事标出来（钱从哪把 key 上扣的，必须查得到）
+  await w2.click('text=设置')
+  const badgeL = w2.locator('[data-testid="version-badge"]')
+  await badgeL.waitFor({ timeout: 10000 })
+  for (let i = 0; i < 7; i++) {
+    await badgeL.click()
+    await w2.waitForTimeout(60)
+  }
+  await w2.locator('[data-testid="tier-shared-key-enhanced"]').waitFor({ timeout: 8000 })
+
+  // 回落**日志**必须落下来：发一条增强档的消息把 resolveTierForRequest 走一遍
+  // （key 是假的，请求注定失败，但预检必须放行——放行本身就是回落生效的证据）
+  await w2.evaluate(() => window.api.chat.send('e2e-fallback', '回落走查', undefined, 'enhanced'))
+  let logText = ''
+  for (let i = 0; i < 40 && !/回落到共享密钥/.test(logText); i++) {
+    await w2.waitForTimeout(500)
+    try {
+      logText = readFileSync(join(legacyUser, 'logs', 'main.log'), 'utf-8')
+    } catch {
+      /* 还没写出来 */
+    }
+  }
+  const fallbackLine = logText.split('\n').find((l) => l.includes('回落到共享密钥'))
+  if (!fallbackLine) throw new Error('增强档回落没有打日志（静默兜底是明确禁止的）')
+  if (!fallbackLine.includes('encryptedApiKey')) throw new Error(`回落日志没说清回落到哪把：${fallbackLine}`)
+  console.log('增强档回落（老用户机）✓', JSON.stringify({ 迁移后标准档: std.keyField, 日志: fallbackLine.trim() }))
+  await a2.close()
+}
+
 const app = await launch({
   ...process.env,
   MCNAI_USER_DATA: userData,
   MCNAI_VAULT: vaultCopy,
+  // 主实例强制把增强档探测判为可用：这台机器上没有 aihubmix 的 key，不强制的话
+  // 档位选择器永远只有一档可选，"按会话记忆"和"失败有出口"两条就没法走真实用户路径。
+  // 注意 key 仍然是没有的 —— 增强档发出去照样会被主进程预检拦下，M-11 那段正好用它造确定失败
+  MCNAI_E2E_TIER_HEALTH: 'up',
 })
 const win = await app.firstWindow()
 const cdp = await prepWindow(app, win)
@@ -446,6 +613,55 @@ try {
   const boxH = await win.locator('textarea').first().evaluate((el) => el.parentElement.offsetHeight)
   if (boxH < 60) throw new Error(`输入框高度不足 60px：${boxH}`)
   if (!(await win.locator('button[title="添加附件（即将支持）"]').count())) throw new Error('输入框缺附件占位按钮')
+
+  // ---- 会话级模型档位：选择器在输入框**下沿控制条**上（不在输入框里）、新会话默认标准 ----
+  {
+    const sel = win.locator('[data-testid="tier-selector"]')
+    if (!(await sel.count())) throw new Error('输入框下沿没有模型档位选择器')
+    if ((await sel.getAttribute('data-tier')) !== 'standard') throw new Error('新会话默认档位不是标准')
+    const label = (await sel.innerText()).trim()
+    if (!label.includes('标准')) throw new Error(`档位按钮文案不对：「${label}」`)
+    // 位置：必须在控制条里，且**输入框那一行内不得再有档位控件**（返工要求）
+    const place = await win.evaluate(() => {
+      const ta = document.querySelector('textarea')
+      const bar = document.querySelector('[data-testid="composer-bar"]')
+      const sel = document.querySelector('[data-testid="tier-selector"]')
+      return {
+        在控制条里: !!(bar && sel && bar.contains(sel)),
+        输入行里还有: !!(ta?.parentElement && ta.parentElement.querySelector('[data-testid="tier-selector"]')),
+        控制条靠右: bar ? getComputedStyle(bar).justifyContent : null,
+        // 控制条在输入行**下面**：比一比两者的 y
+        在输入行下方:
+          !!(ta && bar) && bar.getBoundingClientRect().top >= ta.getBoundingClientRect().bottom - 1,
+      }
+    })
+    if (!place.在控制条里) throw new Error('档位选择器没有落在输入框下沿的控制条上')
+    if (place.输入行里还有) throw new Error('输入框内部还留着档位控件（返工要求：内部只留附件位）')
+    if (!place.在输入行下方) throw new Error('控制条没有落在输入行下方')
+    if (place.控制条靠右 !== 'flex-end') throw new Error(`控制条不是靠右对齐：${place.控制条靠右}`)
+    // 形态是低调文字胶囊，说明写在菜单里而不是 tooltip 上
+    if (await sel.getAttribute('title')) throw new Error('档位按钮还挂着 tooltip（返工要求去掉）')
+    const LEAK = /deepseek|claude|opus|aihubmix|inferera|kimi|智谱/i
+    await sel.click()
+    await win.locator('[data-testid="tier-menu"]').waitFor({ timeout: 8000 })
+    const menuText = await win.locator('[data-testid="tier-menu"]').innerText()
+    if (LEAK.test(menuText)) throw new Error(`档位菜单泄露了供应商/模型名：「${menuText}」`)
+    if (!/消耗/.test(menuText)) throw new Error(`档位菜单没有说清消耗差异：「${menuText}」`)
+    // 主实例把探测强制判为可用，所以这里两档都该能选（置灰分支在上面的独立实例里验）
+    if ((await win.locator('[data-testid="tier-option-enhanced"]').getAttribute('data-available')) !== '1')
+      throw new Error('强制可用时增强档仍然置灰')
+    // 菜单向上弹（贴在控制条上方），别把输入框和正文挡在下面看不见
+    const upward = await win.evaluate(() => {
+      const m = document.querySelector('[data-testid="tier-menu"]').getBoundingClientRect()
+      const b = document.querySelector('[data-testid="tier-selector"]').getBoundingClientRect()
+      return m.bottom <= b.top + 2
+    })
+    if (!upward) throw new Error('档位菜单不是向上弹的')
+    await snap('45-档位选择器-展开', 250)
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(200)
+    console.log('档位选择器 ✓', JSON.stringify({ 默认: label, 菜单: menuText.replace(/\s+/g, ' ').slice(0, 60) }))
+  }
 
   // 流式光标：完整流式链路只有 E2E_CHAT=1（真实 AI 调用）才跑得到，
   // 这里至少断言光标样式在 streaming-body 上能生效，别静默失效
@@ -588,6 +804,32 @@ try {
       const answered = await win.locator('.md-article').count()
       if (!answered) throw new Error('E2E_CHAT：没有拿到任何回答正文')
 
+      // ---- 用量记账的写入链路（只有真实调用才跑得到）：一轮对话必须落一条字段齐全的记录 ----
+      {
+        const ym = new Date().toISOString().slice(0, 7)
+        const f = join(userData, 'usage', `${ym}.jsonl`)
+        let recs = []
+        for (let i = 0; i < 20 && !recs.length; i++) {
+          recs = existsSync(f)
+            ? readFileSync(f, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+            : []
+          if (!recs.length) await win.waitForTimeout(500)
+        }
+        if (!recs.length) throw new Error(`真实对话之后 ${f} 里一条用量记录都没有`)
+        const last = recs[recs.length - 1]
+        for (const k of ['ts', 'sessionId', 'taskType', 'tier', 'expected_model', 'resolved_model', 'durationMs', 'usage'])
+          if (!(k in last)) throw new Error(`用量记录缺字段 ${k}：${JSON.stringify(last)}`)
+        if (last.tier !== 'standard') throw new Error(`标准档的记录档位不对：${last.tier}`)
+        if (last.expected_model !== 'deepseek-v4-pro') throw new Error(`期望模型不对：${last.expected_model}`)
+        // 静默降级防线：实际模型必须就是档位钉死的那个
+        if (last.resolved_model && last.degraded)
+          throw new Error(`标准档被线路静默换了模型：期望 ${last.expected_model}，实际 ${last.models?.join('/')}`)
+        console.log(
+          '用量记账（标准档真实调用）✓',
+          JSON.stringify({ 条数: recs.length, 任务类型: last.taskType, 实际模型: last.resolved_model, 耗时ms: last.durationMs })
+        )
+      }
+
       // ---- H-09 停止留半截 + H-10 生成中重复发送被拒 ----
       {
         await chatInput.fill('把灰太太的情况尽量详细地展开讲讲，分点写，越长越好')
@@ -653,12 +895,18 @@ try {
       }
     }
     // ---- M-11 AI 出错要能一键重试：复用上一条 user 消息重发，且不把提问复制成两条 ----
-    // 造一个**确定失败**的线路（custom 默认没有 base URL 也没有 key）→ 主进程立刻 bail，
-    // 这样本地模式和 E2E_CHAT 模式跑到的是同一条路径
+    // 造一个**确定失败**的线路：这台机器上增强档没有 key，选过去发出的第一条就会被
+    // 主进程预检 bail 掉 → 本地模式和 E2E_CHAT 模式跑到的是同一条路径。
+    // 顺便这一步就是"档位真能选到增强"的用户路径断言
     {
       await win.click('button[title="新对话"]')
       await win.waitForTimeout(500)
-      await win.evaluate(() => window.api.ai.setProvider('custom'))
+      await win.click('[data-testid="tier-selector"]')
+      await win.locator('[data-testid="tier-option-enhanced"]').click()
+      await win.waitForTimeout(400)
+      if ((await win.locator('[data-testid="tier-selector"]').getAttribute('data-tier')) !== 'enhanced')
+        throw new Error('点了增强档但选择器没切过去')
+      await snap('45c-档位选择器-已切到增强', 200)
       await chatInput.fill('M-11 重试走查：这条一定会失败')
       await chatInput.press('Enter')
       await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 30000 })
@@ -703,9 +951,32 @@ try {
         throw new Error(`重试让消息条数变了：${msgsBefore} → ${msgsAfter}（失败那轮的残留没清干净）`)
       await snap('41b-AI出错-重试后不重复提问', 200)
       console.log('M-11 错误重试 ✓', JSON.stringify({ ...counts, 气泡撤掉次数: gone }))
-      // 线路切回去，别把后面的步骤带偏
-      await win.evaluate(() => window.api.ai.setProvider('inferera'))
-      await win.waitForTimeout(300)
+
+      // ---- 增强档失败时的出口：气泡里除了「重试」还要有「切换到标准模式重试」----
+      if (!(await win.locator('[data-testid="retry-standard"]').count()))
+        throw new Error('增强档出错时没有「切换到标准模式重试」的引导')
+      await snap('45d-增强档出错-切标准重试引导', 200)
+
+      // ---- 档位按会话记忆：新会话回到标准，切回刚才那个会话仍然是增强 ----
+      const failedTitle = (await win.locator('aside div.group button').first().innerText()).trim()
+      await win.click('button[title="新对话"]')
+      await win.waitForTimeout(600)
+      if ((await win.locator('[data-testid="tier-selector"]').getAttribute('data-tier')) !== 'standard')
+        throw new Error('新会话没有回到标准档（档位不该跨会话粘住）')
+      await win.locator(`aside button:has-text("${failedTitle.slice(0, 8)}")`).first().click()
+      await win.waitForTimeout(600)
+      if ((await win.locator('[data-testid="tier-selector"]').getAttribute('data-tier')) !== 'enhanced')
+        throw new Error('切回旧会话后档位没记住（会话级记忆失效）')
+      // 主进程侧也认账：档位随会话一起落盘
+      const savedTier = await win.evaluate(async () => {
+        const list = await window.api.chat.list()
+        return list.find((c) => c.messages.some((m) => m.text.includes('M-11 重试走查')))?.tier ?? null
+      })
+      if (savedTier !== 'enhanced') throw new Error(`会话档位没落盘：${savedTier}`)
+      console.log('档位按会话记忆 ✓', JSON.stringify({ 失败会话: failedTitle, 落盘: savedTier }))
+      // 回到标准档再往下走，别把后面的步骤带偏
+      await win.click('button[title="新对话"]')
+      await win.waitForTimeout(400)
 
       // ---- 同一条路的**异步**分支：错误不是预检 bail，而是真的发起了请求之后才失败 ----
       // key 是好的（过得了预检）、地址指到 127.0.0.1:9（连接被拒），于是 chat:send 已经回执 ok、
@@ -723,13 +994,13 @@ try {
         await new Promise((r) => stub.listen(0, '127.0.0.1', r))
         const stubPort = stub.address().port
         const origBase = await win.evaluate(async () => {
-          const r = await window.api.ai.providers()
-          return r.providers.find((p) => p.id === 'inferera').baseUrl
+          const r = await window.api.ai.tiers()
+          return r.tiers.find((t) => t.id === 'standard').baseUrl
         })
         await win.click('button[title="新对话"]')
         await win.waitForTimeout(400)
         await win.evaluate(
-          (port) => window.api.ai.setProviderConfig('inferera', { baseUrl: `http://127.0.0.1:${port}` }),
+          (port) => window.api.ai.setTierConfig('standard', { baseUrl: `http://127.0.0.1:${port}` }),
           stubPort
         )
         await chatInput.fill('M-11 异步出错走查：这一条连不上服务器')
@@ -774,11 +1045,11 @@ try {
         // 这条不只是"锦上添花"——失败的 agent 任务会一直挂在 Dock 上（按钮文案里失败优先于
         // 「N 条待同步」），不收干净的话后面 M-03 的可见性断言会被它挡掉
         stub.close()
-        await win.evaluate((b) => window.api.ai.setProviderConfig('inferera', { baseUrl: b }), origBase)
+        await win.evaluate((b) => window.api.ai.setTierConfig('standard', { baseUrl: b }), origBase)
         await win.waitForTimeout(300)
         const restored = await win.evaluate(async () => {
-          const r = await window.api.ai.providers()
-          return r.providers.find((p) => p.id === 'inferera').baseUrl
+          const r = await window.api.ai.tiers()
+          return r.tiers.find((t) => t.id === 'standard').baseUrl
         })
         if (restored !== origBase) throw new Error(`base URL 没还原：${restored}`)
         await win.click('[data-testid="retry-answer"]')
@@ -1641,12 +1912,113 @@ try {
   await win.click('text=设置')
   await snap('10-设置页', 600)
 
-  // ---- H-06 AI 服务卡片：手填 key 输入框 + 重新获取按钮（以前下发失败 = 死路）----
+  // ---- 设置页分组重构：四组卡片 + 管理员区默认不可见 ----
   {
-    const keyInput = win.locator('[data-testid="apikey-input"]')
-    if (!(await keyInput.count())) throw new Error('设置页没有手填 API Key 的输入框')
+    for (const [id, name] of [
+      ['settings-group-account', '账号'],
+      ['settings-group-model', '模型服务'],
+      ['settings-group-vault', '知识库'],
+      ['settings-group-usage', '用量'],
+    ]) {
+      if (!(await win.locator(`[data-testid="${id}"]`).count())) throw new Error(`设置页缺少「${name}」分组卡片`)
+    }
+    if (await win.locator('[data-testid="admin-zone"]').count())
+      throw new Error('管理员区默认就露出来了（应当靠版本号连点 7 次才解锁）')
+    // 普通模式下「模型服务」只说一句话：好 / 不好。线路地址与模型串一律不许出现在这里
+    const modelCard = await win.locator('[data-testid="settings-group-model"]').innerText()
+    if (/https?:\/\/|deepseek|claude|opus|aihubmix|inferera/i.test(modelCard))
+      throw new Error(`模型服务卡片在普通模式下泄露了线路/模型：「${modelCard}」`)
+    const ready = await win.locator('[data-testid="ai-ready"]').count()
+    const broken = await win.locator('[data-testid="ai-broken"]').count()
+    if (ready + broken !== 1) throw new Error(`模型服务状态不是唯一一行：ready=${ready} broken=${broken}`)
+    if (broken && !(await win.locator('[data-testid="ai-reconnect"]').count()))
+      throw new Error('服务异常时没有「重新连接」按钮')
+    // 「导出诊断报告」仍然是页面底部的独立区域
+    if (!(await win.locator('button:has-text("导出诊断报告到桌面")').count()))
+      throw new Error('设置页底部缺少「导出诊断报告」区域')
+    console.log('设置页四组 ✓', JSON.stringify({ AI服务: ready ? '已就绪' : '服务异常' }))
+  }
+
+  // ---- 管理员区：版本号连点 7 次解锁（少一次都不行）----
+  {
+    const badge = win.locator('[data-testid="version-badge"]')
+    if (!(await badge.count())) throw new Error('设置页底部没有版本号')
+    for (let i = 0; i < 6; i++) {
+      await badge.click()
+      await win.waitForTimeout(60)
+    }
+    if (await win.locator('[data-testid="admin-zone"]').count())
+      throw new Error('点了 6 次就解锁了（约定是 7 次）')
+    await badge.click()
+    await win.locator('[data-testid="admin-zone"]').waitFor({ timeout: 8000 })
+    const zone = await win.locator('[data-testid="admin-zone"]').innerText()
+    if (!zone.includes('运维配置，请勿改动')) throw new Error(`管理员区没有警示标题：「${zone.slice(0, 60)}」`)
+    // 截图前滚到位：管理员区在页面很下面，不滚的话这张和上一张长得一模一样（人工看截图等于白看）
+    await win.locator('[data-testid="admin-zone"]').scrollIntoViewIfNeeded()
+    await snap('10g-管理员区-7连点解锁', 400)
+    console.log('管理员区 7 连点解锁 ✓')
+  }
+
+  // ---- 档位映射（运维口）：两档的线路地址与模型串都在管理员区，且模型是钉死的 ----
+  {
+    const val = (t) => win.locator(`[data-testid="${t}"]`).inputValue()
+    for (const id of ['standard', 'enhanced']) {
+      if (!(await win.locator(`[data-testid="tier-config-${id}"]`).count()))
+        throw new Error(`管理员区缺少「${id}」档的映射配置`)
+    }
+    const std = {
+      base: await val('tier-baseurl-standard'),
+      model: await val('tier-model-standard'),
+      fast: await val('tier-fastmodel-standard'),
+    }
+    const enh = {
+      base: await val('tier-baseurl-enhanced'),
+      model: await val('tier-model-enhanced'),
+      fast: await val('tier-fastmodel-enhanced'),
+    }
+    // 走查用的是全新 userData（老用户迁移不触发），所以两档都应是出厂映射
+    if (std.model !== 'deepseek-v4-pro') throw new Error(`标准档主模型没钉死：${std.model}`)
+    if (std.fast !== 'deepseek-v4-flash') throw new Error(`标准档轻量模型不对：${std.fast}`)
+    if (!std.base.includes('api.deepseek.com')) throw new Error(`标准档线路不对：${std.base}`)
+    if (enh.model !== 'claude-opus-5') throw new Error(`增强档主模型没钉死成 claude-opus-5：${enh.model}`)
+    if (!enh.base.includes('aihubmix.com')) throw new Error(`增强档线路不对：${enh.base}`)
+    await win.locator('[data-testid="tier-config-enhanced"]').scrollIntoViewIfNeeded()
+    await snap('10h-管理员区-档位映射', 300)
+    // 线路检测按钮真点一次：结论必须落到界面上（可用 / 不可用+原因）
+    await win.click('[data-testid="tier-check-enhanced"]')
+    await win.locator('[data-testid="tier-health-enhanced"]').waitFor({ timeout: 20000 })
+    const health = (await win.locator('[data-testid="tier-health-enhanced"]').innerText()).trim()
+    if (!/线路可用|不可用/.test(health)) throw new Error(`线路检测没有给出结论：「${health}」`)
+    console.log('档位映射 ✓', JSON.stringify({ 标准: std, 增强: enh, 增强线路检测: health }))
+  }
+
+  // ---- 计价配置（美元单价 + 汇率）只在管理员区，且改完用量页跟着变 ----
+  {
+    if (!(await win.locator('[data-testid="pricing-config"]').count()))
+      throw new Error('管理员区没有计价配置')
+    const rate = await win.locator('[data-testid="price-usdcny"]').inputValue()
+    if (Number(rate) !== 7.2) throw new Error(`默认汇率不是 7.2：${rate}`)
+    const enhIn = await win.locator('[data-testid="price-in-enhanced"]').inputValue()
+    const enhOut = await win.locator('[data-testid="price-out-enhanced"]').inputValue()
+    if (Number(enhIn) !== 15 || Number(enhOut) !== 75)
+      throw new Error(`增强档默认单价不对：${enhIn}/${enhOut}`)
+    // 落盘之后脚本才读得到同一份（usage-report.mjs 的单一真相源）
+    const onDisk = await win.evaluate(() => window.api.usage.pricing())
+    if (onDisk.usdCny !== 7.2 || onDisk.usd.enhanced.in !== 15)
+      throw new Error('计价配置没有落盘：' + JSON.stringify(onDisk))
+    await win.locator('[data-testid="pricing-config"]').scrollIntoViewIfNeeded()
+    await snap('10i-管理员区-计价配置', 300)
+    console.log('计价配置 ✓', JSON.stringify(onDisk))
+  }
+
+  // ---- H-06 手填 key（现在在管理员区）：输入框 + 重新获取按钮（以前下发失败 = 死路）----
+  {
+    const keyInput = win.locator('[data-testid="tier-key-input-standard"]')
+    if (!(await keyInput.count())) throw new Error('管理员区没有手填 API Key 的输入框')
     if (!(await win.locator('button:has-text("重新获取服务端配置")').count()))
-      throw new Error('设置页没有「重新获取服务端配置」按钮')
+      throw new Error('管理员区没有「重新获取服务端配置」按钮')
+    if (!(await win.locator('[data-testid="admin-apibase"]').count()))
+      throw new Error('管理员区没有服务器地址输入框')
     const E2E_KEY = 'sk-e2e-manual-key-0123456789'
     await keyInput.fill(E2E_KEY)
     // ---- M-29：保存 key 不再挡路 ----
@@ -1654,15 +2026,13 @@ try {
     // （实测 6s→35s→68s，主进程一卡 CDP 也跟着停），当时只能把这次点击的超时放宽到 10 分钟。
     // 现在写入转成后台任务，点击必须秒回——这里就用它当断言：超过 20s 视为回归。
     const tClick = Date.now()
-    await win.click('[data-testid="apikey-save"]', { timeout: 20000 })
+    await win.click('[data-testid="tier-key-save-standard"]', { timeout: 20000 })
     const clickMs = Date.now() - tClick
     // toast 的等待要给足：点击返回后主进程才开始那次同步加密，冷调用最长实测 60s，
     // 期间 CDP 也停（Playwright 走主进程），所以这里不能拿来当"快不快"的证据——
     // 证据是上面那次 click 的耗时（旧版这里要 10 分钟超时才点得动）
     await win.locator('text=/Key 已生效|未重复写入/').first().waitFor({ timeout: 180000 })
-    // 等待态：写入进行中要有明确文案。冷调用有时只要几毫秒（系统缓存热），
-    // 那种情况下文案一闪而过，所以「看到文案」与「任务层留下了这条 secret 任务」二选一即可
-    // 系统缓存热的时候整个落盘只要几十毫秒，「正在保存」会一闪而过，所以界面在成功后
+    // 等待态：系统缓存热的时候整个落盘只要几十毫秒，「正在保存」会一闪而过，所以界面在成功后
     // 还会留 3 秒的「已安全保存 ✓」——两态都算数，截图截到哪一态都行
     let hintState = ''
     for (let i = 0; i < 40 && !hintState; i++) {
@@ -1671,8 +2041,8 @@ try {
       else await win.waitForTimeout(200)
     }
     const sawHint = !!hintState
-    if (sawHint) await rawShot(cdp, '10d-设置页-密钥保存状态')
-    else await snap('10d-设置页-密钥保存状态', 100)
+    if (sawHint) await rawShot(cdp, '10d-管理员区-密钥保存状态')
+    else await snap('10d-管理员区-密钥保存状态', 100)
     if (await win.locator('[data-testid="key-write-failed"]').count())
       throw new Error('密钥落盘失败（界面出了失败提示）')
     // 落盘任务必须走完（写入期间主进程是冻的，evaluate 会一直等，等到了就说明已经解冻）
@@ -1687,12 +2057,14 @@ try {
     if (!sawHint) throw new Error('保存 key 期间界面没有任何状态提示（等待态/已保存都没出现）')
 
     const afterKey = await win.evaluate(() => window.api.settings.get())
-    if (!afterKey.hasApiKey) throw new Error('手填 key 保存后 hasApiKey 仍为 false')
-    await snap('10b-设置页-手填key已保存', 300)
+    if (!afterKey.aiReady) throw new Error('手填 key 保存后默认档仍然不可用（aiReady=false）')
+    // 普通模式那一行必须跟着变成「已就绪 ✓」——两处说法不一致是最容易糊弄过去的洞
+    await win.locator('[data-testid="ai-ready"]').waitFor({ timeout: 15000 })
+    await snap('10b-管理员区-手填key已保存', 300)
 
     // ---- M-29 写前判重：同一把 key 再存一次，必须零写入 ----
     // 这条就是"老用户重复登录不再冻结"的核心——provisionKeys 每次启动都会走同一条路
-    const repeat = await win.evaluate((k) => window.api.settings.setKey(k), E2E_KEY)
+    const repeat = await win.evaluate((k) => window.api.settings.setKey(k, 'standard'), E2E_KEY)
     if (repeat.outcome !== 'unchanged')
       throw new Error(`重复保存同一把 key 竟然又写了一次：outcome=${repeat.outcome}`)
     const afterRepeat = await win.evaluate(async () => {
@@ -1708,41 +2080,127 @@ try {
     // （最后这条是 M-29 判重的直接体现，E2E_CHAT 跑到的就是它）
     await win.locator('text=/已重新获取服务端配置|获取失败|无变化/').first().waitFor({ timeout: 15000 })
     const provText = await win.locator('text=/已重新获取服务端配置|获取失败|无变化/').first().innerText()
-    await snap('10c-设置页-重新获取反馈', 200)
+    await snap('10c-管理员区-重新获取反馈', 200)
     console.log('H-06 手填 key + 重新获取 ✓', JSON.stringify({ 反馈: provText.trim() }))
   }
 
-  // ---- 模型线路（provider 解耦）：三条线路可切，模型名显式可见可改 ----
+  // ---- 用量：设置页摘要 → 用量页（先验空态，再用桩数据验读取链路）----
   {
-    const card = win.locator('[data-testid="provider-card"]')
-    if (!(await card.count())) throw new Error('设置页没有「模型线路」卡片')
-    for (const id of ['inferera', 'deepseek', 'custom']) {
-      if (!(await win.locator(`[data-testid="provider-${id}"]`).count()))
-        throw new Error(`模型线路里缺少 ${id}`)
+    // 空态：本地模式没跑过真实 AI 调用，本月就该是零记录
+    const brief0 = (await win.locator('[data-testid="usage-brief"]').innerText()).trim()
+    // 前面几步（解锁、存 key、重新获取）留下的 toast 会糊在页头上，等它们散掉再进用量页截图
+    await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 15000 }).catch(() => {})
+    await win.click('[data-testid="open-usage"]')
+    await win.locator('[data-testid="usage-empty"], [data-testid="usage-daily"]').first().waitFor({ timeout: 15000 })
+    if (CHAT) {
+      // E2E_CHAT 跑过真实对话，这里本来就该有数据（空态那张截图由本地模式那轮刷）
+      console.log('用量页（E2E_CHAT，有真实记录）', JSON.stringify({ 摘要: brief0 }))
+    } else {
+      if (!(await win.locator('[data-testid="usage-empty"]').count()))
+        throw new Error('本月零记录时用量页没有空态引导')
+      await snap('47-用量页-空态', 400)
     }
-    await snap('10e-设置页-模型线路', 300)
-    // 真切一次到 DeepSeek 官方：地址与模型必须跟着变，且主进程认账
-    await win.click('[data-testid="provider-deepseek"]')
-    await win.locator('text=已切换到').waitFor({ timeout: 8000 })
-    await win.waitForTimeout(400)
-    const shown = {
-      baseUrl: await win.locator('[data-testid="provider-baseurl"]').inputValue(),
-      model: await win.locator('[data-testid="provider-model"]').inputValue(),
-      fastModel: await win.locator('[data-testid="provider-fastmodel"]').inputValue(),
+
+    // 桩数据：直接往 userData/usage/YYYY-MM.jsonl 追加几条，验"落盘格式 → 汇总 → 页面"这条读取链路
+    const ym = new Date().toISOString().slice(0, 7)
+    const usageDir = join(userData, 'usage')
+    mkdirSync(usageDir, { recursive: true })
+    const stub = [
+      { ts: Date.now() - 86400000, sessionId: 'e2e-1', taskType: 'chat', tier: 'standard', expected_model: 'deepseek-v4-pro', resolved_model: 'deepseek-v4-pro', models: ['deepseek-v4-pro'], degraded: false, durationMs: 4200, usage: { usage: { input_tokens: 900, output_tokens: 300 }, modelUsage: { 'deepseek-v4-pro': { inputTokens: 900, outputTokens: 300 } } } },
+      { ts: Date.now() - 3600000, sessionId: 'e2e-2', taskType: 'make-ppt', tier: 'enhanced', expected_model: 'claude-opus-5', resolved_model: 'claude-opus-5', models: ['claude-opus-5'], degraded: false, durationMs: 52000, usage: { usage: { input_tokens: 22000, output_tokens: 4000 }, modelUsage: { 'claude-opus-5': { inputTokens: 22000, outputTokens: 4000 } } } },
+      { ts: Date.now() - 600000, sessionId: 'e2e-3', taskType: 'ingest-tag', tier: null, expected_model: 'deepseek-v4-flash', resolved_model: null, durationMs: 91000, usage: null, calls: 1 },
+    ]
+    const before = await win.evaluate(() => window.api.usage.summary())
+    writeFileSync(join(usageDir, `${ym}.jsonl`), stub.map((r) => JSON.stringify(r)).join('\n') + '\n', { flag: 'a' })
+    await win.click('text=刷新')
+    await win.waitForTimeout(800)
+    const after = await win.evaluate(() => window.api.usage.summary())
+    if (after.chatCount !== before.chatCount + 1)
+      throw new Error(`桩数据没被算进对话次数：${before.chatCount} → ${after.chatCount}`)
+    if (after.artifactCount !== before.artifactCount + 1)
+      throw new Error(`桩数据没被算进产物数：${before.artifactCount} → ${after.artifactCount}`)
+    // 归一化：两档的 token 合计要分开算（口径不同，不挑字段、汇总侧归一）
+    const enhRow = after.byTier.find((t) => t.tier === 'enhanced')
+    const stdRow = after.byTier.find((t) => t.tier === 'standard')
+    if (!enhRow || enhRow.total < 26000) throw new Error(`增强档 token 合计不对：${JSON.stringify(enhRow)}`)
+    if (!stdRow || stdRow.total < 1200) throw new Error(`标准档 token 合计不对：${JSON.stringify(stdRow)}`)
+    // 拿不到 usage 的入库打标只记次数，token 显示「—」
+    const tagRow = after.byType.find((r) => r.type === 'ingest-tag')
+    if (!tagRow || tagRow.count < 1) throw new Error('入库打标那条没被记成次数')
+    if (tagRow.tokens !== 0) throw new Error(`入库打标不该有 token：${tagRow.tokens}`)
+
+    // 页面结构：三个大数字 / 14 天柱状图 / 档位对比 / 类型细分 / 两条脚注
+    for (const [id, name] of [
+      ['usage-chat-count', '本月对话大数字'],
+      ['usage-artifact-count', '本月产物大数字'],
+      ['usage-cost', '本月估算花费大数字'],
+      ['usage-daily', '最近 14 天柱状图'],
+      ['usage-by-tier', '按档位对比区'],
+      ['usage-by-type', '按任务类型表'],
+      ['usage-token-note', 'tokens 口径脚注'],
+      ['usage-cost-note', '费用估算脚注'],
+    ]) {
+      if (!(await win.locator(`[data-testid="${id}"]`).count())) throw new Error(`用量页缺少${name}`)
     }
-    if (shown.baseUrl !== 'https://api.deepseek.com/anthropic')
-      throw new Error(`切到 DeepSeek 官方后 base URL 不对：${shown.baseUrl}`)
-    if (shown.model !== 'deepseek-v4-pro') throw new Error(`主模型没钉死成 deepseek-v4-pro：${shown.model}`)
-    if (shown.fastModel !== 'deepseek-v4-flash') throw new Error(`轻量模型不对：${shown.fastModel}`)
-    const inMain = await win.evaluate(() => window.api.settings.get())
-    if (inMain.aiProvider !== 'deepseek') throw new Error('主进程没记住切换后的 provider')
-    await snap('10f-模型线路-切到DeepSeek官方', 300)
-    console.log('模型线路切换 ✓', JSON.stringify(shown))
-    // 切回默认线路，别把后面的步骤带偏
-    await win.click('[data-testid="provider-inferera"]')
-    await win.waitForTimeout(600)
-    const back = await win.evaluate(() => window.api.settings.get())
-    if (back.aiProvider !== 'inferera') throw new Error('切回 inferera 失败')
+
+    // ---- 人民币化：页面上的钱一律是 ¥，且看不到任何美元单价 ----
+    {
+      const costText = (await win.locator('[data-testid="usage-cost"]').innerText()).trim()
+      if (!/约\s*¥/.test(costText)) throw new Error(`本月估算花费不是「约 ¥…」：「${costText}」`)
+      // 桩数据：增强档 22000/4000 tokens × ($15/$75 per 1M) × 7.2 ≈ ¥4.54，标准档几乎为 0
+      const enhCost = (await win.locator('[data-testid="usage-tier-enhanced"]').innerText()).replace(/\s+/g, ' ')
+      const m = enhCost.match(/¥([\d.]+)/)
+      if (!m) throw new Error(`增强档没有显示人民币花费：「${enhCost}」`)
+      const cny = Number(m[1])
+      if (!(cny > 3 && cny < 6)) throw new Error(`增强档花费换算不对（期望 ¥4.5 上下）：¥${cny}`)
+      // 三列并排：次数 / tokens / 估算花费
+      for (const col of ['次', 'tokens', '估算花费']) {
+        if (!enhCost.includes(col)) throw new Error(`档位对比区缺「${col}」列：「${enhCost}」`)
+      }
+      // 类型表的 tokens 列改成「约 ¥X.XX · N tokens」，人民币在前
+      const typeText = (await win.locator('[data-testid="usage-by-type"]').innerText()).replace(/\s+/g, ' ')
+      if (!/约 ¥[\d.<]+ · [\d,]+ tokens/.test(typeText))
+        throw new Error(`类型表没有「约 ¥X.XX · N tokens」格式：「${typeText}」`)
+      // 整页不许出现美元单价（那是管理员区的事）
+      const pageText = await win.evaluate(() => document.querySelector('main')?.innerText ?? '')
+      if (/\$\d/.test(pageText)) throw new Error('用量页出现了美元单价（应当只在管理员区）')
+      const costNote = await win.locator('[data-testid="usage-cost-note"]').innerText()
+      if (!/估算值.*实际账单/.test(costNote)) throw new Error(`费用脚注不对：「${costNote}」`)
+      console.log('用量页人民币化 ✓', JSON.stringify({ 本月花费: costText, 增强档: `¥${cny}` }))
+    }
+    const bars = await win.locator('[data-testid="usage-daily"] > div').count()
+    if (bars !== 14) throw new Error(`柱状图不是 14 根柱子：${bars}`)
+    // 柱子必须**真的有高度**：百分比高度算不出来时整片图是空白，而"14 根 div 在"照样通过
+    // （第一版就是这么漏过去的，靠人看截图才发现），所以这里量的是像素
+    const barBox = await win.evaluate(() => {
+      const cols = [...document.querySelectorAll('[data-testid="usage-daily"] > div')]
+      const withData = cols.map((c) => c.firstElementChild).filter((b) => Number(b?.dataset.count) > 0)
+      return {
+        有记录的天数: withData.length,
+        最高柱: Math.max(0, ...withData.map((b) => b.getBoundingClientRect().height)),
+      }
+    })
+    if (barBox.有记录的天数 < 1) throw new Error('桩数据没落到最近 14 天里')
+    if (barBox.最高柱 < 20) throw new Error(`柱状图渲染出来是平的（最高柱 ${barBox.最高柱}px）`)
+    const note = await win.locator('[data-testid="usage-token-note"]').innerText()
+    if (!/口径/.test(note)) throw new Error(`tokens 脚注没说清口径：「${note}」`)
+    // 配额进度条本期是隐藏的占位（将来按量计费启用）
+    if (await win.locator('[data-testid="usage-quota"]').count())
+      throw new Error('配额进度条本期不该显示（只是预留组件位）')
+    // 前面几步的 toast 会糊在页头上，等它们自己散掉再截（截图是拿来人工验收的）
+    await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 12000 }).catch(() => {})
+    await snap('47b-用量页-有数据', 500)
+    // 类型表与口径脚注在首屏之下，单独截一张
+    await win.locator('[data-testid="usage-token-note"]').scrollIntoViewIfNeeded()
+    await snap('47c-用量页-按类型与口径脚注', 400)
+    console.log(
+      '用量页 ✓',
+      JSON.stringify({ 摘要: brief0, 对话: after.chatCount, 产物: after.artifactCount, 档位: after.byTier })
+    )
+
+    // 回设置页，别把后面的步骤留在用量页上
+    await win.click('text=设置')
+    await win.waitForTimeout(500)
   }
 
   // ---- M-03 syncQueue 真重试：退避阶梯 → 转手动 → Dock「重试」→ 成功后自动清队 ----
@@ -1974,9 +2432,14 @@ try {
       if (!done) await win.waitForTimeout(2000)
     }
     if (!done) {
+      // 失败时把**三边**都打出来：主进程任务快照 / 落盘的已入库表 / 渲染层拿到的表。
+      // 只打主进程那一边的话，"主进程说成了、界面没动"与"主进程压根没成"长得一模一样
       const t = await win.evaluate(async () => {
         const s = await window.api.tasks.list()
-        return s.tasks.filter((x) => x.kind === 'ingest').map((x) => ({ t: x.title, s: x.status, e: x.error }))
+        return {
+          主进程任务: s.tasks.filter((x) => x.kind === 'ingest').map((x) => ({ t: x.title, s: x.status, e: x.error })),
+          已入库表: await window.api.artifacts.ingested(),
+        }
       })
       throw new Error('产物入库没有走到「已入库」：' + JSON.stringify(t))
     }
@@ -2126,13 +2589,42 @@ const OWNED_BY_OTHER_SCRIPT = {
   '11-登录即用-key就绪.png': 'login-provision.mjs',
   '12-登录即用-对话成功.png': 'login-provision.mjs',
 }
+/**
+ * 只有 `E2E_CHAT=1`（真实 AI 调用）那一轮才刷得到的截图。
+ * 本地模式跑完它们必然"没刷新"，但那是**归属问题不是残留**——
+ * 不单独列出来的话，每次本地走查的收尾都会报一串假警，久而久之就没人看这段了。
+ */
+const ONLY_IN_CHAT_RUN = {
+  '01d-工作台-流式中.png': '真实流式中途',
+  '01d3-流式输出-行尾光标.png': '真实流式的行尾光标',
+  '01e-工作台-回答完成.png': '真实回答完成态',
+  '28-切回生成中的对话.png': 'H-10 生成中切走切回',
+  '35-生成中重复发送-拒绝并给出口.png': 'H-10 重复发送被拒',
+  '36-停止生成-半截回答留在对话里.png': 'H-09 停止留半截',
+  '39-Dock-待同步与重试入口.png': 'M-03 syncQueue（需登录态造真实同步失败）',
+  '41c-流式出错-提问仍在且可重试.png': 'M-11 异步出错分支（401 桩）',
+  '41d-流式出错-重试后不重复提问.png': 'M-11 异步出错重试',
+  '41e-出错重试-端点恢复后成功.png': 'M-11 端点恢复后重试成功',
+  '47-用量页-空态.png': '空态只在本地模式刷（E2E_CHAT 那轮本月已有真实记录）',
+  // 45e（老用户升级机的增强档回落）两轮都刷得到，不列进来
+  // 47b/47c 两轮都刷得到，不列进来
+}
 const notWritten = readdirSync(shots).filter((f) => f.endsWith('.png') && !written.has(f))
 const fromOthers = notWritten.filter((f) => OWNED_BY_OTHER_SCRIPT[f])
-const orphans = notWritten.filter((f) => !OWNED_BY_OTHER_SCRIPT[f])
+const chatOnly = notWritten.filter((f) => !OWNED_BY_OTHER_SCRIPT[f] && ONLY_IN_CHAT_RUN[f])
+const orphans = notWritten.filter((f) => !OWNED_BY_OTHER_SCRIPT[f] && !ONLY_IN_CHAT_RUN[f])
 console.log(`\n本次刷新 ${written.size} 张`)
 if (fromOthers.length) {
   console.log('ℹ️  以下截图由别的脚本产出，请确认它们也是本轮跑的：')
   for (const f of fromOthers) console.log(`   - ${f}  ←  ${OWNED_BY_OTHER_SCRIPT[f]}`)
+}
+if (chatOnly.length) {
+  console.log(
+    CHAT
+      ? '⚠️  以下截图属于 E2E_CHAT 专属，但本轮开了 E2E_CHAT 却没刷到，请查上面的跳过原因：'
+      : 'ℹ️  以下截图属于 E2E_CHAT 专属（本轮是本地模式，未刷新属正常，不算残留）：'
+  )
+  for (const f of chatOnly) console.log(`   - ${f}  ←  ${ONLY_IN_CHAT_RUN[f]}`)
 }
 if (orphans.length) {
   console.log('⚠️  以下截图本次没刷新、也不属于任何脚本，八成是旧版本残留，删掉或补跑：')

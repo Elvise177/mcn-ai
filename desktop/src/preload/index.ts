@@ -3,7 +3,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 const api = {
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
-    setKey: (key: string) => ipcRenderer.invoke('settings:setKey', key),
+    /** tier 不传 = 写默认档（标准）那把槽位 */
+    setKey: (key: string, tier?: string) => ipcRenderer.invoke('settings:setKey', key, tier),
     setLlmKey: (key: string) => ipcRenderer.invoke('settings:setLlmKey', key),
     setApiBase: (url: string) => ipcRenderer.invoke('settings:setApiBase', url),
     setDingtalk: (cfg: { webhook: string; secret: string; notifyInbox: boolean; notifyArtifact: boolean }) =>
@@ -11,10 +12,18 @@ const api = {
     setArtifactAutoIngest: (v: boolean) => ipcRenderer.invoke('settings:setArtifactAutoIngest', v),
   },
   ai: {
-    providers: () => ipcRenderer.invoke('ai:providers'),
-    setProvider: (id: string) => ipcRenderer.invoke('ai:setProvider', id),
-    setProviderConfig: (id: string, cfg: { baseUrl?: string; model?: string; fastModel?: string }) =>
-      ipcRenderer.invoke('ai:setProviderConfig', id, cfg),
+    tiers: () => ipcRenderer.invoke('ai:tiers'),
+    setTierConfig: (id: string, cfg: { baseUrl?: string; model?: string; fastModel?: string }) =>
+      ipcRenderer.invoke('ai:setTierConfig', id, cfg),
+    /** 线路可用性；结果在主进程缓存 5 分钟，force 只给管理员区的「重新检测」 */
+    tierHealth: (id: string, force?: boolean) => ipcRenderer.invoke('ai:tierHealth', id, force),
+  },
+  usage: {
+    summary: (month?: string) => ipcRenderer.invoke('usage:summary', month),
+    months: () => ipcRenderer.invoke('usage:months'),
+    /** 单价与汇率（管理员区专用；普通页面只看算好的人民币） */
+    pricing: () => ipcRenderer.invoke('usage:pricing'),
+    setPricing: (p: unknown) => ipcRenderer.invoke('usage:setPricing', p),
   },
   vault: {
     pickExisting: () => ipcRenderer.invoke('vault:pickExisting'),
@@ -64,8 +73,9 @@ const auth = {
   },
 }
 const chat = {
-  send: (sessionId: string, prompt: string, resume?: string) =>
-    ipcRenderer.invoke('chat:send', sessionId, prompt, resume),
+  /** tier = 这个会话选的档位（标准/增强），按会话记忆，随每次发送带上 */
+  send: (sessionId: string, prompt: string, resume?: string, tier?: string) =>
+    ipcRenderer.invoke('chat:send', sessionId, prompt, resume, tier),
   stop: (sessionId: string) => ipcRenderer.invoke('chat:stop', sessionId),
   list: () => ipcRenderer.invoke('chat:list'),
   save: (conv: unknown) => ipcRenderer.invoke('chat:save', conv),

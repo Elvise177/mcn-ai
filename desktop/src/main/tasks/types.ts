@@ -18,6 +18,8 @@ export interface InboxEvent {
   pending?: number
   file?: string
   ok?: boolean
+  /** pipeline 若在阶段行里报了 token 用量就原样带上（目前只有智能打标可能有），没有就是 undefined */
+  usage?: unknown
 }
 
 export interface TaskBase {

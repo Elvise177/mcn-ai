@@ -12,9 +12,15 @@ npm run build && node e2e/walkthrough.mjs   # 截图在 e2e/shots/，AI 必须 R
 - **截图只证明"长这样"，不证明"能用"**：每个可点击的核心控件（新对话/发送/切换/删除…）必须在走查里真点一次并断言结果状态（2026-07-16 ＋新对话失效教训——截图全绿但按钮点了丢对话）
 - 新功能必须往 walkthrough.mjs 里加对应步骤（新页面/新交互 = 新截图点）
 - 引擎层改动跑对应 smoke：`smoke-vault.js <vault>`（索引/图谱/检索）、`smoke:agent`（AI 链路打包冒烟）、
-  `smoke:provider`（**改模型/线路必跑**：逐个 provider 跑单轮/多轮 resume/abort/工具调用/流式/make-ppt，
-  并断言服务端实际用的模型就是钉死的那个；需 `SMOKE_INFERERA_KEY` / `SMOKE_DEEPSEEK_KEY`）
+  `smoke:provider`（**改模型/线路必跑**：逐条线路跑单轮/多轮 resume/abort/工具调用/流式/make-ppt，
+  并断言服务端实际用的模型就是钉死的那个；需 `SMOKE_INFERERA_KEY` / `SMOKE_DEEPSEEK_KEY` /
+  `SMOKE_AIHUBMIX_KEY`，线路以档位形式配置，见 `src/main/ai/tiers.ts`）
 - 截图里发现的问题先修完再交付，不许把 GUI 验收留给用户
+- **涉及真实 AI 调用的验收按改动裁剪**：只对本次改动的链路做最小真实调用验证（例如新增一条线路，
+  就只验"单轮通不通 / 实际模型有没有被换掉 / 能不能停 / 工具能不能调"），未改动的链路靠本地断言
+  与既有基线，不为仪式感跑全量 E2E_CHAT。`smoke:provider` 支持 `SMOKE_ONLY=<线路>` +
+  `SMOKE_CASES=single,abort,tools` 精确裁剪；能本地验的（选择器状态、分组、空态、jsonl 读取链路）
+  一律用桩数据本地验，别拿 token 换确定性
 
 ## 常用命令
 

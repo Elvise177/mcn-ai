@@ -10,6 +10,7 @@ import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { notifyDingtalk } from '../lib/dingtalk'
 import { tasks } from '../tasks/registry'
+import { appendUsage } from '../usage'
 import { INBOX_FLOW, type InboxEvent, type InboxTask } from '../tasks/types'
 import { getLastInboxRun, setLastInboxRun } from '../tasks/persist'
 
@@ -416,7 +417,15 @@ export class InboxOrchestrator {
           try {
             const ev = JSON.parse(line)
             if (ev.stage === 'done') lastStatus = ev.status
-            this.send({ type: 'stage', stage: ev.stage, status: ev.status, message: ev.message, pending: ev.pending })
+            this.send({
+              type: 'stage',
+              stage: ev.stage,
+              status: ev.status,
+              message: ev.message,
+              pending: ev.pending,
+              // 打标阶段若报了 token 用量就带上；pipeline 目前不报，那就只记次数（见下方 appendUsage）
+              usage: ev.usage,
+            })
           } catch {
             /* 非 JSON 行来自阶段脚本的中文日志，忽略 */
           }
@@ -442,6 +451,26 @@ export class InboxOrchestrator {
     if (ok && !this.canceledBy) await this.cloudSync(runStart)
 
     const canceled = !!this.canceledBy
+
+    // 用量记账：智能打标是 pipeline 子进程里的 LLM 调用，绝大多数情况拿不到 token 数
+    // ——那就**只记次数**（一轮一条），比"因为没有 usage 就不记"诚实得多
+    if (llmKey && !canceled) {
+      const tag = this.stages.find((s) => s.stage === 'tag_llm' && s.status !== 'skipped')
+      if (tag) {
+        appendUsage({
+          ts: Date.now(),
+          sessionId: `inbox:${this.vaultRoot ?? ''}`,
+          taskType: 'ingest-tag',
+          tier: null, // 入库打标不经档位层，走的是 llmBaseUrl/llmModel 那条独立线路
+          expected_model: store.get('llmModel'),
+          resolved_model: null,
+          durationMs: Date.now() - runStart,
+          usage: tag.usage ?? null,
+          calls: 1,
+        })
+      }
+    }
+
     this.send({ type: 'run-end', ok })
     for (const cb of this.runEndCbs) {
       try {

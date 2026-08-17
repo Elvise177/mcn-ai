@@ -7,6 +7,7 @@ import { CHIPS } from '../config/chips'
 import { greetingLine } from '../lib/profile'
 import { errText } from '../lib/err'
 import { useTask } from '../hooks/useTasks'
+import { TierSelector } from '../components/TierSelector'
 
 const TOOL_ZH: Record<string, string> = {
   search_knowledge: '检索知识库',
@@ -43,16 +44,20 @@ export default function Workbench({
   nickname,
   recentConvs,
   onOpenConv,
+  onTierChange,
 }: {
   conv: Conversation
   /** 返回 false = 主进程拒了这次发送（同一会话已在生成中，H-10），输入框内容要留着 */
   onSend: (text: string) => Promise<boolean>
-  /** M-11：重发错误气泡前面那条 user 消息，并把错误气泡就地撤掉 */
-  onRetry: (index: number) => Promise<boolean>
+  /** M-11：重发错误气泡前面那条 user 消息，并把错误气泡就地撤掉。
+      tier 传值 = 换档重试（增强档线路失败时的出口） */
+  onRetry: (index: number, tier?: TierId) => Promise<boolean>
   onOpenNote: (wikiTarget: string) => void
   nickname?: string
   recentConvs: Conversation[]
   onOpenConv: (c: Conversation) => void
+  /** 档位按会话记忆，所以改档要落到 conversation 上（App 负责持久化） */
+  onTierChange: (t: TierId) => void
 }) {
   // 消息以 conv prop 为准（App 统一持久化）；这里只管流式草稿/工具行/输入框
   const messages = conv.messages
@@ -135,15 +140,17 @@ export default function Workbench({
    * （长提示词尤其致命）。这里复用上一条 user 消息重发，错误气泡由 App 侧就地撤掉。
    */
   const retry = useCallback(
-    async (index: number) => {
+    async (index: number, tier?: TierId) => {
       if (streaming) return
       setSending(true)
       setDraft('')
-      const ok = await onRetry(index)
+      const ok = await onRetry(index, tier)
       if (!ok) setSending(false)
     },
     [streaming, onRetry]
   )
+
+  const tier: TierId = conv.tier ?? 'standard'
 
   const handleLink = useCallback(
     async (href: string) => {
@@ -206,7 +213,15 @@ export default function Workbench({
               {greetingLine(nickname)}
             </h1>
             <p className="mb-8 text-md text-muted">问你的库，或直接说要做什么</p>
-            <InputBox value={input} onChange={setInput} onSend={() => void send(input)} streaming={false} wide />
+            <InputBox
+              value={input}
+              onChange={setInput}
+              onSend={() => void send(input)}
+              streaming={false}
+              tier={tier}
+              onTierChange={onTierChange}
+              wide
+            />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
               {CHIPS.map((c) => (
                 <button
@@ -238,14 +253,28 @@ export default function Workbench({
                           {/* 错误气泡里的「重试」常驻（不是 hover 才出）：这是用户此刻唯一想点的东西。
                               前面没有可复用的提问时不给按钮——按了什么都不会发生的按钮比没有更糟 */}
                           {m.error && messages.slice(0, i).some((x) => x.role === 'user') && (
-                            <button
-                              data-testid="retry-answer"
-                              disabled={streaming}
-                              onClick={() => void retry(i)}
-                              className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-accent hover:bg-accent-soft disabled:opacity-50"
-                            >
-                              <RotateCcw size={11} /> 重试
-                            </button>
+                            <>
+                              <button
+                                data-testid="retry-answer"
+                                disabled={streaming}
+                                onClick={() => void retry(i)}
+                                className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-accent hover:bg-accent-soft disabled:opacity-50"
+                              >
+                                <RotateCcw size={11} /> 重试
+                              </button>
+                              {/* 增强档线路失败时的第二个出口：原地降档重试。
+                                  只给"重试"的话，用户会在同一条挂掉的线路上反复撞 */}
+                              {tier === 'enhanced' && (
+                                <button
+                                  data-testid="retry-standard"
+                                  disabled={streaming}
+                                  onClick={() => void retry(i, 'standard')}
+                                  className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-muted hover:text-ink disabled:opacity-50"
+                                >
+                                  切换到标准模式重试
+                                </button>
+                              )}
+                            </>
                           )}
                           <button
                             onClick={() => {
@@ -292,6 +321,8 @@ export default function Workbench({
                   onSend={() => void send(input)}
                   onStop={() => window.api.chat.stop(convRef.current.id)}
                   streaming={streaming}
+                  tier={tier}
+                  onTierChange={onTierChange}
                 />
               </div>
             </div>
@@ -370,6 +401,8 @@ function InputBox({
   onSend,
   onStop,
   streaming,
+  tier,
+  onTierChange,
   wide,
 }: {
   value: string
@@ -377,6 +410,8 @@ function InputBox({
   onSend: () => void
   onStop?: () => void
   streaming: boolean
+  tier: TierId
+  onTierChange: (t: TierId) => void
   wide?: boolean
 }) {
   // 高度跟随实际内容（含自动折行）：rows 按 \n 计数会漏掉软换行，长句折行时上一行被顶出视野
@@ -389,49 +424,57 @@ function InputBox({
   }, [value])
   return (
     <div
-      className={`flex min-h-input items-end gap-2 rounded-input border border-line bg-card px-3 py-2.5 transition-colors focus-within:border-accent ${
+      className={`rounded-input border border-line bg-card transition-colors focus-within:border-accent ${
         wide ? 'w-full max-w-2xl' : ''
       }`}
     >
-      {/* 附件入口：本次只占位，先把位置和视觉留出来 */}
-      <button
-        onClick={() => ui.toast('附件上传即将支持，先把文件拖进窗口即可入库')}
-        title="添加附件（即将支持）"
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-hover hover:text-ink"
-      >
-        <Paperclip size={16} />
-      </button>
-      <textarea
-        ref={taRef}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-            e.preventDefault()
-            onSend()
-          }
-        }}
-        rows={1}
-        placeholder='问你的库，或说"把XX做成PPT"…'
-        className="max-h-32 flex-1 resize-none self-center overflow-y-auto bg-transparent py-1 text-md leading-6 outline-none"
-      />
-      {streaming ? (
+      {/* 主行：附件位 + 正文 + 发送/停止。**档位控件不在这一行**，见下方控制条 */}
+      <div className="flex min-h-input items-end gap-2 px-3 py-2.5">
+        {/* 附件入口：本次只占位，先把位置和视觉留出来 */}
         <button
-          onClick={onStop}
-          title="停止生成"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-accent text-accent hover:bg-accent-soft"
+          onClick={() => ui.toast('附件上传即将支持，先把文件拖进窗口即可入库')}
+          title="添加附件（即将支持）"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-hover hover:text-ink"
         >
-          <Square size={12} fill="currentColor" />
+          <Paperclip size={16} />
         </button>
-      ) : (
-        <button
-          onClick={onSend}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-on-solid hover:opacity-90"
-          title="发送"
-        >
-          <ArrowUp size={16} />
-        </button>
-      )}
+        <textarea
+          ref={taRef}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault()
+              onSend()
+            }
+          }}
+          rows={1}
+          placeholder='问你的库，或说"把XX做成PPT"…'
+          className="max-h-32 flex-1 resize-none self-center overflow-y-auto bg-transparent py-1 text-md leading-6 outline-none"
+        />
+        {streaming ? (
+          <button
+            onClick={onStop}
+            title="停止生成"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-accent text-accent hover:bg-accent-soft"
+          >
+            <Square size={12} fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            onClick={onSend}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-on-solid hover:opacity-90"
+            title="发送"
+          >
+            <ArrowUp size={16} />
+          </button>
+        )}
+      </div>
+      {/* 下沿控制条：档位靠右（发送键那一侧），菜单向上弹。
+          这一条是留给"这一轮怎么跑"的元信息的，以后加别的开关也往这儿放 */}
+      <div data-testid="composer-bar" className="flex items-center justify-end px-3 pb-2">
+        <TierSelector value={tier} onChange={onTierChange} disabled={streaming} />
+      </div>
     </div>
   )
 }
@@ -458,7 +501,11 @@ function IngestButton({
   useEffect(() => {
     const was = prev.current
     prev.current = task?.status
-    if (was && was !== task?.status && task?.status === 'succeeded') onDone()
+    // **不要求"亲眼看到那一次跃迁"**：旧写法要 `was` 有值才认，于是任何"挂载时任务已经是终态"
+    // 的情况（切页面回来、事件在窗口刷新期间被丢掉、组件因列表刷新重挂）都不会去拉一次
+    // 已入库表——界面就永远停在「入库中」，而磁盘上其实早就入库好了（走查里抓到过一次）。
+    // refresh 是幂等的，条件放宽到"现在是 succeeded 且上次不是"即可
+    if (task?.status === 'succeeded' && was !== 'succeeded') onDone()
   }, [task?.status, onDone])
 
   if (busy) {

@@ -1,13 +1,16 @@
 import { ipcMain, dialog } from 'electron'
 import { store, setLlmKey, hasApiKey, hasLlmKey, setSecretLater, isSecretPending } from './store'
 import {
-  currentProviderId,
-  describeProvider,
-  listProviders,
-  setProvider,
-  setProviderOverrides,
-  type ProviderId,
-} from './ai/provider'
+  describeTier,
+  listTiers,
+  migrateTiers,
+  normalizeTier,
+  setTierConfig,
+  type TierId,
+} from './ai/tiers'
+import { invalidateTierHealth, tierHealth } from './ai/health'
+import { summarize, currentMonth, listMonths } from './usage'
+import { getPricing, setPricing } from './usage/pricing'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
 import { login, logout, authState, provisionKeys, getProvisionError, cancelLogin } from './auth'
@@ -26,6 +29,9 @@ import { tasks } from './tasks/registry'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
+  // 老用户迁移只跑一次：升级前配好的全局线路搬成"标准档"的映射，行为不变（见 ai/tiers.ts）
+  migrateTiers()
+
   // 注意：这里一律不解密。`hasApiKey` 用密文存在性回答，否则每次打开设置页都可能
   // 触发一次 safeStorage 冷调用，把主进程冻住几十秒（M-29）
   ipcMain.handle('settings:get', () => ({
@@ -35,9 +41,10 @@ export function registerIpc(): void {
     manualApiKey: store.get('manualApiKey') === true,
     llmBaseUrl: store.get('llmBaseUrl'),
     hasLlmKey: hasLlmKey(),
-    aiProvider: currentProviderId(),
-    providers: listProviders(),
-    keyWritePending: isSecretPending(describeProvider().keyField),
+    tiers: listTiers(),
+    /** 普通模式的「AI 服务：已就绪 ✓」只看默认档（标准）那把 key 在不在 */
+    aiReady: describeTier('standard').hasKey,
+    keyWritePending: isSecretPending(describeTier('standard').keyField),
     apiBaseUrl: store.get('apiBaseUrl'),
     dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
     dingtalkSecret: store.get('dingtalkSecret') ?? '',
@@ -73,30 +80,39 @@ export function registerIpc(): void {
   })
 
   /**
-   * 手填 key：写进**当前 provider 那把槽位**。
+   * 手填 key（管理员区）：写进**指定档位那把槽位**，不传就是默认档（标准）。
    * 立刻返回（明文已进内存缓存，马上能发消息），落盘是后台任务——safeStorage 首次调用
    * 会同步冻住主进程几十秒，不能挡在这颗保存按钮后面（M-29）
    */
-  ipcMain.handle('settings:setKey', (_e: Electron.IpcMainInvokeEvent, key: string) => {
-    const field = describeProvider().keyField
+  ipcMain.handle('settings:setKey', (_e: Electron.IpcMainInvokeEvent, key: string, tier?: TierId) => {
+    const field = describeTier(normalizeTier(tier ?? 'standard')).keyField
     const outcome = setSecretLater(field, key.trim())
     if (field === 'encryptedApiKey') store.set('manualApiKey', true)
     if (field === 'encryptedLlmKey') store.set('manualLlmKey', true)
+    invalidateTierHealth() // 换了 key，5 分钟缓存立刻作废，别让人改完还要等
     return { ok: true, outcome }
   })
 
-  // ---- 模型 provider（inferera / DeepSeek 官方 / 自定义）----
-  ipcMain.handle('ai:providers', () => ({ current: currentProviderId(), providers: listProviders() }))
-  ipcMain.handle('ai:setProvider', (_e, id: ProviderId) => {
-    setProvider(id)
-    return { ok: true, provider: describeProvider(id) }
-  })
+  // ---- 模型档位（标准/增强）：语义写死，映射留运维口（见 ai/tiers.ts）----
+  ipcMain.handle('ai:tiers', () => ({ tiers: listTiers() }))
   ipcMain.handle(
-    'ai:setProviderConfig',
-    (_e, id: ProviderId, cfg: { baseUrl?: string; model?: string; fastModel?: string }) => {
-      setProviderOverrides(id, cfg)
-      return { ok: true, provider: describeProvider(id) }
+    'ai:setTierConfig',
+    (_e, id: TierId, cfg: { baseUrl?: string; model?: string; fastModel?: string }) => {
+      setTierConfig(normalizeTier(id), cfg)
+      invalidateTierHealth(normalizeTier(id))
+      return { ok: true, tier: describeTier(normalizeTier(id)) }
     }
+  )
+  // 结果缓存 5 分钟，force 只给管理员区的「重新检测」用（不得每次发送都探）
+  ipcMain.handle('ai:tierHealth', (_e, id: TierId, force?: boolean) => tierHealth(normalizeTier(id), !!force))
+
+  // ---- 用量（按月 jsonl → 汇总）----
+  ipcMain.handle('usage:summary', (_e, month?: string) => summarize(month || currentMonth()))
+  ipcMain.handle('usage:months', () => listMonths())
+  // 单价与汇率是运维配置：只有管理员区调它，普通用户看到的永远是算好的人民币
+  ipcMain.handle('usage:pricing', () => getPricing())
+  ipcMain.handle('usage:setPricing', (_e, p: { usd?: unknown; usdCny?: number }) =>
+    setPricing(p as Parameters<typeof setPricing>[0])
   )
 
   // ---- vault ----
@@ -171,11 +187,11 @@ export function registerIpc(): void {
    * 「我想重来」是两回事，静默 abort 会误伤正在生成的长回答。拒绝理由回给渲染层，
    * 由它弹一条带「停止当前生成」动作的提示（设计 §5.3），别把用户堵死在原地。
    */
-  ipcMain.handle('chat:send', (_e, sessionId: string, prompt: string, resume?: string) => {
+  ipcMain.handle('chat:send', (_e, sessionId: string, prompt: string, resume?: string, tier?: TierId) => {
     if (agentManager.isStreaming(sessionId)) {
       return { ok: false, reason: 'busy' as const, error: '这个对话还在生成中' }
     }
-    void agentManager.send(sessionId, prompt, resume)
+    void agentManager.send(sessionId, prompt, resume, normalizeTier(tier ?? 'standard'))
     return { ok: true }
   })
   ipcMain.handle('chat:stop', (_e, sessionId: string) => agentManager.stop(sessionId))

@@ -4,7 +4,9 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { app, type BrowserWindow } from 'electron'
 import { z } from 'zod'
-import { agentEnv, resolveForRequest } from '../ai/provider'
+import { agentEnv } from '../ai/provider'
+import { resolveTierForRequest, normalizeTier, DEFAULT_TIER, type TierId } from '../ai/tiers'
+import { appendUsage, type UsageTaskType } from '../usage'
 import { vaultManager } from '../vault'
 import { searchCloud } from '../knowledge/client'
 import { pipelineBin } from '../lib/pipeline'
@@ -22,6 +24,8 @@ export interface AgentStreamPayload {
   /** 实际服务这轮的模型名（来自 result.modelUsage）。
       DeepSeek 官方端点遇到不认识的模型名会静默降级，只有这里能看出真相 */
   models?: string[]
+  /** 这一轮用的档位；出错时渲染层据此给「切换到标准模式重试」的出口 */
+  tier?: TierId
 }
 
 /** SDK 的 CLI 是平台二进制；打包后 asar 内路径无法 spawn（ENOTDIR），显式指到真实位置 */
@@ -116,6 +120,17 @@ export class AgentManager {
     tasks.finish(taskId, 'canceled')
   }
 
+  /**
+   * 这一轮算哪种任务：按**真的调过的渲染工具**判，不按用户说了什么。
+   * "帮我做个 PPT" 说了但没产出的那种轮次，记成对话才是实情。
+   */
+  private taskTypeOf(tools: Set<string>): UsageTaskType {
+    const has = (n: string): boolean => [...tools].some((t) => t.includes(n))
+    if (has('render_pptx')) return 'make-ppt'
+    if (has('render_document')) return 'make-docx'
+    return 'chat'
+  }
+
   private buildSystemPrompt(): string {
     const root = vaultManager.currentRoot
     const tree = vaultManager.tree()
@@ -133,8 +148,17 @@ export class AgentManager {
 7. 检索够用即止：同一个任务里 search_knowledge 最多调 3 次。素材够写就立刻动手产出（该调 render_pptx / render_document 就调），不要为了"再全一点"反复检索——轮次是有上限的，耗光了文件就产不出来。库里确实没有的内容，直接说明缺口，不要靠反复换词再搜。`
   }
 
-  /** 发送一轮对话；流式事件经 agent:stream 下行 */
-  async send(sessionId: string, prompt: string, resumeSdkSessionId?: string): Promise<void> {
+  /**
+   * 发送一轮对话；流式事件经 agent:stream 下行。
+   * `tier` 是**会话级**的模型档位（标准/增强），由渲染层随每次发送带上——
+   * 全局设置那套做不到"这个对话用增强、那个对话用标准"。
+   */
+  async send(
+    sessionId: string,
+    prompt: string,
+    resumeSdkSessionId?: string,
+    tierId: TierId = DEFAULT_TIER
+  ): Promise<void> {
     // H-10：同一 session 已在流式中就**拒绝**，不 abort 旧的。IPC 层已经先拦过一道并把
     // 「停止当前生成」的出口给了用户，这里是竞态兜底（拒绝之后 AbortController 覆盖问题随之消失）
     if (this.isStreaming(sessionId)) {
@@ -143,6 +167,7 @@ export class AgentManager {
     }
     // 任务对象在**第一个同步 tick** 就建起来：下面全是 await，任务建晚了这段窗口里
     // 第二条消息照样挤得进来，AbortController 又会被后来的覆盖（H-10 的老根因）
+    const tier = normalizeTier(tierId)
     const taskId = this.taskId(sessionId)
     tasks.start({
       id: taskId,
@@ -156,15 +181,19 @@ export class AgentManager {
     /** 预检不通过：这一轮压根没开始，任务直接撤掉（别在 Dock 上留一条红字） */
     const bail = (msg: string): void => {
       tasks.drop(taskId)
-      this.emit({ sessionId, kind: 'error', text: msg })
+      this.emit({ sessionId, kind: 'error', text: msg, tier })
     }
 
     const root = vaultManager.currentRoot
     if (!root) return bail('请先在「个人知识库」打开一个库')
-    // provider 层给出地址/模型/key：模型显式指定，绝不依赖端点的自动映射（见 ai/provider.ts）
-    const provider = resolveForRequest()
-    if (!provider.apiKey) return bail(`请先在「设置」里配置 ${provider.label} 的 API Key`)
-    if (!provider.baseUrl) return bail('请先在「设置」里填写自定义线路的 base URL')
+    // 档位层给出地址/模型/key：模型显式指定，绝不依赖端点的自动映射（见 ai/tiers.ts）
+    const provider = resolveTierForRequest(tier)
+    if (!provider.apiKey) return bail(`「${provider.label}」线路还没配置密钥，请联系管理员`)
+    if (!provider.baseUrl) return bail(`「${provider.label}」线路还没配置地址，请联系管理员`)
+
+    // 这一轮真的调过哪些工具 → 决定用量记录里的任务类型（做 PPT / 做文档 / 纯对话）
+    const toolsUsed = new Set<string>()
+    const startedAt = Date.now()
 
     // draft 上移主进程：切走再切回来能补齐这段时间流出的字（H-08 的对话版），
     // 也是「停止生成保留半截」（H-09）与「同一会话拒绝重复发送」（H-10）的前提
@@ -327,6 +356,7 @@ export class AgentManager {
             appendDraft(ev.delta.text)
             this.emit({ sessionId, kind: 'delta', text: ev.delta.text })
           } else if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
+            if (ev.content_block.name) toolsUsed.add(ev.content_block.name)
             tasks.patch(taskId, { toolLine: ev.content_block.name } as Partial<AgentTask>)
             this.emit({ sessionId, kind: 'tool', tool: ev.content_block.name })
           }
@@ -334,10 +364,42 @@ export class AgentManager {
         }
         if (message.type === 'result') {
           const text = message.subtype === 'success' ? message.result : `出错：${message.subtype}`
-          // 服务端实际用的模型：对不上就是被端点静默换掉了（诊断日志里留一行）
-          const models = Object.keys((message as { modelUsage?: Record<string, unknown> }).modelUsage ?? {})
-          if (models.length && !models.includes(provider.model)) {
+          // 服务端实际用的模型：对不上就是被端点静默换掉了（诊断日志留一行 + 记进用量）
+          const modelUsage = (message as { modelUsage?: Record<string, unknown> }).modelUsage ?? {}
+          const models = Object.keys(modelUsage)
+          const degraded = models.length > 0 && !models.includes(provider.model)
+          /**
+           * 「这一轮实际是谁服务的」= 主模型在不在里面。
+           * 不能直接取 `models[0]`：一轮里往往同时出现主模型与轻量模型（起标题、压上下文），
+           * key 的顺序是服务端给的，实测标准档那一轮排在前面的是 flash——记成 flash 就等于
+           * 报告"我要 pro，实际用了 flash"，看着像被降级了，其实 pro 就在同一个 modelUsage 里
+           * （2026-08-17 真实调用对账时抓到）。被真降级时 models 里没有主模型，这里自然落到实际那个。
+           */
+          const resolved = models.includes(provider.model) ? provider.model : (models[0] ?? null)
+          if (degraded) {
             log('warn', 'agent', `模型被服务端替换：要的是 ${provider.model}，实际 ${models.join('/')}`)
+          }
+          const costUsd = 'total_cost_usd' in message ? message.total_cost_usd : undefined
+          // 用量记账：**只记跑成功的那一轮**。失败的轮次（鉴权失败、线路挂了）token 通常是 0，
+          // 记进去只会让「本月对话 N 次」把失败也算成用量——用户看这个数是为了估消耗，不是查故障。
+          // 失败在 Dock 与诊断日志里各有出口，不靠这里。**不挑字段、原样存**，归一化留给汇总侧
+          if (message.subtype === 'success') {
+            appendUsage({
+              ts: Date.now(),
+              sessionId,
+              taskType: this.taskTypeOf(toolsUsed),
+              tier,
+              expected_model: provider.model,
+              resolved_model: resolved,
+              models,
+              degraded,
+              durationMs: Date.now() - startedAt,
+              usage: {
+                usage: (message as { usage?: unknown }).usage ?? null,
+                modelUsage: models.length ? modelUsage : null,
+              },
+              costUsd: costUsd ?? null,
+            })
           }
           // 正文已经作为一条完整消息落进对话，草稿使命结束
           tasks.patch(taskId, { draft: '', toolLine: undefined, sdkSessionId: message.session_id } as Partial<AgentTask>)
@@ -346,8 +408,9 @@ export class AgentManager {
             kind: 'assistant',
             text,
             sdkSessionId: message.session_id,
-            costUsd: 'total_cost_usd' in message ? message.total_cost_usd : undefined,
+            costUsd,
             models,
+            tier,
           })
         }
       }
@@ -358,7 +421,9 @@ export class AgentManager {
         log('error', 'agent', err instanceof Error ? err : String(err))
         tasks.patch(taskId, { title: 'AI 回答出错' } as Partial<AgentTask>)
         tasks.finish(taskId, 'failed', err instanceof Error ? err.message : String(err))
-        this.emit({ sessionId, kind: 'error', text: String(err) })
+        // 增强档失败时把"还有一条路可走"说出来：光报错等于把用户堵在原地（同 §5.3 的原则）
+        const hint = tier === 'enhanced' ? '（增强模式线路异常，可切换到标准模式重试）' : ''
+        this.emit({ sessionId, kind: 'error', text: `${String(err)}${hint}`, tier })
       } else {
         tasks.finish(taskId, 'canceled')
         this.emit({ sessionId, kind: 'done' })

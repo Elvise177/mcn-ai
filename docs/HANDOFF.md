@@ -1,6 +1,6 @@
 # mcn-ai 产品交接文档（HANDOFF）
 
-> 更新：2026-08-16 ｜ 范围：mcn-ai 产品线（桌面版 + 云端），不含 OMG 钉钉自动化定制项目（那是独立仓库 `~/Documents/AI/omg-dingtalk-automation`，有自己的 README 和交付文档）
+> 更新：2026-08-17 ｜ 范围：mcn-ai 产品线（桌面版 + 云端），不含 OMG 钉钉自动化定制项目（那是独立仓库 `~/Documents/AI/omg-dingtalk-automation`，有自己的 README 和交付文档）
 > 当前阶段：MVP（M0–M4）全部完成并交付 0 号用户实测；下一步是与大头（Maggie）对接正式 AI 需求
 
 ---
@@ -22,7 +22,9 @@ Electron App（macOS arm64，v0.1.0）
     │             + 双链/标签正则 → 内存索引 → 关系图（react-force-graph-2d, canvas）
     ├ inbox/      投递箱编排：chokidar(awaitWriteFinish 2s) → p-queue(并发1)
     │             → spawn 冻结版 pipeline → 按行解析 JSON 进度 → .done/.failed
-    ├ ai/         provider 层：线路（中转站/DeepSeek官方/自定义）+ 模型显式下发
+    ├ ai/         档位层 tiers.ts（标准/增强 → 线路+模型，运维可改映射）+ health.ts（线路探测）
+    │             provider.ts 退化为历史配置读口 + agentEnv（子进程环境构造）
+    ├ usage/      用量记录：userData/usage/YYYY-MM.jsonl（原样存 usage，归一化在汇总侧）
     ├ knowledge/  云端私人知识层 ingest/search 的 fetch 客户端
     └ auth/       supabase-js signInWithPassword + safeStorage 加密存 session
 
@@ -37,7 +39,7 @@ Electron App（macOS arm64，v0.1.0）
 | 壳 | Electron **30.5.1（锁死）** + electron-vite + electron-builder | 见决策 §4-2，勿升级到 31+ |
 | 前端 | React 18 / TypeScript / Tailwind | 聊天组件从 webpage 直搬 |
 | Agent | Claude Agent SDK（主进程直跑） | `ELECTRON_RUN_AS_NODE=1` + `options.executable=process.execPath` + SDK asarUnpack |
-| LLM 接入 | provider 层三选一（`src/main/ai/provider.ts`）：inferera 中转站 ／ DeepSeek 官方 Anthropic 兼容端点 ／ 自定义 base URL；主模型 `deepseek-v4-pro`、轻量 `deepseek-v4-flash` **显式下发** | 见 §4-17；key 用 safeStorage 加密存储（读写规则见 §4-18），网关是 P1（§4-3） |
+| LLM 接入 | **会话级档位**（`src/main/ai/tiers.ts`）：标准=DeepSeek 官方 `deepseek-v4-pro/flash`，增强=aihubmix `claude-opus-5`；模型串**显式下发**，映射（地址/模型/key）在设置页管理员区可改 | 见 §4-17/§4-23；key 用 safeStorage 加密存储（读写规则见 §4-18），网关是 P1（§4-3） |
 | 知识入库 pipeline | Python（pkb-pipeline 仓库），PyInstaller **onedir** 冻结，随 app 分发于 resources/pipeline | cli.py：`mcn-ingest --file --vault --layout --llm-key`，串联 02→09→03→07→04 |
 | 云端 | Supabase：Auth + Postgres + pgvector + RLS | 项目 id：`yqozqfrmdddmfrpavrsn`（免费版，有暂停坑，见 §3-2） |
 | 向量 | text-embedding-3-small | 成本敏感选型 |
@@ -90,8 +92,19 @@ Electron App（macOS arm64，v0.1.0）
     **E2E_CHAT 全量轮又抓到两条（都已修）**：① **重试只撤掉了 ⚠️ 那一条**——SDK 出错时往往**先吐一条原始错误正文（英文 result）再抛异常**，只删 ⚠️ 的话每重试一次就多堆一条；改成回退到「最后一条提问」重发（撤掉这一轮失败留下的全部内容），断言也从「数提问 / 数按钮」换成**「重试前后消息条数必须相等」**（旧断言正是因为太窄才漏掉的）；② 失败的 agent 任务会在 Dock 上挂 30 分钟（`RECENT_TTL_MS`），**按钮文案里失败优先于「N 条待同步」**，于是新加的出错测试把后面 M-03 的可见性断言挡掉了——走查改成「端点恢复后再点一次重试、真的拿到回答」收尾，任务落成 succeeded，顺带把「重试真能救回来」也验了（41e）。
     **走查新增断言**：建库失败分支用 `MCNAI_E2E_VAULT_FAIL=<卡住毫秒数>` 触发（系统保存框一弹起来 Playwright 就没法继续，只能这样验，走查专用、生产不读，同 §4-21 的 `MCNAI_SUPABASE_URL`）——断言 busy 文案+spinner+另一张卡禁用（40）、失败 toast（40b）、失败后两张卡都恢复可点且能再发起一次；搜索三态用**探针先跑、随后再输入**的写法断言"有搜索词时左栏一次都不许再出现文件树叶子"+ 必须出现过「检索中…」（05）、零命中态与清空按钮真点（05b/05c）、计数「N / 共 M 条」与列表条数对账；笔记读取失败用 **chmod 000** 造真实读失败（文件还在树里，只是读不了）→ toast + 错误态 + 修回权限点「重试」正文真出来（42/42b）；断链附件点击出「找不到文件：…」（43）；产物「打开」前先把磁盘上那份删掉 → 「打不开产物」+「在 Finder 中显示」出口（44）；M-11 用**切到 custom 线路**（默认没 base URL 也没 key）造确定失败，断言提问仍在历史里、点重试后用 MutationObserver 抓到"错误气泡被撤掉过"且提问没被复制成两条（41/41b）；L-03 连点 5 次附件按钮断言同屏 3 条、悬停 5 秒不消失、点击立刻少一条（40c/40d）。**E2E_CHAT 专属**：M-11 的**异步出错**分支——用一个**秒回 401 的本地 http 桩**当端点（key 是好的、过得了预检，错误在请求发出去之后才到，正是「提问被错误盖掉」那条竞态最宽的窗口；**不要用连接被拒的端口 9**，SDK 会一路重试退避，实测单次 2~4 分钟，第一版走查就是这么超时的），断言提问仍在、重试不堆叠、恢复后重试成功（41c/41d/41e）。另外把 `walkthrough.mjs` 收尾改成 `catch` 先打印失败原因再 `finally` 关应用，且 `app.close()` 加 20 秒竞速——close 挂住时抛出去的错会被一起埋掉，看着像「卡死在某一步」，实测被坑过一次。H-10 切走切回那段也加了防空过：先等正文吐够 24 字再切走；切换间隙回答就结束了的话补发一条长回答的提问重试一次；并且只有主进程说「这条 agent 任务还在跑」时才要求界面有进行中状态
 
-15. **验收基线**：Maggie vault 全量数据「批量导入→问库→生成PPT→回看产物」闭环通过；e2e 走查脚本 `desktop/e2e/walkthrough.mjs` + 截图基线 `desktop/e2e/shots/`（GUI 改动必须跑走查看截图再交付——用户铁律）。2026-08-16 新增走查步骤：空库引导（独立空库实例）＋首页卡片区＋chips 填充＋输入框 60px/附件位＋流式光标（E2E_CHAT=1 真实流式时截行尾光标）＋投递箱六阶段进度条＋产物卡片 hover/打开/入库/预览＋最近对话卡片点开＋建库卡片 hover＋笔记 ··· 菜单/删除二次确认/新建→删除全链路＋搜索摘要洁净度＋空值与空表格＋分区投递静态同款与悬停高亮＋首页产物面板默认收起；UI 精修第二轮再加：文件树默认宽 220 断言＋三栏分隔线真拖（tree +90 / graph +80，断言宽度变化与 localStorage 落盘，重载后复查记忆）＋关系图配色特写（扫 canvas 像素定位节点团中心 → 滚轮放大 → 裁中间一块，配色需人工看这张确认）＋markdown 表格样式（临时造一篇带表格的笔记，断言圆角与行 hover 变色）。**跑法**：`node e2e/walkthrough.mjs`（本地模式）或 `E2E_CHAT=1 node e2e/walkthrough.mjs`（用测试账号登录跑真实 AI，01d/01d3/01e 只有这样才刷得到）；再跑 `node e2e/login-provision.mjs` 刷 00b/11/12，跑完看收尾那段「未刷新」清单。UX 审计 P0 批次新增走查步骤：笔记编辑→保存成功 toast＋落盘断言（20/20b）、编辑中切笔记的未保存确认（取消留在原地且草稿不丢 / 放弃后磁盘内容不变，21/21b/21c）、换库二次确认＋向导「返回当前库」（22/22b/22c）、设置页手填 key 保存＋「重新获取服务端配置」反馈（10b/10c）、侧栏删除对话的二次确认＋toast（23/23b）、**真拖一个文件到工作台页**（合成带真实 `File.path` 的 DragEvent，断言覆盖层出现、没发生导航、侧栏与输入框还在、文件确实进了投递箱目录，24/24b）。**任务层一期再加**：投递跑着切到工作台断言全局条仍在（25）、切回知识库断言运行态与进度条还在（26）、**趁任务活着 reload** 断言主进程快照与 Dock 都还在（27——必须在任务活跃那一刻刷新，等它跑完再刷测到的是"收起"那条分支）、Dock 高度过渡属性、Dock 条数与 `tasks:list` 活跃数一致（**两轮 pipeline 之间有 3 秒去抖窗口，那一刻确实没有活跃任务、Dock 本就该收起，所以这两条必须轮询、不能采样一次**）、产物入库三态 29/30/31/32（含 reload 后「已入库」仍在、点「已入库」跳落位笔记）、云端离线降级 33（独立实例把服务器地址指到 127.0.0.1:9 再重启，断言照常开窗+离线条+知识库可用）、E2E_CHAT 下的 H-10 切走切回（28，断言半截正文接得上）。**provider 解耦 + M-29 再加**：模型线路卡片三条线路可见并真切一次到 DeepSeek 官方（断言 base URL 变 `…/anthropic`、主模型 `deepseek-v4-pro`、主进程认账，再切回，10e/10f）、手填 key 的点击必须 20s 内返回（旧版是 10 分钟超时）＋ 出等待态文案（10d，冷调用快时可能一闪而过，所以「看到文案」与「任务层留下 secret 任务」二选一）＋ **同一把 key 再存一次断言 `outcome==='unchanged'` 且不新增 secret 任务**；E2E_CHAT 下额外断言连续两次 `auth.provision()` 的第二次 `wrote` 为空（= 老用户重复登录零写入）。**引擎冒烟**：`npm run smoke:provider`（需 `SMOKE_INFERERA_KEY`/`SMOKE_DEEPSEEK_KEY`，逐 provider 跑单轮/多轮 resume/abort/工具调用/流式/make-ppt 六项，并用 `result.modelUsage` 断言服务端实际用的就是钉死的模型）。
-    **任务层二期再加**（设计 §6.3 断言 7–13）：投递跑到一半真点「停止本轮」→ 断言任务是 `canceled` 且不带 error、面板文案含「已停止/已完成的部分」、进度条中性灰、**`ps -eo pgid,pid,command` 查该进程组零残留**、已落位的笔记一篇不少（34/34b）；退出应用后同样查一次进程组，验 `before-quit` 不留孤儿；生成中直接调 `chat.send` 断言被拒（`reason:'busy'`）＋界面敲 Enter 出带「停止当前生成」按钮的提示且输入不清空（35）；点那颗按钮 → 半截回答带「（已停止）」留在对话里、之后**不会再补一条完整答案**（36）；**外部脚本真改文件**触发冲突条（断言不弹模态、草稿不变）→「查看对方版本」展开磁盘那版 →保存弹三选一（断言默认高亮「另存为副本」）→ 选副本后**磁盘上两份都在**（37/37b/37c/37d），并单独验一次"应用自己保存不算冲突"；登录页黑洞 socket 验可取消 + 10s 超时文案（38/38b），端口 9 验「网络不可达」不是「密码错」（38c）；syncQueue 用真实 Supabase 约束失败造队列，断言退避 1m→5m→30m→转手动、Dock 出「N 条待同步」+「重试同步」、点重试真跑一轮（tries 4→1）、换成合法内容再存一次即自动清队（39）。**取消与 before-quit 两条必须在打包形态下跑**：`MCNAI_APP_BIN=release/mac-arm64/mcn-ai.app/Contents/MacOS/mcn-ai node e2e/walkthrough.mjs`（设计 §8 风险 1，dev 形态验过不算数）
+17. **会话级模型档位 + 设置页分组重构 + 用量记录（2026-08-17）**：一单三件事，决策与踩坑见 §4-23/§4-24/§4-25。
+    - **A 会话级档位**：输入框内（附件位右侧，落点参照 Claude Desktop 的 composer 左下角）加档位选择器 `components/TierSelector.tsx`，两档「标准（推荐）／增强」，**界面不出现供应商名与模型名**，悬停 tooltip 只说能力与消耗差异。档位存在 conversation 上随对话落盘，`chat:send` 多一个 `tier` 参数，新会话默认标准。增强档接线路健康检查（`ai/health.ts`，`max_tokens:1` 探一次、结果缓存 5 分钟、只探增强档），不可用时选择器里置灰 +「暂时不可用」；会话进行中失败走原有错误重试路径，气泡里额外给「切换到标准模式重试」。静默降级防线沿用并加强：`result.modelUsage` 与档位期望模型比对，不一致打 warn **并记进用量**（`degraded:true`）。老用户迁移见 §4-23。
+    - **B 设置页分组重构**（不改任何设置项的行为）：四组卡片 账号／模型服务／知识库／用量。模型服务在普通模式只有一行「AI 服务：已就绪 ✓」，异常时换成「服务异常 + 重新连接」。线路 base URL、档位映射、各线路 API Key 手填、「重新获取服务端配置」、服务器地址**全部移进隐藏管理员区**——设置页底部版本号连续点 7 次解锁，解锁态存内存（放在 App 而不是设置页组件里，去用量页看一眼再回来不至于又锁上），重启复位，区顶标「运维配置，请勿改动」。「导出诊断报告」仍是页面底部独立区域。样式沿用现有 token，没新造。
+    - **A′ 返工（2026-08-17 验收后）**：档位选择器从**输入框内部**移到**输入框下沿的控制条右侧**（挨着发送键那一侧，形态参照 Claude Desktop 的模型选择器：无边框文字胶囊「标准 ⌄」，向上弹菜单）。输入框内部恢复为只有附件位——档位是"这一轮怎么跑"的元信息，不是输入内容的一部分，塞在正文行里既挤横向空间又不合语义。**消耗差异的说明从 tooltip 挪进菜单里的灰色小字**：差几十倍这种事得让人在"选之前"看见，悬停两秒才看见等于没说。控制条留成了以后放别的轮次开关的位置。
+    - **C 用量记录与用量页**：`usage/index.ts` 每次成功 result 追加写 `userData/usage/YYYY-MM.jsonl`（时间戳/sessionId/任务类型/档位/expected_model/resolved_model/耗时/**原样的完整 usage 对象**）；投递箱的智能打标拿不到 token 就只记次数。设置页用量卡片「本月对话 N 次 · 产物 M 个」→ 用量页 `pages/UsagePage.tsx`：顶部大数字、最近 14 天纯 CSS 柱条、**按档位消耗对比**（成本透明化的核心，两档次数与 token 并排）、按任务类型细分表（次数/tokens/耗时中位数）、tokens 口径脚注、空态引导、顶部预留隐藏的配额进度条组件位（`QUOTA_ENABLED=false`，注释标了「将来按量计费启用」）。消息气泡不加任何用量显示。开发者侧另有 `scripts/usage-report.mjs`（读全部月份，按月/类型/档位/实际模型出 token 与估算成本，单价常量在脚本顶部，deepseek 与 claude-opus-5 分开配；只走控制台，不进 UI）。
+    - **C′ 返工：人民币化（2026-08-17 验收后）**：页面上的钱一律是人民币，**美元单价与汇率下沉到管理员区**（各档 输入/输出 每百万 token 的美元价 + USD/CNY 汇率，默认 7.2）。让老板看着美元单价自己乘汇率，等于这件事没做。顶部大数字从两项变三项（对话次数 / 产物数 / **本月估算花费 约 ¥N**）；档位对比区升级成 **次数 / tokens / ¥花费 三列并排**；类型表的 tokens 列改成「约 ¥X.XX · N tokens」（人民币在前，tokens 退居佐证）；页面底部加脚注「费用为估算值，以实际账单为准」。**单价只有一份真相**：`usage/pricing.ts` 的 `getPricing()` 会把默认值补齐**落进 store**，`scripts/usage-report.mjs` 直接读 `userData/config.json` 的 `pricing`，读不到才用内置兜底并在表头打印"计价来源"——这样"页面一个价、脚本另一个价"不可能发生。计价按**档位**而不是模型名：档位才是用户看得见的东西，模型串是运维可以换掉的。
+    - **顺带删掉的**：设置页的 provider 选择器与 `ai:providers`/`ai:setProvider`/`ai:setProviderConfig` 三个 IPC（被档位映射取代），`ai/provider.ts` 里随之失效的 `listProviders/setProvider/setProviderOverrides/resolveForRequest`。
+15. **验收基线**：Maggie vault 全量数据「批量导入→问库→生成PPT→回看产物」闭环通过；e2e 走查脚本 `desktop/e2e/walkthrough.mjs` + 截图基线 `desktop/e2e/shots/`（GUI 改动必须跑走查看截图再交付——用户铁律）。2026-08-16 新增走查步骤：空库引导（独立空库实例）＋首页卡片区＋chips 填充＋输入框 60px/附件位＋流式光标（E2E_CHAT=1 真实流式时截行尾光标）＋投递箱六阶段进度条＋产物卡片 hover/打开/入库/预览＋最近对话卡片点开＋建库卡片 hover＋笔记 ··· 菜单/删除二次确认/新建→删除全链路＋搜索摘要洁净度＋空值与空表格＋分区投递静态同款与悬停高亮＋首页产物面板默认收起；UI 精修第二轮再加：文件树默认宽 220 断言＋三栏分隔线真拖（tree +90 / graph +80，断言宽度变化与 localStorage 落盘，重载后复查记忆）＋关系图配色特写（扫 canvas 像素定位节点团中心 → 滚轮放大 → 裁中间一块，配色需人工看这张确认）＋markdown 表格样式（临时造一篇带表格的笔记，断言圆角与行 hover 变色）。**跑法**：`node e2e/walkthrough.mjs`（本地模式）或 `E2E_CHAT=1 node e2e/walkthrough.mjs`（用测试账号登录跑真实 AI，01d/01d3/01e 只有这样才刷得到）；再跑 `node e2e/login-provision.mjs` 刷 00b/11/12，跑完看收尾那段「未刷新」清单。UX 审计 P0 批次新增走查步骤：笔记编辑→保存成功 toast＋落盘断言（20/20b）、编辑中切笔记的未保存确认（取消留在原地且草稿不丢 / 放弃后磁盘内容不变，21/21b/21c）、换库二次确认＋向导「返回当前库」（22/22b/22c）、设置页手填 key 保存＋「重新获取服务端配置」反馈（10b/10c）、侧栏删除对话的二次确认＋toast（23/23b）、**真拖一个文件到工作台页**（合成带真实 `File.path` 的 DragEvent，断言覆盖层出现、没发生导航、侧栏与输入框还在、文件确实进了投递箱目录，24/24b）。**任务层一期再加**：投递跑着切到工作台断言全局条仍在（25）、切回知识库断言运行态与进度条还在（26）、**趁任务活着 reload** 断言主进程快照与 Dock 都还在（27——必须在任务活跃那一刻刷新，等它跑完再刷测到的是"收起"那条分支）、Dock 高度过渡属性、Dock 条数与 `tasks:list` 活跃数一致（**两轮 pipeline 之间有 3 秒去抖窗口，那一刻确实没有活跃任务、Dock 本就该收起，所以这两条必须轮询、不能采样一次**）、产物入库三态 29/30/31/32（含 reload 后「已入库」仍在、点「已入库」跳落位笔记）、云端离线降级 33（独立实例把服务器地址指到 127.0.0.1:9 再重启，断言照常开窗+离线条+知识库可用）、E2E_CHAT 下的 H-10 切走切回（28，断言半截正文接得上）。**provider 解耦 + M-29 再加**：~~模型线路卡片三条线路可见并真切一次到 DeepSeek 官方（10e/10f）~~ —— **2026-08-17 起这两步被"管理员区的档位映射"取代（10g/10h），10e/10f 两张截图已删**；手填 key 的点击必须 20s 内返回（旧版是 10 分钟超时）＋ 出等待态文案（10d，冷调用快时可能一闪而过，所以「看到文案」与「任务层留下 secret 任务」二选一）＋ **同一把 key 再存一次断言 `outcome==='unchanged'` 且不新增 secret 任务**；E2E_CHAT 下额外断言连续两次 `auth.provision()` 的第二次 `wrote` 为空（= 老用户重复登录零写入）。**引擎冒烟**：`npm run smoke:provider`（需 `SMOKE_INFERERA_KEY`/`SMOKE_DEEPSEEK_KEY`/`SMOKE_AIHUBMIX_KEY`，逐条线路跑单轮/多轮 resume/abort/工具调用/流式/make-ppt 六项，并用 `result.modelUsage` 断言服务端实际用的就是钉死的模型；`SMOKE_ONLY=<线路>` 与 `SMOKE_CASES=single,abort,tools` 可精确裁剪，**新增线路只跑最小集**即可，见 desktop/CLAUDE.md 的验收铁律）。
+    **任务层二期再加**（设计 §6.3 断言 7–13）：投递跑到一半真点「停止本轮」→ 断言任务是 `canceled` 且不带 error、面板文案含「已停止/已完成的部分」、进度条中性灰、**`ps -eo pgid,pid,command` 查该进程组零残留**、已落位的笔记一篇不少（34/34b）；退出应用后同样查一次进程组，验 `before-quit` 不留孤儿；生成中直接调 `chat.send` 断言被拒（`reason:'busy'`）＋界面敲 Enter 出带「停止当前生成」按钮的提示且输入不清空（35）；点那颗按钮 → 半截回答带「（已停止）」留在对话里、之后**不会再补一条完整答案**（36）；**外部脚本真改文件**触发冲突条（断言不弹模态、草稿不变）→「查看对方版本」展开磁盘那版 →保存弹三选一（断言默认高亮「另存为副本」）→ 选副本后**磁盘上两份都在**（37/37b/37c/37d），并单独验一次"应用自己保存不算冲突"；登录页黑洞 socket 验可取消 + 10s 超时文案（38/38b），端口 9 验「网络不可达」不是「密码错」（38c）；syncQueue 用真实 Supabase 约束失败造队列，断言退避 1m→5m→30m→转手动、Dock 出「N 条待同步」+「重试同步」、点重试真跑一轮（tries 4→1）、换成合法内容再存一次即自动清队（39）。**增强档回落再加（2026-08-17）**：新增独立实例**模拟老用户升级机**（大头那台的形态）——第一次启动把 vaultPath 落盘，改 config 抹掉 `tierMigrated` 再启一次 → 走 `migrateTiers` 的老用户分支（**这条之前只在真机上验过，现在进走查了**），断言标准档 `keyField` 搬成 `encryptedApiKey`、base URL 变 inferera；然后只配这一把 key，断言增强档 `hasKey=true` / `usingSharedKey=true` / 选择器里**不再置灰**（45e）/ 管理员区标出「复用中转站密钥」/ **`logs/main.log` 里出现回落日志且写明回落到哪把**。真机侧另跑了一次「拿真实 userData 的副本起应用」的验证：真实网络探测 `ok:true`、菜单可选、回落日志落下。**返工后再加（2026-08-17 验收）**：档位选择器**位置**断言——必须在 `composer-bar` 里、**输入框那一行内不得再有档位控件**、控制条在输入行下方且 `justify-content:flex-end`、按钮上不许再挂 tooltip、菜单必须**向上**弹（比 `getBoundingClientRect`）；管理员区计价配置（默认单价 0.28/1.1、15/75、汇率 7.2）与**落盘**断言（脚本靠这一份）；用量页人民币化——「本月估算花费 约 ¥N」大数字、增强档换算落在 ¥4.5 上下（桩数据反推）、档位对比区三列齐全、类型表「约 ¥X.XX · N tokens」格式、**整页不许出现美元单价**、费用脚注含「估算值/实际账单」。新增截图 10i（计价配置）。
+    **档位 + 设置页分组 + 用量再加（2026-08-17）**：档位选择器就位与新会话默认标准（45）＋ **tooltip 与菜单里禁止出现供应商名/模型名**（正则扫 deepseek|claude|opus|aihubmix|inferera）＋ 增强档置灰与「暂时不可用」（45b，独立实例 `MCNAI_E2E_TIER_HEALTH=down`，并断言 `disabled` 真生效、强点也切不过去）＋ 真切到增强档（45c）＋ 增强档失败时的「切换到标准模式重试」出口（45d）＋ **档位按会话记忆**（新对话回标准、切回旧会话仍是增强、`chat.list()` 里 `tier` 真落盘）；设置页四组卡片齐全 + 管理员区默认不可见 + 模型服务卡片在普通模式里不许出现线路/模型串（10）＋ 版本号点 6 次不解锁、第 7 次才解锁（10g）＋ 管理员区两档映射的地址与模型串断言（10h：标准 `api.deepseek.com` / `deepseek-v4-pro` / `deepseek-v4-flash`，增强 `aihubmix.com` / `claude-opus-5`）＋「检测线路」真点一次并要求界面落结论；手填 key 与 M-29 那组断言原样搬到管理员区（10b/10c/10d，testid 改成 `tier-key-input-<档位>`/`tier-key-save-<档位>`），并加一条**「保存后普通模式那行必须跟着变成已就绪 ✓」**（两处说法不一致是最容易糊弄过去的洞）；用量空态引导（47）＋ **桩数据直写 `userData/usage/YYYY-MM.jsonl`** 验读取链路（47b/47c：对话/产物大数字各 +1、两档 token 分开归一、入库打标只记次数且 token 显示「—」、14 根柱子、口径脚注、配额进度条本期不显示）；E2E_CHAT 下额外验**写入链路**——一轮真实对话后 jsonl 必须落一条字段齐全的记录且 `degraded` 为假。
+    **走查与真实调用对账抓到的坑（已修，五个）**：① `resolveTierForRequest` 原来会兜底吃 `ANTHROPIC_AUTH_TOKEN`，开发机上常年挂着这个变量，于是"增强档没配 key"那条预检分支在走查里根本触发不到——请求真的发了出去。改成**只有无窗口时（无头冒烟）才吃 env**；② 同一轮发现失败的那两次也被记进了用量，于是把记账收窄到 `subtype === 'success'`；③ **`resolved_model` 记成了轻量模型**（2026-08-17 真实调用对账时抓到）：旧写法取 `Object.keys(modelUsage)[0]`，而一轮里往往同时出现主模型与轻量模型（起标题、压上下文），key 的顺序由服务端给——标准档那一轮排在前面的正好是 `deepseek-v4-flash`，于是记录里写着"要 pro，实际 flash"，看着像被降级，其实 pro 就在同一个 modelUsage 里。改成"主模型在里面就记主模型，不在才记实际那个"（`degraded` 的判据本来就是"主模型在不在"，两者现在一致了）。④ **产物入库跑完了，界面还停在「入库中」**（间歇性，跑第四轮才复现）：`IngestButton` 旧写法要求"亲眼看到 running→succeeded 那一次跃迁"（`was` 有值才认），于是任何"挂载时任务已经是终态"的情况——切页面回来、列表刷新导致重挂、事件在窗口刷新期间被丢——都不会去拉一次已入库表。落盘表里其实早就有记录（走查失败时 dump 出来的三边对账证实了这点）。改成"现在是 succeeded 且上次不是就拉一次"（refresh 幂等），并把走查的失败信息从"只打主进程任务"扩成**主进程任务 / 落盘已入库表 / 渲染层拿到的表三边一起打**——只打一边的话，"主进程说成了但界面没动"和"主进程压根没成"长得一模一样。⑤ **用量页的 14 天柱状图渲染出来是一整片空白**——柱子和日期标签原本挤在同一列里，那一列在 `items-end` 的行里高度由内容决定（只有日期那行字那么高），百分比高度于是全算成 0。**这条是靠人看截图发现的，断言完全没拦住**（`14 根 div 在` 照样通过），所以顺手把断言从"数 div"改成**量像素**（`getBoundingClientRect().height`，最高柱 < 20px 即判失败），并把日期轴拆成独立一行。教训写在这里：结构性断言对"算出来是 0"这类布局塌陷是瞎的。
+    **截图可读性**：管理员区与用量页的类型表都在首屏之下，截图前必须 `scrollIntoViewIfNeeded()`，否则两张图长得一模一样、人工看截图等于白看；用量页截图前还要等前面几步的 toast 自己散掉（它们会糊在页头上）。
+    **取消与 before-quit 两条必须在打包形态下跑**：`MCNAI_APP_BIN=release/mac-arm64/mcn-ai.app/Contents/MacOS/mcn-ai node e2e/walkthrough.mjs`（设计 §8 风险 1，dev 形态验过不算数）
 
 ---
 
@@ -106,13 +119,31 @@ Electron App（macOS arm64，v0.1.0）
 
 ### 未解决/未做（按计划属 P1+）
 
-- **网关**：MVP 直连中转站，客户端 key 理论可提取（缓解：低配额专用 key + 用量告警；根治=P1 网关）
+- **网关（安全待办 · 已定方向，2026-08-17 拍板）**：MVP 直连中转站，**客户端 key 理论可提取**，而且 2026-08-17 查实这把 key 的分量比原先以为的重得多——服务端下发给每台客户机的 `CLIENT_RELAY_API_KEY` **就是网页版在用的 `AIHUBMIX_API_KEY` 主 key**（哈希一致），它同时供着网页版的向量与聊天。任何一台客户机被扒出 key，网页版全线得跟着轮换。
+    - **触发时间**：本单交付稳定后**立即排期**，作为下一个大单
+    - **方案要点**：key 不再下发客户端。桌面版改为把对话请求打到自己的服务端网关（webpage 侧新增路由），网关用 Bearer 鉴权认出用户 → 服务端持 key 转发上游 → 流式原样回传。客户端此后**一把上游 key 都不存**，`client-config` 退化为只下发网关地址；档位层的 base URL 换成网关地址即可，模型串仍然显式下发（静默降级那道防线不变）
+    - **顺带解决**：按用户配额与限流（现在客户端直连，服务端看不到也拦不住）、用量的服务端口径（现在只有客户机本地 jsonl）
+    - **过渡期缓解（当前采用）**：**aihubmix 保持低余额、滚动充值**——上限用余额兜，而不是用子 key 的额度。原计划的"换一把限额子 key"于 2026-08-17 取消：既然网关很快就上，多轮换一次 key 只是多一次运维动作
+- ~~**低配额专用 key**~~：`client-config` 路由注释里那句「中转站低配额专用子 key（勿用主 key）」是**愿望不是现状**，实际配的就是主 key。不再单独修，直接由网关方案覆盖
 - **开发者签名/公证**：现为 ad-hoc 签名，0 号用户右键打开绕 Gatekeeper；扩散前必须买 Apple Developer ID（同时解锁 Electron 升级）
 - **Windows 版**：未做（首发 macOS-only 是拍板项）
 - **本地 SQLite 聊天库**：v2；当前聊天记录只在云端
-- **仓库卫生**：`desktop/` 有一批未提交的工作区改动（vault/index.ts、reader.ts、VaultPage.tsx、e2e 截图等，属分区投递之后的迭代），接手先 `git status` 看一眼，该提交提交
+- ~~**仓库卫生**：`desktop/` 有一批未提交的工作区改动~~ ✅ 2026-08-17 随档位单一并提交，工作区已干净；接手仍建议先 `git status` 看一眼
 - **client.ts 死代码**：`webpage/lib/automation/dingtalk/client.ts` 现在只有 `listRecords` 有调用方（vault-notes），`listSheets/insertRecords/updateRecords/deleteRecords/sendGroupMessage` 全部无人调用（钉钉剥离的遗留，见 §4-16）。留着无害，后续收拾
 - **客户机兼容预检**：发新客户前用 yara 本机预检 Electron 是否会被 XProtect 误杀；老 macOS 的 pyexpat 坑已用 lxml 修掉（docx2md），但同类"编译目标过新"问题在 pipeline 其他依赖上仍可能出现
+
+### 已知未验项（2026-08-17 档位单收尾时明确留下的）
+
+> **2026-08-17 真实调用验收结果**（最小集，共 4 次单轮请求，成本 ≈ ¥14）：
+> - 标准档 `SMOKE_ONLY=deepseek SMOKE_CASES=single` → 1/1 通过，`result.modelUsage` = `deepseek-v4-flash / deepseek-v4-pro`（主模型 pro 在里面，轻量子任务真的走了 flash），`degraded=false`
+> - 增强档 `SMOKE_ONLY=aihubmix SMOKE_CASES=single,abort,tools` → 3/3 通过，三轮的 `modelUsage` 全部**只有 `claude-opus-5`**（= aihubmix 真路由，没有静默换模型），abort 停在第 3 个 delta，`search_knowledge` 真调到
+> - 用量 jsonl 三条记录字段齐全，`usage-report.mjs` 对账：增强 2 次 ¥13.98 / 标准 1 次 ¥0.06 —— **两档的钱差在真实数据上就是这个量级**，用量页的对比区要的就是让人看见这个
+>
+> 仍未验的：
+
+- **make-ppt 在 `claude-opus-5`（增强档）上的表现未验**：本单只对新增线路做了最小真实调用集（单轮 / abort / 工具调用），make-ppt 那条链路的 skills 层零改动，没有为它跑真实产出。风险点是 §3 bug#3 的老毛病（爱反复检索 → 撞 `maxTurns`）在换模型后行为不同——opus 检索次数通常更少，理论上更安全，但没有实测数据。**要验的话**：`SMOKE_ONLY=aihubmix SMOKE_CASES=ppt npm run smoke:provider`，一次调用的量级
+- **增强档的轻量模型串暂时也是 `claude-opus-5`**：aihubmix 上只有它做过真路由验证。等验过一个便宜模型名（如 haiku 系）之后，在管理员区把增强档的「轻量模型」换掉即可省一大笔——这是个明确的待办省钱开关，不是设计终点
+- ~~**服务端 `client-config` 还没有下发 `aihubmixApiKey`**~~ ✅ **2026-08-17 作废**：查实 `api.inferera.com` 就是 aihubmix 的备用域名、`CLIENT_RELAY_API_KEY` 就是 aihubmix 的 key，所以**根本不需要下发第二把**。增强档改为「独立槽位优先、空则回落到中转站那把」（见 §4-26），登录过的机器天然可用。`provisionKeys` 里认 `aihubmixApiKey` 的那段保留——将来真要给增强档单独配一把限额 key，服务端补上字段就能直接用
 
 ---
 
@@ -135,7 +166,9 @@ Electron App（macOS arm64，v0.1.0）
 15. **e2e 截 hover 态必须走 CDP 抓屏**：Playwright 的 `page.screenshot()` 会把 `:hover` 清掉（截出来永远是非 hover 态，之后对 hover 才出现的按钮点击也会失败）。`walkthrough.mjs` 里的 `snapHover()` 用 `Page.captureScreenshot` 绕开，产物卡片 hover 操作就靠它验收
 16. **钉钉自动化 webpage 侧剥离收尾（2026-08-16 完成）**：钉钉每日同步 2026-07-24 已分叉到独立仓库 `~/Documents/AI/omg-dingtalk-automation`（国内服务器 crontab：`run.js` 每日 03:00 ＋ `hourly.js` 每小时，已确认在跑、run.log 到 8/16 每日成功），并持续演进到"任务驱动"新口径。webpage 侧那份停在 07-20 的占位实现和 Vercel Cron 一直没摘，会在同一时间点按旧口径往同一张「执行明细」表建行 → 已删除 `app/api/v1/automation/dingtalk/route.ts` 与 `lib/automation/dingtalk/sync.ts`、清空 `vercel.json` 的 crons（commit a477591）。**保留** `dingtalk/vault-notes/route.ts` 和 `lib/automation/dingtalk/client.ts`——桌面端经营数据自动入库（`desktop/src/main/knowledge/bizdata.ts`）在用，别顺手删。独立仓库本身按禁令未触碰
 
-17. **模型必须显式指定，两个 provider 的行为差异（2026-08-16 实测，curl 逐个打过）**：
+17. **模型必须显式指定，两个 provider 的行为差异（2026-08-16 实测，curl 逐个打过）**
+    > **2026-08-17 更正**：`api.inferera.com` **是 aihubmix 的备用域名**，不是另一家中转站——用同一把 key 打两个域名都返回 `claude-opus-5`（`model` 字段原样），且服务端 `CLIENT_RELAY_API_KEY` 与网页版 `AIHUBMIX_API_KEY` 哈希一致（同一把）。所以桌面版从 M0 起就一直在用 aihubmix，只是挂在 `inferera` 这个名字下。下表的行为差异仍然成立（那是端点行为，与域名叫什么无关）。
+    ：
 
     | 发过去的模型名 | inferera 中转站 | DeepSeek 官方 `/anthropic` |
     |---|---|---|
@@ -145,14 +178,28 @@ Electron App（macOS arm64，v0.1.0）
     | 不存在的名字 | 400「cannot be routed」 | 400，且报文里会列出它支持的名字 |
     | `deepseek-chat` | 404 | 200（降级到 flash） |
 
-    所以**不能靠自动映射**：`options.model` 与 `ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL` 一律显式下发。为了能拆穿静默降级，`agent:stream` 的 `assistant` 事件多带一个 `models` 字段（取自 SDK `result.modelUsage` 的 key，即**服务端实际用的模型**），对不上会在日志里打 warn，冒烟脚本直接拿它做断言。
-    **默认线路暂保持 inferera 中转站**（2026-08-16 拍板）：DeepSeek 官方那条已经跑通并保留在设置页里，但默认不切——切换的前置条件是 make-ppt 修复（见 §3 bug#3）在 DeepSeek 线路上稳定，验完再由用户拍板执行切换。切换动作本身只有一处：`ai/provider.ts` 里 store 默认值 `aiProvider`（老用户已有配置不受影响，需要另配迁移逻辑或让他们自己在设置页切）。
+    所以**不能靠自动映射**：`options.model` 与 `ANTHROPIC_MODEL/ANTHROPIC_SMALL_FAST_MODEL` 一律显式下发。为了能拆穿静默降级，`agent:stream` 的 `assistant` 事件多带一个 `models` 字段（取自 SDK `result.modelUsage` 的 key，即**服务端实际用的模型**），对不上会在日志里打 warn，冒烟脚本直接拿它做断言；2026-08-17 起还会把这次不一致**记进用量记录**（`degraded:true`），`scripts/usage-report.mjs` 收尾会把降级次数单列出来。
+    ~~**默认线路暂保持 inferera 中转站**~~ ✅ **2026-08-17 已落地**：档位层上线后，新装机的「标准档」出厂映射就是 DeepSeek 官方（`https://api.deepseek.com/anthropic` + `deepseek-v4-pro/flash`），这条备忘作废。老用户不受影响——迁移会把升级前生效的线路原样搬成标准档映射（见 §4-23）。
     其他实测差异：① DeepSeek 官方会返回 `thinking` 内容块，而我们的流式只转发 `text_delta`，所以首字延迟比 inferera 明显（实测单轮 10.6s vs 4.4s，make-ppt 60s vs 55s）；② inferera 那轮的 `modelUsage` 会同时出现 pro 与 flash（轻量子任务真的走了 `ANTHROPIC_SMALL_FAST_MODEL`）；③ 两边都跑通了工具调用与 make-ppt 全流程。
 18. **M-29 的方案取舍：三条缓解，不上助手进程（2026-08-16）**：贵的是「进程内对 safeStorage 的**第一次调用**」（读写都算），实测 8ms～60s 不等，取决于 securityd 的签名校验缓存冷热；**utilityProcess 里没有 safeStorage**（实测只暴露 `net`/`systemPreferences`），所以"整个挪进 worker"在 Electron 30.5.1 下不成立。剩下能彻底不阻塞的只有"常驻第二个 Electron 实例当加密助手"，代价是多一个主进程与多一条打包/公证路径；权衡后**一期不做**，改用指纹判重（不写就不冻）＋ 只读不解密 ＋ 写入转后台任务。根因是 ad-hoc 签名，本来就在「买开发者签名」那条路上，签名后要复测一次再决定要不要上助手进程。
 19. **取消投递必须杀「进程组」而不是子进程，且不做回滚（2026-08-16，设计 §5.1）**：`spawn` 起的是 PyInstaller onedir 的引导程序，真正干活的 Python 是它 fork 出来的**孙子进程**。`child.kill()` 只杀得掉直接子进程，孙子会变成孤儿继续写 vault、继续烧 LLM 额度，而 UI 已经显示"已停止"——这比不做取消更糟。所以 `spawn` 加 `detached:true`（子进程成为新进程组组长，组 id == pid，**不调 `unref()`**，我们还要等它的 close），取消时 `process.kill(-pid)`。**不回滚**是刻意的：回滚意味着删用户 vault 里的文件，风险远大于收益；已落位的部分保留、未处理的文件留在投递箱，下次接着做。同一套 kill 也挂在 `before-quit` 上（顺带修掉"退出应用留孤儿 pipeline"这个当时就存在的 bug）。**这条必须在打包形态下回归**——打包后路径与权限都不一样，dev 形态验过不算数。
 20. **冲突检测用内容 hash，不用 mtime（2026-08-16，设计 §5.2 / §8 风险 3）**：应用自己 `write()` 也会让 watcher 冒 `change` 事件，不区分的话每次保存都自己给自己报冲突。抑制表按**内容 hash** 匹配：chokidar 的 `awaitWriteFinish`(800ms) 会让事件里的 mtime 与写入那一刻记录的对不上，用 mtime 必漏抑制。`vault:changed` 因此多带一个 `self` 标记。三个时机里**只在保存那一刻打断用户**——编辑期间弹模态会吞掉击键、打断输入法组合，比不提示还差。
 21. **`MCNAI_SUPABASE_URL` 只给 e2e 用（2026-08-16）**：验 M-01 的"云端不可达"分支需要把 Supabase 指到别处。踩过的坑：指一个**不可达 IP** 不行（`192.0.2.1` 实测 fetch 9ms 就报 ENETUNREACH，走不到 10s 超时那条分支），要验超时得起一个**连得上但只收不答的黑洞 socket**；验"连不上"才用 `127.0.0.1:9`。生产不读这个变量以外的任何来源，默认值仍写死在 `auth/index.ts`。
-22. **走查专用开关一览（只给 e2e，生产不读）**：`MCNAI_USER_DATA` / `MCNAI_VAULT`（隔离实例）、`MCNAI_APP_BIN`（打包形态回归）、`MCNAI_SUPABASE_URL`（§4-21）、`MCNAI_E2E_VAULT_FAIL=<毫秒>`（让 `vault:createNew` 先卡住再抛错，验 H-12 的失败分支——系统保存框一弹起来 Playwright 就没法继续，这条路只能这么走）。加新开关的判据：**这条分支在界面上必须能验，而真实触发它需要造只读盘/断网/改系统设置这类走查里做不到的环境**；能用真实故障造出来的（如 M-02 用 chmod 000、M-05 删文件）一律不给开关。
+22b. **跑走查前先清场：别的 mcn-ai 实例不能盯着同一个库（2026-08-17 踩坑）**。`npm run dev` 起的实例如果 vaultPath 恰好也是走查库（`/tmp/mcnai-e2e-vault`），两边的投递箱 watcher 会抢着起 pipeline。表现极具误导性：走查跑到**最后一条**（before-quit 孤儿检查）才失败，报「有孤儿进程」，而那个进程属于另一个实例、本来就该活着——12 分钟才撞到，结论还完全指错方向。现在 `walkthrough.mjs` 开头会扫 `ps`，发现有 `mcn-ingest` 挂在这个库上就**第一秒拒跑并打印是谁**。
+22. **走查专用开关一览（只给 e2e，生产不读）**：`MCNAI_USER_DATA` / `MCNAI_VAULT`（隔离实例）、`MCNAI_APP_BIN`（打包形态回归）、`MCNAI_SUPABASE_URL`（§4-21）、`MCNAI_E2E_VAULT_FAIL=<毫秒>`（让 `vault:createNew` 先卡住再抛错，验 H-12 的失败分支——系统保存框一弹起来 Playwright 就没法继续，这条路只能这么走）、`MCNAI_E2E_TIER_HEALTH=up|down`（强制档位线路探测的结论：`down` 验"增强档置灰+暂时不可用"，`up` 让走查能在没有 aihubmix key 的机器上真的选到增强档——真造这两个分支得把线路打挂或断网）。加新开关的判据：**这条分支在界面上必须能验，而真实触发它需要造只读盘/断网/改系统设置这类走查里做不到的环境**；能用真实故障造出来的（如 M-02 用 chmod 000、M-05 删文件）一律不给开关。
+23. **会话级档位：语义写死、映射留运维口（2026-08-17）**。用户看到的只有「标准（推荐）／增强」两档与"能力/消耗"的差别，**界面上不出现供应商名与模型名**——老板要判断的是"这次值不值得多花钱"，不是"这条线后面挂的是谁"。出厂映射：标准=DeepSeek 官方 `deepseek-v4-pro/flash`，增强=aihubmix `claude-opus-5`。映射（base URL / 主模型串 / 轻量模型串 / 各线路 key）全部下沉到设置页的隐藏管理员区，定位是**运维应急**（换模型串、临时切备用线路如 inferera）。
+    - **档位是会话级的**：存在 conversation 对象上随对话落盘，新会话一律回到标准档。做成全局设置的话，"上次开了增强"会一直粘着，是最容易把钱烧掉又没人察觉的形态。
+    - **增强档的轻量串也钉死 `claude-opus-5`**：aihubmix 上只有它做过真路由验证（响应 model 字段原样返回）。写一个没验过的便宜模型名进去，赌输的形态恰好是"静默降级"，正是这层要防的东西。真要省，管理员区把轻量串换成验过的名字即可（**这是一个明确的省钱开关，验过就该拧**）。
+    - **老用户迁移**（`ai/tiers.ts` 的 `migrateTiers`，只跑一次）：机器上配过库或落过任意一把 key = 老用户 → 把升级前生效的那条线路（`describeProvider()`）原样搬成标准档映射，升级不改变现有行为；全新安装才走出厂映射。另有 `ensureStandardUsable()`：标准档一把 key 都没有而中转站那把还在时，自动把标准档指向中转站并**打一条 warn**（不是静默兜底）——覆盖"服务端只下发了 relayApiKey"的新装机。
+    - **`resolveTierForRequest` 只在无窗口时才吃 `ANTHROPIC_AUTH_TOKEN`**（走查现场抓到的坑）：开发机上常年挂着自己的 key，有窗口时也吃的话，"这一档没配密钥"那条预检分支在走查里永远触发不到——实测增强档明明没 key，请求还是真的发了出去。无头冒烟（smoke-chat/smoke-agent）没有窗口，照旧从 env 取。
+24. **线路健康检查：只探增强档、缓存 5 分钟、`max_tokens:1`（2026-08-17）**。标准档是兜底线路，探它没有意义——它挂了也没有"另一档"可退，只会在每次开应用时多一次请求。增强档不可用时选择器里**直接置灰**，而不是让人选了之后在发送时才撞一鼻子灰。探测用一次 `max_tokens:1` 的 messages 请求而不是 ping 根路径：key 过期这种最常见的失效形态，只 ping 地址压根测不出来。会话进行中失败仍走原有错误重试路径，气泡里额外给一颗「切换到标准模式重试」——只给「重试」的话，用户会在同一条挂掉的线路上反复撞。
+25. **用量记录：写入侧不挑字段，归一化全放汇总侧（2026-08-17）**。三条线的 usage 口径都不一样（snake_case vs camelCase、有没有 cache_* 分项、有没有 modelUsage），在写入侧归一化等于把"当时以为对的口径"腌进历史数据，以后想换算法只能重跑。所以 jsonl 里存的是原样的完整 usage 对象，缺则 null；`summarize()` 与 `scripts/usage-report.mjs` 各自归一（两边同一套正则，改一处要改两处）。另外两条：**只记跑成功的那一轮**（失败轮 token 基本是 0，记进去会让「本月对话 N 次」把故障也算成用量）；**写失败静默降级**（记账挡不住主流程）。pipeline 的智能打标拿不到 token，就只记次数（`calls:1`，页面显示「—」）。
+26. **增强档的 key：独立槽位优先，空则回落到中转站那把（2026-08-17，返工方案①）**。依据是当天查实的两件事：**`api.inferera.com` 是 aihubmix 的备用域名**、**`CLIENT_RELAY_API_KEY` 与网页版的 `AIHUBMIX_API_KEY` 是同一把**（哈希一致）。也就是说**任何登录过的机器硬盘上早就躺着一把能开 `claude-opus-5` 的 key**，再下发第二把纯属多余，还多一处要维护的密钥——所以 webpage 侧那条"加 `aihubmixApiKey` 下发"的改动直接取消了。
+    - 实现在 `ai/tiers.ts` 的 `FALLBACK_KEY_FIELD`：增强档 → `encryptedApiKey`。`describeTier` 里 **`keyField` 始终是这一档自己的槽位**（管理员区那颗「保存」写的是它），回落只影响 `hasKey` 与 `resolveTierForRequest` 读哪一把——否则给增强档填 key 会把中转站那把覆盖掉
+    - **回落打日志，不做静默兜底**：`「增强」未配独立密钥，回落到共享密钥 encryptedApiKey（https://aihubmix.com）`，一个进程只打一次（它挂在发消息与线路探测两条高频路径上）。"钱从哪把 key 上扣的"必须查得到
+    - 管理员区那一档标「复用中转站密钥」，与「key 已配置 / 未配置 key」并列成三态
+    - **将来换限额子 key 零改动**：在管理员区给增强档填一把，`usingSharedKey` 自动变 false，回落不再发生
+    - **踩坑**：走查里验这条时第一版挂住了——我用 `evaluate` **直接调 IPC** 写 key，却去等界面那颗保存按钮才会弹的 toast，180 秒白等。直接调 IPC 的路径上没有 toast，要断言就轮询 `ai.tiers()`（明文立刻进内存缓存，`hasKey` 马上翻真）
 
 ---
 
@@ -178,7 +225,9 @@ desktop/
 ├ src/
 │   ├ main/            主进程
 │   │   ├ secrets.ts   密钥保险箱（指纹判重/内存缓存/后台落盘，M-29 的全部实现）
-│   │   ├ ai/          provider.ts：对话线路（inferera/DeepSeek官方/自定义）与模型显式下发
+│   │   ├ ai/          tiers.ts(档位→线路映射/老用户迁移) health.ts(线路探测,5min缓存)
+│   │   │              provider.ts(历史配置读口 + agentEnv)
+│   │   ├ usage/       index.ts：jsonl 落盘 + 汇总（tokensOf 归一化只在这一侧）
 │   │   ├ agent/       Agent SDK 会话管理、流式转发
 │   │   ├ vault/       index.ts(索引) reader.ts(扫描/解析) watcher graph
 │   │   ├ inbox/       orchestrator（队列/进度/落位/分区投递/取消：detached 进程组 + kill）
@@ -188,8 +237,9 @@ desktop/
 │   │   └ auth/        index.ts（supabase-js、anon key 三级来源：env > electron-store > 内置默认）
 │   ├ preload/         contextBridge：全部 IPC 通道定义
 │   └ renderer/src/
-│       ├ pages/       VaultPage / 对话 / 设置
+│       ├ pages/       VaultPage / 对话 / 设置（四组卡片+管理员区）/ UsagePage
 │       ├ components/  聊天四组件（直搬）+ 产物面板 + 图谱 + TaskDock/OfflineBar/ConflictBar
+│       │              + TierSelector（输入框内的档位选择器）
 │       ├ hooks/useChatSession.ts   聊天状态机
 │       └ hooks/useTasks.ts         任务层渲染镜像（useSyncExternalStore）
 ├ resources/
@@ -201,7 +251,7 @@ desktop/
 │   ├ external-edit.mjs  模拟「别的程序改了这个文件」（M-27 冲突检测用，必须是外部进程写盘）
 │   └ shots/             截图基线（中文命名，按流程编号）
 ├ release/             构建产物（dmg/zip；「已重签」dmg 是 ad-hoc 重签版）
-├ scripts/             构建辅助
+├ scripts/             构建辅助 + usage-report.mjs（开发者用量/成本汇总，不进 UI）
 └ electron-builder.yml / electron.vite.config.ts
 ```
 

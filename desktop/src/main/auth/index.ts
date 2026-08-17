@@ -166,7 +166,8 @@ function notifyProvisionFailed(msg: string): void {
 /** 从服务端拉取 AI 配置；用户手动填过的 key 不覆盖 */
 export async function provisionKeys(): Promise<ProvisionResult> {
   try {
-    const { store, setApiKey, setLlmKey, hasApiKey, hasLlmKey } = await import('../store')
+    const { store, setApiKey, setLlmKey, setSecretLater, hasApiKey, hasLlmKey } = await import('../store')
+    const { ensureStandardUsable } = await import('../ai/tiers')
     const token = await getAccessToken()
     if (!token) return { ok: false, error: '未登录，无法获取服务端配置' }
     const res = await fetch(`${store.get('apiBaseUrl')}/api/v1/client-config`, {
@@ -183,6 +184,8 @@ export async function provisionKeys(): Promise<ProvisionResult> {
       llmBaseUrl?: string
       llmModel?: string
       llmApiKey?: string | null
+      /** 增强档（aihubmix）的 key；服务端还没下发时就是 undefined，管理员区可手填 */
+      aihubmixApiKey?: string | null
     }
     // 写前判重在 setApiKey 内部（指纹比对，零 Keychain 触碰）：老用户每次启动都会走到这里，
     // 值没变就一次都不写——M-29 的"登录/启动冻几十秒"绝大多数就是这条路径重复写同一把 key
@@ -196,7 +199,13 @@ export async function provisionKeys(): Promise<ProvisionResult> {
       if (cfg.llmBaseUrl) store.set('llmBaseUrl', cfg.llmBaseUrl)
       if (cfg.llmModel) store.set('llmModel', cfg.llmModel)
     }
-    if (!hasApiKey()) {
+    // 增强档的 key 走同一条 safeStorage + M-29 判重路径（服务端没下发就跳过，不报错）
+    if (cfg.aihubmixApiKey) {
+      if (setSecretLater('encryptedAihubmixKey', cfg.aihubmixApiKey) !== 'unchanged') wrote.push('aihubmixApiKey')
+    }
+    // 标准档没有可用 key、而中转站那把在 → 把标准档指过去（会打日志，不是静默兜底）
+    ensureStandardUsable()
+    if (!hasApiKey() && !hasLlmKey()) {
       const msg = '服务端未下发 AI Key，请在设置页手动填写'
       notifyProvisionFailed(msg)
       return { ok: false, error: msg }

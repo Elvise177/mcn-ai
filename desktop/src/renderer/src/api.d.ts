@@ -1,16 +1,31 @@
-type ProviderId = 'inferera' | 'deepseek' | 'custom'
+/** 会话级模型档位：界面上只有这两个语义，供应商与模型名一律不出现在普通模式 */
+type TierId = 'standard' | 'enhanced'
 
-interface AiProvider {
-  id: ProviderId
+interface AiTier {
+  id: TierId
+  /** 「标准（推荐）」/「增强」 */
   label: string
+  /** 悬停 tooltip：只讲能力与消耗差异 */
+  blurb: string
+  /** 以下三项只在管理员区可见可改（运维应急口） */
   baseUrl: string
-  /** 主模型（显式指定，不依赖端点自动映射） */
   model: string
-  /** 轻量子任务模型 */
   fastModel: string
   keyField: string
-  hint: string
   hasKey: boolean
+  /** 用的是回落来的共享 key（增强档没配独立 key 时复用中转站那把） */
+  usingSharedKey: boolean
+  /** 出厂映射被运维改过 */
+  overridden: boolean
+}
+
+interface TierHealth {
+  tier: TierId
+  ok: boolean
+  reason?: string
+  checkedAt: number
+  /** true = 吃的 5 分钟缓存，没有发出真实探测请求 */
+  cached: boolean
 }
 
 interface DesktopSettings {
@@ -21,9 +36,10 @@ interface DesktopSettings {
   manualApiKey: boolean
   llmBaseUrl: string
   hasLlmKey: boolean
-  aiProvider: ProviderId
-  providers: AiProvider[]
-  /** 当前 provider 的 key 正在后台加密落盘（M-29 等待态） */
+  tiers: AiTier[]
+  /** 普通模式那行「AI 服务：已就绪 ✓」：默认档（标准）那把 key 在不在 */
+  aiReady: boolean
+  /** 默认档的 key 正在后台加密落盘（M-29 等待态） */
   keyWritePending: boolean
   apiBaseUrl: string
   dingtalkWebhook: string
@@ -146,6 +162,36 @@ interface Conversation {
   sdkSessionId?: string
   messages: ChatMessage[]
   updatedAt: number
+  /** 这个会话选的档位（按会话记忆，新会话默认标准） */
+  tier?: TierId
+}
+
+/** 各档美元单价 + 汇率（运维配置，只在管理员区可见可改） */
+interface UsagePricing {
+  usd: Record<TierId, { in: number; out: number }>
+  usdCny: number
+}
+
+/** 用量汇总（口径说明：tokens 含输入与输出，不同线路统计口径可能有差异；费用为估算值） */
+interface UsageSummary {
+  month: string
+  chatCount: number
+  artifactCount: number
+  /** 本月估算花费（人民币） */
+  costCny: number
+  totalCount: number
+  empty: boolean
+  daily: Array<{ date: string; count: number }>
+  byTier: Array<{
+    tier: TierId
+    label: string
+    count: number
+    input: number
+    output: number
+    total: number
+    costCny: number
+  }>
+  byType: Array<{ type: string; label: string; count: number; tokens: number; costCny: number; medianMs: number }>
 }
 
 interface AgentStreamPayload {
@@ -157,6 +203,8 @@ interface AgentStreamPayload {
   costUsd?: number
   /** 实际服务这轮的模型名（result.modelUsage 的 key），用来发现端点的静默降级 */
   models?: string[]
+  /** 这一轮用的档位；出错时据此给「切换到标准模式重试」的出口 */
+  tier?: TierId
 }
 
 interface ArtifactInfo {
@@ -184,8 +232,11 @@ interface Window {
   api: {
     settings: {
       get: () => Promise<DesktopSettings>
-      /** outcome=unchanged 表示值没变、一次 Keychain 都没碰（M-29 写前判重） */
-      setKey: (key: string) => Promise<{ ok: boolean; outcome: 'unchanged' | 'written' | 'queued' }>
+      /** outcome=unchanged 表示值没变、一次 Keychain 都没碰（M-29 写前判重）；tier 不传 = 标准档 */
+      setKey: (
+        key: string,
+        tier?: TierId
+      ) => Promise<{ ok: boolean; outcome: 'unchanged' | 'written' | 'queued' }>
       setLlmKey: (key: string) => Promise<{ ok: boolean; outcome: 'unchanged' | 'written' | 'queued' }>
       setApiBase: (url: string) => Promise<{ ok: boolean }>
       setDingtalk: (cfg: {
@@ -197,12 +248,22 @@ interface Window {
       setArtifactAutoIngest: (v: boolean) => Promise<{ ok: boolean }>
     }
     ai: {
-      providers: () => Promise<{ current: ProviderId; providers: AiProvider[] }>
-      setProvider: (id: ProviderId) => Promise<{ ok: boolean; provider: AiProvider }>
-      setProviderConfig: (
-        id: ProviderId,
+      tiers: () => Promise<{ tiers: AiTier[] }>
+      setTierConfig: (
+        id: TierId,
         cfg: { baseUrl?: string; model?: string; fastModel?: string }
-      ) => Promise<{ ok: boolean; provider: AiProvider }>
+      ) => Promise<{ ok: boolean; tier: AiTier }>
+      /** 结果在主进程缓存 5 分钟；force 只给管理员区的「重新检测」 */
+      tierHealth: (id: TierId, force?: boolean) => Promise<TierHealth>
+    }
+    usage: {
+      summary: (month?: string) => Promise<UsageSummary>
+      months: () => Promise<string[]>
+      pricing: () => Promise<UsagePricing>
+      setPricing: (p: {
+        usd?: Partial<Record<TierId, Partial<{ in: number; out: number }>>>
+        usdCny?: number
+      }) => Promise<UsagePricing>
     }
     dingtalk: {
       test: () => Promise<{ ok: boolean; error?: string }>
@@ -250,7 +311,8 @@ interface Window {
       send: (
         sessionId: string,
         prompt: string,
-        resume?: string
+        resume?: string,
+        tier?: TierId
       ) => Promise<{ ok: boolean; reason?: 'busy'; error?: string }>
       stop: (sessionId: string) => Promise<void>
       list: () => Promise<Conversation[]>

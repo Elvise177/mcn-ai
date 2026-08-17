@@ -12,6 +12,8 @@ export interface Conversation {
   sdkSessionId?: string
   messages: ChatMessage[]
   updatedAt: number
+  /** 会话级模型档位（标准/增强）。按会话记忆，所以它跟着对话一起落盘 */
+  tier?: 'standard' | 'enhanced'
 }
 
 /** M3 本地持久化（electron-store）；M4 切 Supabase 直写 */

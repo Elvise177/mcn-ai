@@ -1,7 +1,12 @@
 import { store, keyVault, type SecretField } from '../store'
 
 /**
- * 模型 provider 层（对话链路的唯一取数口）。
+ * 模型 provider 层——**历史配置的读口**，不再是对话链路的取数口。
+ *
+ * 2026-08-17 起对话链路走「档位」（ai/tiers.ts）。这个文件只剩两件事：
+ *  ① 老用户迁移要读到"升级前生效的那条线路"（`describeProvider`）；
+ *  ② `agentEnv` 仍然是所有链路共用的子进程环境构造器。
+ * 设置页里的 provider 选择器已经被档位映射（管理员区）取代。
  *
  * 三个 provider 并存，设置页可切：
  *  - `inferera`  中转站（原有默认）。它认 Anthropic 的模型名（claude-*），也认 deepseek-v4-*
@@ -62,8 +67,6 @@ export const PROVIDERS: Record<ProviderId, ProviderPreset> = {
   },
 }
 
-export const PROVIDER_IDS = Object.keys(PROVIDERS) as ProviderId[]
-
 export interface ResolvedProvider extends ProviderPreset {
   /** 已配置 key？零 Keychain 触碰 */
   hasKey: boolean
@@ -87,37 +90,6 @@ export function describeProvider(id: ProviderId = currentProviderId()): Resolved
     fastModel: ov.fastModel || preset.fastModel,
     hasKey: keyVault.has(preset.keyField),
   }
-}
-
-export function listProviders(): ResolvedProvider[] {
-  return PROVIDER_IDS.map((id) => describeProvider(id))
-}
-
-export function setProvider(id: ProviderId): void {
-  if (!PROVIDERS[id]) throw new Error(`未知 provider：${id}`)
-  store.set('aiProvider', id)
-}
-
-export function setProviderOverrides(
-  id: ProviderId,
-  ov: { baseUrl?: string; model?: string; fastModel?: string }
-): void {
-  const all = { ...store.get('aiOverrides') }
-  const next = { ...(all[id] ?? {}) }
-  for (const k of ['baseUrl', 'model', 'fastModel'] as const) {
-    const v = ov[k]?.trim()
-    if (v === undefined) continue
-    if (v) next[k] = k === 'baseUrl' ? v.replace(/\/$/, '') : v
-    else delete next[k] // 清空 = 回到预设值
-  }
-  all[id] = next
-  store.set('aiOverrides', all)
-}
-
-/** 发消息时用：拿到地址、模型和明文 key（这一步才可能解密） */
-export function resolveForRequest(): ResolvedProvider & { apiKey: string | null } {
-  const p = describeProvider()
-  return { ...p, apiKey: keyVault.read(p.keyField) ?? process.env.ANTHROPIC_AUTH_TOKEN ?? null }
 }
 
 /**
