@@ -11,6 +11,18 @@ npm run build && node e2e/walkthrough.mjs   # 截图在 e2e/shots/，AI 必须 R
 - 走查完全隔离：独立 userData（/tmp/mcnai-e2e-userdata）+ maggie-vault 副本（/tmp/mcnai-e2e-vault），不碰真实数据
 - **截图只证明"长这样"，不证明"能用"**：每个可点击的核心控件（新对话/发送/切换/删除…）必须在走查里真点一次并断言结果状态（2026-07-16 ＋新对话失效教训——截图全绿但按钮点了丢对话）
 - 新功能必须往 walkthrough.mjs 里加对应步骤（新页面/新交互 = 新截图点）
+- **改 `enqueue` / 投递链路（`src/main/inbox/`）：主走查之外必须另跑投递链路验收**
+
+  ```bash
+  node e2e/a1-enqueue.mjs   # 自带隔离库，用 Maggie 全量验递归/子路径/落位一致率
+  ```
+
+  验四件事：整包拖入递归收全、**相对子路径逐条保留**（落位全靠它——pipeline 用
+  `rel.parts[0]/[1]` 推 category/sub_category，拍平就是全部「未分类」）、护栏计数、
+  空目录与全不支持格式给明确提示。零 LLM 调用（隔离实例不写打标 key → `--skip-llm`）。
+  **不要把这些断言并回 walkthrough.mjs**：enqueue 一写文件就会踢起一轮 pipeline，
+  放在主走查中段会把后面按时序写的断言整体推偏（2026-08-18 实测：主走查跑到
+  「投递箱进度条」时已经是 `上云 7/7`，紧接着 reload 断言就因任务已结束而失败）
 - 引擎层改动跑对应 smoke：`smoke-vault.js <vault>`（索引/图谱/检索）、`smoke:agent`（AI 链路打包冒烟）、
   `smoke:provider`（**改模型/线路必跑**：逐条线路跑单轮/多轮 resume/abort/工具调用/流式/make-ppt，
   并断言服务端实际用的模型就是钉死的那个；需 `SMOKE_INFERERA_KEY` / `SMOKE_DEEPSEEK_KEY` /

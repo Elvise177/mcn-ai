@@ -12,6 +12,7 @@ import { pendingNote } from '../lib/bus'
 import { GRAPH_GROUP_TOKENS, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
 import { errText } from '../lib/err'
+import { enqueueMessage } from '../lib/enqueue'
 import { useTask } from '../hooks/useTasks'
 
 const colorOf = (group: string): string => {
@@ -578,9 +579,15 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     setDragOver(false)
     setHotZone(null)
     const paths = dropPaths(e)
-    if (paths.length) {
-      setShowInbox(true)
-      await window.api.inbox.enqueue(paths, subdir)
+    if (!paths.length) return
+    setShowInbox(true)
+    // A-1：这条路径以前拿到结果就扔了，整包拖进来一个文件都没收也是这个样子
+    try {
+      const r = await window.api.inbox.enqueue(paths, subdir)
+      const m = enqueueMessage(r)
+      ui.toast(m.text, m.type)
+    } catch (err) {
+      ui.toast(`入库失败：${errText(err)}`, 'error')
     }
   }
 

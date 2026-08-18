@@ -169,6 +169,20 @@ interface Conversation {
   tier?: TierId
 }
 
+/** 一次拖入/入箱的结果（A-1）。跳过的几类分开计数，界面才说得清「为什么一个都没进来」 */
+interface EnqueueResult {
+  /** 真正拷进投递箱的文件数 */
+  added: number
+  /** 扩展名不支持（.md/.txt/.docx/.pdf/.xlsx/.pptx 之外） */
+  skippedUnsupported: number
+  /** 隐藏文件/目录、Office 锁文件、空文件、垃圾目录 */
+  skippedJunk: number
+  /** 因为超过递归深度上限而没有进去的目录数 */
+  depthExceeded: number
+  /** 撞上单次文件数上限被截断 */
+  truncated: boolean
+}
+
 /** 单价 + 汇率（运维配置，只在管理员区可见可改） */
 interface UsagePricing {
   /** 按**线路**分表：同一模型走不同线路价格可能差好几倍（B-2） */
@@ -327,7 +341,11 @@ interface Window {
       onChanged: (cb: (payload: { path: string; self?: boolean }) => void) => () => void
     }
     inbox: {
-      enqueue: (paths: string[], subdir?: string) => Promise<number>
+      /**
+       * 收文件进投递箱。目录**递归**且保留相对子路径（落位靠目录树，A-1）。
+       * 回的不是单个数字——「0 个」和「跳过了 N 个不支持的格式」得让用户分得开
+       */
+      enqueue: (paths: string[], subdir?: string) => Promise<EnqueueResult>
       runNow: () => Promise<void>
       /** 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚 */
       cancel: () => Promise<boolean>

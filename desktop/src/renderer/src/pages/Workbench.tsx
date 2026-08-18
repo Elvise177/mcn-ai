@@ -6,6 +6,7 @@ import { ui } from '../components/ui'
 import { CHIPS } from '../config/chips'
 import { greetingLine } from '../lib/profile'
 import { errText } from '../lib/err'
+import { enqueueMessage } from '../lib/enqueue'
 import { useTask } from '../hooks/useTasks'
 import { TierSelector } from '../components/TierSelector'
 
@@ -173,8 +174,11 @@ export default function Workbench({
       .filter((p): p is string => !!p)
     if (!paths.length) return
     try {
-      await window.api.inbox.enqueue(paths)
-      ui.toast(`已送入投递箱（${paths.length} 个文件），可在「个人知识库」看处理进度`)
+      // 原来报的是 `paths.length`（拖进来几个**条目**），拖一个文件夹就说「1 个文件」，
+      // 而里面可能是 200 个。现在报 enqueue 真正收下的数（A-1）
+      const r = await window.api.inbox.enqueue(paths)
+      const m = enqueueMessage(r)
+      ui.toast(m.text, m.type)
     } catch (err) {
       ui.toast(`入库失败：${errText(err)}`, 'error')
     }

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
-import { join, basename } from 'path'
+import { join, basename, extname, dirname } from 'path'
 import { type BrowserWindow } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
@@ -16,6 +16,46 @@ import { INBOX_FLOW, type InboxEvent, type InboxTask } from '../tasks/types'
 import { getLastInboxRun, setLastInboxRun } from '../tasks/persist'
 
 export type { InboxEvent }
+
+/**
+ * 能入库的扩展名。**真相源是 pipeline 的 `02_convert.py`**（`.md`/`.txt` 直接拷，
+ * `CONVERTERS` 里那四种做转换）——这里是它的副本，改一处必须改两处。
+ *
+ * 之所以在拷进投递箱之前就筛：不支持的格式拷进去也没人处理，
+ * `02_convert` 连 fail 都不算（只有认识的扩展名转换失败才进 `.failed/`），
+ * 结果就是一堆原件永远躺在投递箱里，而用户以为入库了。
+ */
+const SUPPORTED_EXT = new Set(['.md', '.txt', '.docx', '.pdf', '.xlsx', '.pptx'])
+
+/** 与 `02_convert.py` 的 `JUNK_DIRS` 对齐 */
+const JUNK_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', '__MACOSX', '__pycache__'])
+
+/**
+ * 递归护栏。整包拖入是「用户一个动作、后台跑很久」的操作，没有上限的话
+ * 拖错一个目录（比如家目录）就是几万个文件，且中途没有任何出口。
+ *
+ * - **单次 500**：真正防跑飞的是这一条。Maggie 那份 98 个文件，500 够日常整包导入，超了提示分批
+ * - **深度 10**：原定 6，实测改的——Maggie 全量最深正好 **6 层**，卡在 6 等于零余量，
+ *   客户目录再深一级就**静默丢文件**，而这正是 A-1 要根治的那类故障。
+ *   深度不是防跑飞的有效闸门（拖家目录是被文件数拦住的，不是被深度），
+ *   所以这里给足余量，把「别丢用户的文件」放在前面
+ */
+const MAX_DEPTH = 10
+const MAX_FILES = 500
+
+/** `enqueue` 的结果。**不能只回一个数字**——「0 个」和「跳过了 20 个不支持的格式」得分得开 */
+export interface EnqueueResult {
+  /** 真正拷进投递箱的文件数 */
+  added: number
+  /** 扩展名不在 `SUPPORTED_EXT` 里 */
+  skippedUnsupported: number
+  /** 隐藏文件/目录、Office 锁文件（`~$`）、空文件、垃圾目录 */
+  skippedJunk: number
+  /** 因为超过 `MAX_DEPTH` 而没有进去的目录数 */
+  depthExceeded: number
+  /** 撞上 `MAX_FILES` 被截断（true 时 `added === MAX_FILES`） */
+  truncated: boolean
+}
 
 /** 投递箱编排：监听 inbox 目录 → 去抖合并 → 串行 spawn 冻结版 pipeline → 进度转 IPC */
 export class InboxOrchestrator {
@@ -212,7 +252,10 @@ export class InboxOrchestrator {
     this.watcher = chokidar.watch(this.inboxDir, {
       ignored: [/\.done/, /\.failed/, /(^|\/)\./],
       ignoreInitial: false, // 启动时投递箱里已有的文件也要处理
-      depth: 3,
+      // 跟 enqueue 的递归上限对齐：原来钉死 3，而整包拖入后文件可以深到 6 层，
+      // 深层文件不触发 'add' → 界面上的文件名列表会缺一大块
+      // （跑不跑得起来另有保障：enqueue 拷完会自己 schedule）
+      depth: MAX_DEPTH,
       awaitWriteFinish: { stabilityThreshold: 2000, pollInterval: 200 },
     })
     this.watcher.on('add', (p: string) => {
@@ -307,31 +350,99 @@ export class InboxOrchestrator {
   }
 
   /** 拖拽/批量导入入口：拷贝进投递箱，watcher 自然接管 */
-  async enqueue(paths: string[], subdir?: string): Promise<number> {
+  /**
+   * 把文件/目录收进投递箱。**目录递归，并原样保留相对子路径**（A-1，2026-08-18 补做）。
+   *
+   * 原实现只对目录做一层 `readdir` 且拍平：嵌套目录里的文件一个都进不来，
+   * 而且返回 0 时界面完全静默——新客户把整个文件夹拖进来，界面毫无反应。
+   *
+   * **保留子路径不是锦上添花，是落位的全部依据**：pipeline 的 `03b_tag_rules` 用
+   * `cat1 = rel.parts[0]`、`cat2 = rel.parts[1]` 推分类，而 `rel` 就是投递箱里的相对路径。
+   * 拍平 = 所有笔记都掉进「未分类」。阶段一那 92/92 的落位一致率就是靠目录树来的。
+   *
+   * **拖入目录时，目录自己的名字不进路径**，只保留它内部的结构——
+   * 与阶段一基线的口径一致（那轮是 `relative(源根, 叶子目录)` 逐个入箱）。
+   * 反过来把目录名也算进去的话，`cat1` 会全变成那个文件夹名，92 篇的落位一次性作废。
+   * 代价是：拖一个「里面全是文件、没有子目录」的文件夹，这些文件落在投递箱根 → 未分类。
+   */
+  async enqueue(paths: string[], subdir?: string): Promise<EnqueueResult> {
     if (!this.inboxDir) throw new Error('投递箱未就绪，请先打开知识库')
     const destDir = subdir ? join(this.inboxDir, subdir.replace(/[\\:*?"<>|.]/g, '')) : this.inboxDir
     await fs.mkdir(destDir, { recursive: true })
-    let n = 0
+
+    const r: EnqueueResult = {
+      added: 0,
+      skippedUnsupported: 0,
+      skippedJunk: 0,
+      depthExceeded: 0,
+      truncated: false,
+    }
+    const junkName = (name: string): boolean =>
+      name.startsWith('.') || name.startsWith('~$') || JUNK_DIRS.has(name) || name.endsWith('.app')
+
+    /** 拷一个文件，`rel` 是它相对投递箱落点的子路径（`''` 表示直接落在 destDir） */
+    const takeFile = async (src: string, rel: string, size: number): Promise<void> => {
+      const name = basename(src)
+      if (junkName(name) || size === 0) {
+        r.skippedJunk++
+        return
+      }
+      if (!SUPPORTED_EXT.has(extname(name).toLowerCase())) {
+        r.skippedUnsupported++
+        return
+      }
+      if (r.added >= MAX_FILES) {
+        r.truncated = true
+        return
+      }
+      const dest = join(destDir, rel)
+      await fs.mkdir(dirname(dest), { recursive: true })
+      await fs.copyFile(src, dest)
+      r.added++
+    }
+
+    const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+      if (depth > MAX_DEPTH) {
+        r.depthExceeded++
+        return
+      }
+      for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+        if (r.truncated) return
+        const src = join(dir, e.name)
+        if (e.isDirectory()) {
+          if (junkName(e.name)) {
+            r.skippedJunk++
+            continue
+          }
+          await walk(src, join(rel, e.name), depth + 1)
+        } else if (e.isFile()) {
+          // 符号链接不跟随（`withFileTypes` 下 `isFile()` 对 symlink 为 false）：
+          // 跟随的话一个指回上级的链接就能把递归拖进环里
+          await takeFile(src, join(rel, e.name), (await fs.stat(src)).size)
+        }
+      }
+    }
+
     for (const p of paths) {
+      if (r.truncated) break
       try {
         const st = await fs.stat(p)
-        if (st.isDirectory()) {
-          for (const f of await fs.readdir(p)) {
-            const src = join(p, f)
-            if ((await fs.stat(src)).isFile() && !f.startsWith('.')) {
-              await fs.copyFile(src, join(destDir, f))
-              n++
-            }
-          }
-        } else if (!basename(p).startsWith('.')) {
-          await fs.copyFile(p, join(destDir, basename(p)))
-          n++
-        }
+        if (st.isDirectory()) await walk(p, '', 1)
+        else await takeFile(p, basename(p), st.size)
       } catch (e) {
         this.send({ type: 'stage', stage: 'enqueue', status: 'error', message: `${basename(p)}: ${e}` })
       }
     }
-    return n
+
+    /**
+     * **不在这里 `schedule()`**，交给 watcher 踢。
+     *
+     * 一度加过一句 `if (r.added > 0) this.schedule()`，理由是「watcher 的 depth 够不到深层文件」。
+     * 但 watcher 的 `depth` 已经跟 `MAX_DEPTH` 对齐，而 enqueue 写进去的东西又受同一个上限约束——
+     * 它一定看得见，那句就是纯多余。代价却是实打实的：每次入箱多排一轮 pipeline，
+     * 走查里直接把「退出应用后无孤儿进程」那条断言干挂了（同一个库上同时活着两个 mcn-ingest）。
+     */
+    return r
   }
 
   /** 本轮跑完的回调（产物入库任务靠它知道自己成没成——ingest 的 running 阶段由某个 inbox run 承载） */
