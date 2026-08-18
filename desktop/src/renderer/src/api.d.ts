@@ -228,12 +228,37 @@ interface UsageSummary {
   byType: Array<{ type: string; label: string; count: number; tokens: number; costCny: number; medianMs: number }>
 }
 
+/**
+ * 过程可见性：一条工具步骤在流式事件里的形态。同一步骤会来三次
+ * （start 出现 → args 补入参 → result 回填结果数），靠 `id` 串起来。
+ */
+interface ToolStepEvent {
+  id: string
+  /** 原始工具名（已去 `mcp__xxx__` 前缀）。**只用于查映射表，不进 DOM、不给用户看** */
+  tool: string
+  phase: 'start' | 'args' | 'result'
+  /** phase='args'：精简后的入参（检索词 / 文件名 / 扫描目标 / 产物类型） */
+  args?: Record<string, string>
+  /** phase='result'：结果条数；数不出来就不给（不编数字） */
+  count?: number
+  /** phase='result'：`count` 的单位——份（笔记）还是处（一篇里的行内命中） */
+  unit?: 'file' | 'match'
+  /** phase='result'：这些是**相近结果**不是精确命中（云端语义检索没有相关度闸门，见 HANDOFF §3-13） */
+  approx?: boolean
+  /** phase='result'：这一步的工具自己报错了 */
+  failed?: boolean
+  /** phase='result'：被扫描次数护栏拦下的，**不是失败**（是我们自己踩的刹车） */
+  capped?: boolean
+}
+
 interface AgentStreamPayload {
   sessionId: string
   /** `notice` = 说一句就完的中性提示（不是错误、也不终结这一轮），弹 toast */
   kind: 'delta' | 'tool' | 'assistant' | 'done' | 'error' | 'notice'
   text?: string
   tool?: string
+  /** 这条 tool 事件对应的步骤（过程可见性）。`tool` 字段保留不动，TaskDock 还在用 */
+  step?: ToolStepEvent
   sdkSessionId?: string
   costUsd?: number
   /** 实际服务这轮的模型名（result.modelUsage 的 key），用来发现端点的静默降级 */

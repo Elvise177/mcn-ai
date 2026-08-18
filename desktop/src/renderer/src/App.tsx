@@ -11,6 +11,7 @@ import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
 import { errText, zhError } from './lib/err'
 import { startTaskSync, useTask } from './hooks/useTasks'
+import { anchorStepGroup, clearStepGroups, startStepStream, trimStepGroups } from './lib/step-stream'
 import { TaskDock } from './components/TaskDock'
 import { OfflineBar } from './components/OfflineBar'
 
@@ -69,13 +70,14 @@ export default function App() {
     }
   }, [])
 
+  /** 返回这条消息**落在第几条**（-1 = 没落成）：步骤流靠它把过程钉到对应的回答上 */
   const appendMessage = useCallback(
-    (sessionId: string, msg: ChatMessage, sdkSessionId?: string) => {
+    (sessionId: string, msg: ChatMessage, sdkSessionId?: string): number => {
       const base =
         activeRef.current.id === sessionId
           ? activeRef.current
           : convsRef.current.find((x) => x.id === sessionId)
-      if (!base) return
+      if (!base) return -1
       const messages = [...base.messages, msg]
       upsert({
         ...base,
@@ -84,6 +86,7 @@ export default function App() {
         title: base.title === '新对话' && messages[0] ? messages[0].text.slice(0, 18) : base.title,
         updatedAt: Date.now(),
       })
+      return messages.length - 1
     },
     [upsert]
   )
@@ -115,13 +118,21 @@ export default function App() {
         const note = p.unverifiedCitations?.length
           ? `\n\n> ⚠️ 以下来源本轮并未真正读取，请自行核对：${p.unverifiedCitations.map((c) => `[[${c}]]`).join('、')}`
           : ''
-        appendMessage(p.sessionId, { role: 'assistant', text: p.text + note }, p.sdkSessionId)
+        const at = appendMessage(p.sessionId, { role: 'assistant', text: p.text + note }, p.sdkSessionId)
+        // 过程可见性：把刚跑完那一轮的步骤钉到这条回答上（下标只有这里知道）
+        if (at >= 0) anchorStepGroup(p.sessionId, at)
       } else if (p.kind === 'error') {
         // error:true → 气泡里挂「重试」（M-11）。以前出错只留一段 ⚠️ 文字，
         // 用户要重试只能把刚才那段话重新打一遍。
         // 文案过 zhError：上游的英文原文（如 403 balance insufficient）直接抛给客户
         // 会把排查方向带偏（B-5/T-02）
-        appendMessage(p.sessionId, { role: 'assistant', text: `⚠️ ${zhError(String(p.text ?? ''))}`, error: true })
+        const at = appendMessage(p.sessionId, {
+          role: 'assistant',
+          text: `⚠️ ${zhError(String(p.text ?? ''))}`,
+          error: true,
+        })
+        // 失败那一轮的过程同样有价值（"它到底试过什么"），钉在报错气泡上
+        if (at >= 0) anchorStepGroup(p.sessionId, at)
       } else if (p.kind === 'notice' && p.text) {
         // 中性提示（如"旧上下文已过期、已开新会话"）。**不进对话历史**——
         // 它是这一次的运行状况，不是 AI 说的话，塞进气泡会被下次重建上下文时喂回给模型
@@ -152,6 +163,10 @@ export default function App() {
   // 全局任务状态层：全应用唯一订阅点。挂在 App 而不是各页面里，
   // 页面切换时它一直在——这就是"投递跑着切走再回来状态还在"的全部实现
   useEffect(() => startTaskSync(), [])
+
+  // 过程可见性的步骤流：同样是全应用唯一订阅点，复用 agent:stream，不新增通道。
+  // 放在 App 而不是 Workbench —— 切到知识库页再回来，正在跑的步骤不该消失
+  useEffect(() => startStepStream(), [])
 
   const handleLogout = useCallback(async () => {
     await window.api.auth.logout()
@@ -216,6 +231,9 @@ export default function App() {
       if (lastUserIdx < 0) return false
       const lastUser = base.messages[lastUserIdx]
       const nextTier = tier ?? base.tier ?? 'standard'
+      // 失败那一轮的回答被撤掉了，钉在它身上的步骤分组也得跟着撤：
+      // 留着就是挂在一个不存在的消息下标上
+      trimStepGroups(base.id, lastUserIdx + 1)
       // **先撤气泡再发**：send 的 await 还没返回，新的 error/assistant 事件就可能已经落进来了，
       // 那时再拿发送前的快照 upsert，等于把刚到的新回答一起抹掉
       upsert({
@@ -353,6 +371,7 @@ export default function App() {
                         })
                         if (!okd) return
                         await window.api.chat.delete(c.id)
+                        clearStepGroups(c.id) // 对话没了，它的步骤流也别留在内存里
                         convsRef.current = convsRef.current.filter((x) => x.id !== c.id)
                         setConvs(convsRef.current)
                         if (active.id === c.id) setActive(newConv())

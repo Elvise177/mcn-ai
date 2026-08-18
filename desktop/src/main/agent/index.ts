@@ -16,6 +16,15 @@ import { tasks } from '../tasks/registry'
 import type { AgentTask } from '../tasks/types'
 import { conversationMessages, type ChatMessage } from './conversations'
 import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
+import {
+  countToolResults,
+  isStepWorthy,
+  pickStepArgs,
+  shortToolName,
+  toolResultText,
+  SCAN_CAP_MARK,
+  type ToolStepEvent,
+} from './steps'
 
 export interface AgentStreamPayload {
   sessionId: string
@@ -23,6 +32,12 @@ export interface AgentStreamPayload {
   kind: 'delta' | 'tool' | 'assistant' | 'done' | 'error' | 'notice'
   text?: string
   tool?: string
+  /**
+   * 过程可见性：这条 `tool` 事件对应的**步骤**。同一步骤会来三次
+   * （start → args → result），靠 `step.id` 串起来。
+   * `tool` 字段保留不动（TaskDock 的 toolLine 与既有走查断言都还在用它）。
+   */
+  step?: ToolStepEvent
   sdkSessionId?: string
   costUsd?: number
   /** 实际服务这轮的模型名（来自 result.modelUsage）。
@@ -77,6 +92,24 @@ function claudeCliBin(): string | undefined {
 interface LiveSession {
   abort: AbortController
 }
+
+/**
+ * 一轮回答里最多允许几次文件系统扫描（Grep/Glob）。
+ *
+ * 真人实测的失控形态（2026-08-18）：同一个问题跑了 **188 秒**，模型在云端检索给了
+ * 一堆没有出处的碎片之后（见 §3-13），转去 Grep **穷举猜路径**——
+ * `my_script` / `script` / `40_带货/数据` / `20_公司管理/24_业务数据/` 一长串 0 命中瞎试。
+ *
+ * **提示词管不住这个**：它已经写着"检索够用即止"，模型照样猜。所以加一道主进程侧的硬闸，
+ * 挂在 **PreToolUse 钩子**上（预授权工具照样触发），数着放行、超了直接拒，
+ * 并在拒绝语里告诉它"拿已有材料作答、也别改用命令行"。
+ *
+ * **别再挪回 canUseTool**：第一版就是那么做的，为此把 Grep/Glob 移出了 `allowedTools`
+ * （那是"免提示自动放行"的名单，在里面就不走 canUseTool）。结果适得其反——
+ * 模型不用 Grep/Glob 了，改用 **Bash 调 grep**，而 Bash 从来没开放过，连撞 9 次拒绝，
+ * 实测 **174 秒**，比不管还慢。闸门的位置和拒绝语的措辞一样重要。
+ */
+const SCAN_LIMIT = 5
 
 /** PPT 版式速查（源自 render_pptx.py 的设计系统，注入系统提示词） */
 const PPT_GUIDE = `render_pptx 的 outline JSON 格式：
@@ -172,14 +205,22 @@ export class AgentManager {
 1. 回答任何与用户业务/资料相关的问题前，必须先用 search_knowledge 检索库；回答中的每个关键结论句末标注来源，格式 [[笔记名]]。不许编造。
 1b. **只许引用你这一轮真正看过的文件**：检索命中并读过、或用 Read 打开过的。没读过就别标它的名字——哪怕你觉得内容对得上。结论出自哪一篇就标哪一篇，不要把 A 的内容标成 B 的来源。检索结果里只看到标题没看到内容的，要么先 Read 再引，要么不引。
 2. **检索词写成 2-4 个空格分开的短关键词，不要把整句话丢进去**。检索器是关键词匹配，整句查询（如「公司今年的年度目标是什么」）会因为夹带虚词而命中不到；正确写法是「年度目标」或「年度目标 进展」。空结果时**换更短的词**再试，不要换同义词反复兜圈子。
-3. **顺序不能反：任何与库内资料相关的问题，第一个动作必须是 search_knowledge**，不许一上来就 Grep/Glob/Read 扫文件系统。文件系统工具只在两种情况下用：① 检索已经无结果；② 检索命中之后去读那几篇笔记、或需要跨多篇枚举比对。
-4. **检索返回空 ≠ 库里没有**。断言"库里没有"之前，必须先用 Grep/Glob 直接扫一遍库（工作目录即库根，Grep 找内容、Glob 找文件名），扫完仍无才能说没有。需要读全文时用 Read。
+3. **顺序不能反：任何与库内资料相关的问题，第一个动作必须是 search_knowledge**，不许一上来就 Grep/Glob/Read 扫文件系统。
+3b. **检索有命中就先把命中用足**：该 Read 就 Read，把读到的内容榨干；读完仍然不够，再按规则 4 去找。命中的内容里通常已经有答案，或者有能直接用的线索（确切的笔记名）。
+4. **找东西只有这三个工具：Grep（找内容）、Glob（找文件名）、Read（读全文）。命令行是关着的，别用 Bash 去 grep/find/ls——那条路一定被拒。**
+   用它们的时机有两种：① 检索没命中，要确认"库里真的没有"（检索返回空 ≠ 库里没有）；② 已经拿到明确线索——确切的文件名、确切的目录，或用户问题里出现的专名（人名/产品名/项目名）。
+   **别猜**：不要拿检索结果里的内部字段名（my_script、source_type 这类）当关键词，不要猜目录路径，不要把同一个意思换几种写法反复试。**一次 0 命中说明线索不对——该换的是思路，不是再猜一个路径。**
+   用户问题里的专名（比如达人名、产品名）就是最好的关键词，一次 Grep 通常就够。
 5. 用户要"做成PPT/课件"时：先检索资料，再构造 outline JSON 调 render_pptx 工具；要 Word/Excel/PDF 时：先检索资料，构造 spec JSON 调 render_document 工具（format 选 docx/xlsx/pdf）。用户要求生成文件时必须真的调用渲染工具产出文件，不许只在回答里给内容。${PPT_GUIDE}
 6. 写文件只允许写入 90_产物/ 目录。用户指名要 PPT/Word/Excel/PDF 时，必须调用对应渲染工具（render_pptx / render_document）产出该格式的文件，禁止用 Write 写 markdown 代替。
 7. 回答简洁直接，重要结论在前。
 8. 重要：每轮只调用一个工具，严禁在同一轮里并行调用多个工具（网关不支持并行 tool_use，会直接报错）。需要多次检索就分多轮串行进行。
 9. 检索够用即止：同一个任务里 search_knowledge 最多调 3 次。素材够写就立刻动手产出（该调 render_pptx / render_document 就调），不要为了"再全一点"反复检索——轮次是有上限的，耗光了文件就产不出来。三次检索仍无命中就转规则 4 的 Grep/Glob 兜底，别继续换词再搜。
-10. **回答里不许出现你的工作机制**：工具名、子代理、任务编排、检索轮次、"我调用了…"、"子代理卡住了"这类内容一律不写。用户要的是结论与来源，不是过程日志。遇到障碍就说人话（如"这份资料库里没有"），不要暴露内部实现。
+9b. **文件查找（Grep/Glob）一轮最多 ${SCAN_LIMIT} 次，系统强制**，超了直接拒。所以每一次都要花在有线索的地方；额度用完就**拿已有材料作答**，没有依据的部分直说没有，不要硬凑，更不要改用别的工具绕过去。
+10. **回答里不许出现你的工作机制**：工具名、子代理、任务编排、"我调用了…"、"子代理卡住了"这类内容一律不写。用户要的是结论与来源，不是过程日志。遇到障碍就说人话，不要暴露内部实现。（用人话提一句"检索了资料库""查阅了档案"是可以的，不算暴露机制。）
+10b. **一旦说到检索过程，就必须与事实一致**。用户是**一边看界面上的过程步骤、一边读你的正文**的，两边对不上，在他眼里就是产品自己打自己。
+   - 检索**有结果、但你判断不相关**时，**不许说成"无结果／无命中／没找到"**。要说与事实相符的话，例如「检索到的内容与问题不直接相关，我改为直接查阅相关档案」。
+   - 凡是界面会展示的客观事实——**命中条数、文件名**——正文里的转述不得与它矛盾。拿不准就别提数字，只说做了什么。
 11. **敏感信息只用不说**：人事档案、财务表、达人信息表这类文件**可以读、可以作为结论依据、可以标注来源**，但**回答里不许复述个人字段**——身份证号、银行卡/收款账户、手机号等联系方式、员工与达人的真实姓名，一律不写进回答。提到人一律用**艺名**（达人）或**姓氏+职务**（员工，如"陈经理""李主管"）。用户明确要求看某个具体字段时，告诉他在哪个文件里自己打开看，不要代为复述。`
   }
 
@@ -276,6 +317,8 @@ export class AgentManager {
 
     // 这一轮真的调过哪些工具 → 决定用量记录里的任务类型（做 PPT / 做文档 / 纯对话）
     const toolsUsed = new Set<string>()
+    /** 这一轮已经放行了几次文件系统扫描（见 SCAN_LIMIT） */
+    let scanCalls = 0
     /**
      * B-6：这一轮**真正被摆到模型面前**的笔记路径。来源两处：
      * `search_knowledge` 返回的命中（我们自己的工具，直接记）、以及 `Read` 的入参。
@@ -284,6 +327,25 @@ export class AgentManager {
     const surfaced = new Set<string>()
     const noteKey = (p: string): string => p.replace(/\.md$/i, '').toLowerCase()
     const startedAt = Date.now()
+
+    /**
+     * 过程可见性的三段接力。**流式那条 tool_use 只给工具名**（入参还在一块块流），
+     * 完整入参只有非流式 `assistant` 消息里才有，结果数只有 `user` 消息里的 tool_result 才有。
+     * 所以一步棋分三次发，靠 stepId 串起来：
+     *   content_block_start → start（步骤出现，转圈）
+     *   assistant 消息      → args （补上检索词/文件名/扫描目标）
+     *   user 消息 tool_result → result（回填结果数 / 失败标记）
+     */
+    // 步骤 id 里带上本轮的开始时刻：同一个对话连发两轮时 taskId 是同一个，
+    // 只用序号的话第二轮的 #1 会和第一轮撞车（渲染层分组没事，但事件消费方会当成同一步）
+    let stepSeq = 0
+    /** 已经 start、还没等到入参的步骤（按出现顺序排队） */
+    const awaitingArgs: Array<{ id: string; tool: string }> = []
+    /** tool_use_id → 步骤，tool_result 回来时靠它找回是哪一步 */
+    const stepByToolUse = new Map<string, { id: string; tool: string }>()
+    const emitStep = (step: ToolStepEvent): void => {
+      this.emit({ sessionId, kind: 'tool', tool: step.tool, step })
+    }
     /** 扣住的错误型 result（见下面 result 分支）。子进程正常退出时由循环后面收尾 */
     let errorResult = ''
 
@@ -410,6 +472,42 @@ export class AgentManager {
             'mcp__knowledge__render_pptx',
             'mcp__knowledge__render_document',
           ],
+          /**
+           * 扫描次数闸门（SCAN_LIMIT）**必须挂在 PreToolUse 上，不能挂 canUseTool**。
+           *
+           * 第一版就是挂 canUseTool 的，为此把 Grep/Glob 移出了 `allowedTools`
+           * ——`allowedTools` 的语义是"免提示自动放行"，预授权的工具压根不走 canUseTool。
+           * 结果适得其反（2026-08-18 实测）：模型不再用 Grep/Glob，改用 **Bash 调 grep**，
+           * 而 Bash 从来没开放过 → 连撞 9 次拒绝 → **174 秒**，比不管还慢。
+           * PreToolUse 对预授权工具照样触发，所以 Grep/Glob 可以留在 allowedTools 里
+           * （用起来无摩擦），闸门另挂一层。
+           */
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [
+                  async (input: unknown) => {
+                    const name = (input as { tool_name?: string }).tool_name
+                    if (name !== 'Grep' && name !== 'Glob') return {}
+                    if (scanCalls >= SCAN_LIMIT) {
+                      log('warn', 'agent', `文件查找已达上限 ${SCAN_LIMIT} 次，拒绝本次 ${name}`)
+                      return {
+                        hookSpecificOutput: {
+                          hookEventName: 'PreToolUse' as const,
+                          permissionDecision: 'deny' as const,
+                          permissionDecisionReason:
+                            `文件查找次数已达上限（${SCAN_LIMIT} 次）。不要再找了，也不要改用命令行——` +
+                            `请基于已经检索到、已经读过的材料直接作答；没有依据的部分就说明没有，不要硬凑。`,
+                        },
+                      }
+                    }
+                    scanCalls++
+                    return {}
+                  },
+                ],
+              },
+            ],
+          },
           canUseTool: async (toolName: string, input: Record<string, unknown>) => {
             // Write 只放行 90_产物；其余未预授权工具一律拒绝
             if (toolName === 'Write' || toolName === 'Edit') {
@@ -419,7 +517,14 @@ export class AgentManager {
               }
               return { behavior: 'deny' as const, message: '只允许写入 90_产物/ 目录' }
             }
-            return { behavior: 'deny' as const, message: `工具 ${toolName} 未开放` }
+            // **拒绝要指路**：只说"未开放"的话模型会一直换姿势重试同一件事——
+            // 实测它被挡在 Grep 外面后改用 Bash 调 grep，连撞 9 次、烧掉 174 秒
+            return {
+              behavior: 'deny' as const,
+              message:
+                `工具 ${toolName} 未开放，别再试它了。查资料只有这几条路：` +
+                `search_knowledge 检索、Grep 找内容、Glob 找文件名、Read 读全文；命令行是关着的。`,
+            }
           },
           mcpServers: { knowledge },
           // 30 轮做 PPT 偶尔不够（deepseek-v4-pro 爱反复检索，实测 4 轮冒烟里挂过 1 次
@@ -456,9 +561,40 @@ export class AgentManager {
             appendDraft(ev.delta.text)
             this.emit({ sessionId, kind: 'delta', text: ev.delta.text })
           } else if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
-            if (ev.content_block.name) toolsUsed.add(ev.content_block.name)
-            tasks.patch(taskId, { toolLine: ev.content_block.name } as Partial<AgentTask>)
-            this.emit({ sessionId, kind: 'tool', tool: ev.content_block.name })
+            const name = ev.content_block.name
+            if (name) toolsUsed.add(name)
+            tasks.patch(taskId, { toolLine: name } as Partial<AgentTask>)
+            const tool = shortToolName(name ?? '')
+            if (isStepWorthy(tool)) {
+              const id = `${taskId}#${startedAt}.${++stepSeq}`
+              awaitingArgs.push({ id, tool })
+              emitStep({ id, tool, phase: 'start' })
+            }
+          }
+          continue
+        }
+        // tool_result 回来了：回填这一步的结果数（"核对了 N 份…"、"检索到 N 条"）。
+        // 数不出来就不带 count——渲染层据此只显示"已核对"，不编一个数字出来
+        if (message.type === 'user') {
+          const blocks = (message as { message?: { content?: unknown[] } }).message?.content ?? []
+          for (const b of blocks as Array<{ type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>) {
+            if (b?.type !== 'tool_result') continue
+            const st = stepByToolUse.get(String(b.tool_use_id ?? ''))
+            if (!st) continue
+            const resultText = toolResultText(b.content)
+            const counted = countToolResults(st.tool, resultText)
+            // 被自家护栏拦下的那一步：不算失败，单独标出来（见 SCAN_LIMIT）
+            const capped = resultText.includes(SCAN_CAP_MARK)
+            emitStep({
+              id: st.id,
+              tool: st.tool,
+              phase: 'result',
+              count: capped ? undefined : counted?.count,
+              unit: capped ? undefined : counted?.unit,
+              approx: capped ? undefined : counted?.approx,
+              failed: !capped && b.is_error === true,
+              capped: capped || undefined,
+            })
           }
           continue
         }
@@ -466,12 +602,22 @@ export class AgentManager {
         // Read 读了哪个文件只能从这里拿到（B-6 的第二个来源）
         if (message.type === 'assistant') {
           const blocks = (message as { message?: { content?: unknown[] } }).message?.content ?? []
-          for (const b of blocks as Array<{ type?: string; name?: string; input?: Record<string, unknown> }>) {
+          for (const b of blocks as Array<{ type?: string; id?: string; name?: string; input?: Record<string, unknown> }>) {
             if (b?.type !== 'tool_use') continue
             const fp = b.input?.file_path ?? b.input?.path
             if (typeof fp === 'string' && fp) {
               surfaced.add(noteKey(fp.startsWith(root) ? fp.slice(root.length).replace(/^\/+/, '') : fp))
             }
+            // 认领流式那边先开好的步骤：**按工具名配对**，不是无脑 shift()。
+            // 名字对不上说明两条路错位了（模型违反"每轮一个工具"时会出现），
+            // 那就现开一步，宁可多一条步骤，也不要把检索词安到阅读步骤上
+            const tool = shortToolName(b.name ?? '')
+            if (!isStepWorthy(tool)) continue
+            const i = awaitingArgs.findIndex((s) => s.tool === tool)
+            const st = i >= 0 ? awaitingArgs.splice(i, 1)[0] : { id: `${taskId}#${startedAt}.${++stepSeq}`, tool }
+            if (i < 0) emitStep({ id: st.id, tool, phase: 'start' })
+            if (b.id) stepByToolUse.set(b.id, st)
+            emitStep({ id: st.id, tool, phase: 'args', args: pickStepArgs(tool, b.input, root) })
           }
           continue
         }

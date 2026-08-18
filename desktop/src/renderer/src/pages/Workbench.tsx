@@ -10,16 +10,8 @@ import { enqueueMessage } from '../lib/enqueue'
 import { useDragOver } from '../hooks/useDragOver'
 import { useTask } from '../hooks/useTasks'
 import { TierSelector } from '../components/TierSelector'
-
-const TOOL_ZH: Record<string, string> = {
-  search_knowledge: '检索知识库',
-  render_pptx: '渲染 PPT',
-  render_document: '渲染文档',
-  Read: '读取笔记',
-  Grep: '全文查找',
-  Glob: '定位文件',
-  Write: '写入产物',
-}
+import { StepStream, useArtifactMedians } from '../components/StepStream'
+import { anchorStepGroup, useSessionSteps } from '../lib/step-stream'
 
 /**
  * 打开产物（M-05）。`shell.openPath` 失败（没装 Keynote/Office、产物已被删）以前是静默的，
@@ -66,7 +58,6 @@ export default function Workbench({
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [draft, setDraft] = useState('')
-  const [toolLine, setToolLine] = useState<string | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const convRef = useRef(conv)
   convRef.current = conv
@@ -78,10 +69,17 @@ export default function Workbench({
   // sending 只是"刚点了发送、任务事件还没回来"的这几十毫秒的乐观态
   const streaming = sending || taskRunning
 
+  // 过程可见性：步骤流住在模块级 store（lib/step-stream.ts），页面切走再回来不丢。
+  // 最后一个分组还 live 的话就是"这一轮正在跑的"，其余分组按顺序贴在各自的回答上面
+  const { groups } = useSessionSteps(conv.id)
+  const liveGroup = groups.length && groups[groups.length - 1].live ? groups[groups.length - 1] : null
+  const doneGroups = liveGroup ? groups.slice(0, -1) : groups
+  // 「通常约 X 秒」的样本每轮重取一次：第一次做产物时还没有历史，做完就有了
+  const medians = useArtifactMedians(groups.length)
+
   useEffect(() => {
     setInput('')
     setDraft('')
-    setToolLine(null)
     setSending(false)
   }, [conv.id])
 
@@ -90,7 +88,6 @@ export default function Workbench({
   useEffect(() => {
     if (!taskRunning || !task) return
     setDraft((d) => d || task.draft)
-    setToolLine((l) => l ?? (task.toolLine ? (TOOL_ZH[task.toolLine.replace(/^mcp__\w+__/, '')] ?? task.toolLine) : null))
   }, [taskRunning, task])
 
   useEffect(() => {
@@ -98,23 +95,37 @@ export default function Workbench({
       if (p.sessionId !== convRef.current.id) return
       if (p.kind === 'delta' && p.text) {
         setDraft((d) => d + p.text)
-        setToolLine(null)
-      } else if (p.kind === 'tool' && p.tool) {
-        const short = p.tool.replace(/^mcp__\w+__/, '')
-        setToolLine(TOOL_ZH[short] ?? short)
       } else if (p.kind === 'assistant') {
         setDraft('')
       } else if (p.kind === 'done' || p.kind === 'error') {
         setDraft('')
         setSending(false)
-        setToolLine(null)
       }
     })
   }, [])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [messages, draft, toolLine])
+  }, [messages, draft, groups])
+
+  /**
+   * 兜底收口：主进程说这一轮已经不在跑了，但步骤流还挂着"进行中"的分组 → 就地收掉。
+   *
+   * 步骤流是跟着 `agent:stream` 走的，而**这条通道是尽力而为的**——窗口刷新期间
+   * `webContents.send` 会静默丢事件（任务层那条约定写得很清楚：push 尽力而为、
+   * snapshot 才是权威）。丢掉的要是收尾那一下，步骤流就会永远停在展开态转着圈。
+   * 这里拿任务层这个权威来源补一刀，不依赖某一条事件一定送达。
+   */
+  useEffect(() => {
+    if (streaming || !liveGroup) return
+    const lastAssistant = messages.reduce((at, m, i) => (m.role === 'assistant' ? i : at), -1)
+    anchorStepGroup(conv.id, lastAssistant)
+  }, [streaming, liveGroup, messages, conv.id])
+
+  // 步骤分组 → 消息的对位：直接用 App 落消息时钉上的下标，不猜。
+  // 拿不到下标的分组（停止生成时一条消息都没落下）就不显示——挂错地方比不显示更糟
+  const stepFor = new Map<number, (typeof doneGroups)[number]>()
+  for (const g of doneGroups) if (g.anchor !== undefined) stepFor.set(g.anchor, g)
 
   /**
    * 发送。**生成中也照发**——由主进程拒绝并回一条带「停止当前生成」动作的提示（设计 §5.3）。
@@ -249,6 +260,10 @@ export default function Workbench({
                     <div key={i} className="group flex gap-3">
                       <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
                       <div className="min-w-0 flex-1">
+                        {/* 这一条回答是怎么来的：折叠成一行摘要贴在正文上面，点开看明细 */}
+                        {stepFor.has(i) && (
+                          <StepStream sessionId={conv.id} group={stepFor.get(i)!} medians={medians} />
+                        )}
                         <FastMarkdown body={m.text} onLink={handleLink} />
                         <div className="mt-1 flex items-center gap-2">
                           {/* 错误气泡里的「重试」常驻（不是 hover 才出）：这是用户此刻唯一想点的东西。
@@ -291,15 +306,11 @@ export default function Workbench({
                     </div>
                   )
                 )}
-                {(draft || toolLine) && (
+                {(draft || liveGroup) && (
                   <div className="flex gap-3">
                     <span className="mt-2 h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-accent" />
                     <div className="min-w-0 flex-1">
-                      {toolLine && (
-                        <div className="mb-1 flex items-center gap-1.5 text-sm text-muted">
-                          <Loader2 size={12} className="animate-spin" /> {toolLine}…
-                        </div>
-                      )}
+                      {liveGroup && <StepStream sessionId={conv.id} group={liveGroup} medians={medians} />}
                       {/* streaming-body：给正文最后一行末尾接一个呼吸光标，边写边有"还在写"的实感 */}
                       {draft && (
                         <div className="streaming-body">
@@ -309,7 +320,7 @@ export default function Workbench({
                     </div>
                   </div>
                 )}
-                {streaming && !draft && !toolLine && (
+                {streaming && !draft && !liveGroup && (
                   <div className="thinking-dots pl-6 pt-1"><span /><span /><span /></div>
                 )}
               </div>

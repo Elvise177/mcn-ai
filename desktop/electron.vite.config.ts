@@ -15,6 +15,7 @@ export default defineConfig({
           'smoke-chat': resolve(__dirname, 'src/main/smoke-chat.ts'),
           'smoke-provider': resolve(__dirname, 'src/main/smoke-provider.ts'),
           'smoke-resume': resolve(__dirname, 'src/main/smoke-resume.ts'),
+          'smoke-steps': resolve(__dirname, 'src/main/smoke-steps.ts'),
         },
       },
     },

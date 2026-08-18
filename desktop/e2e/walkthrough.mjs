@@ -645,6 +645,133 @@ const snapHover = async (name, ms = 250) => {
   await rawShot(cdp, name)
 }
 
+// ---------- 过程可见性（步骤流）的断言工具 ----------
+//
+// 一条铁律：**断言一律到参数层**。「有一条检索步骤」是弱断言，跑绿了也证明不了
+// 参数透传是通的；要断言的是「界面上那句话里的检索词，就是主进程这一轮发出去的那个词」。
+// 所以先把原始步骤事件收下来（`window.__steps`），再拿它比对 DOM 文本。
+
+/** 每轮开始前调用：清空上一轮的事件，订阅只挂一次 */
+const armSteps = () =>
+  win.evaluate(() => {
+    window.__steps = []
+    if (window.__stepsArmed) return
+    window.__stepsArmed = true
+    window.api.chat.onStream((p) => {
+      if (p.kind !== 'tool' || !p.step) return
+      const s = p.step
+      let cur = window.__steps.find((x) => x.id === s.id)
+      if (!cur) {
+        cur = { id: s.id, tool: s.tool, args: {} }
+        window.__steps.push(cur)
+      }
+      if (s.args) cur.args = s.args
+      if (s.phase === 'result') {
+        cur.count = s.count
+        cur.unit = s.unit
+        cur.failed = !!s.failed
+      }
+    })
+  })
+
+/** 主进程真正发出来的步骤（含参数与结果数），按轮次分组 */
+const rawSteps = () => win.evaluate(() => window.__steps ?? [])
+/** 步骤 id 形如 `agent:<会话>#<本轮开始时刻>.<序号>`，按中间那段切轮次 */
+const rawStepGroups = async () => {
+  const gs = []
+  let key = null
+  for (const s of await rawSteps()) {
+    const k = String(s.id).split('#')[1]?.split('.')[0]
+    if (k !== key) {
+      key = k
+      gs.push([])
+    }
+    gs[gs.length - 1].push(s)
+  }
+  return gs
+}
+
+/** 界面上真正画出来的步骤行 */
+const stepRows = () =>
+  win.locator('[data-testid="step-item"]').evaluateAll((els) =>
+    els.map((e) => ({
+      kind: e.dataset.kind,
+      status: e.dataset.status,
+      count: e.dataset.count,
+      unit: e.dataset.unit,
+      retry: e.dataset.retry === '1',
+      verify: e.dataset.verify === '1',
+      text: e.textContent.trim(),
+    }))
+  )
+
+/**
+ * 核对步骤的参数层：**目标 + 数字**都得在，而且量词要跟单位对上
+ * （份=笔记，处=一篇里的行内命中；混着说就是瞎报）。
+ * 数字还必须能在原始事件里找到出处——不然就是界面自己编的。
+ */
+let sawScanCount = null
+const assertScanRow = (rows, events) => {
+  const scan = rows.find((r) => r.kind === 'scan' && r.status === 'done' && r.count !== '')
+  if (!scan) return
+  const ok =
+    scan.unit === 'file'
+      ? new RegExp(`核对了 ${scan.count} 份\\S`).test(scan.text)
+      : new RegExp(`核对了\\S+，命中 ${scan.count} 处`).test(scan.text)
+  if (!ok) throw new Error(`核对步骤缺目标或数字，或量词与单位对不上（${scan.unit}）：「${scan.text}」`)
+  if (!events.some((s) => String(s.count) === scan.count && s.unit === scan.unit))
+    throw new Error(`核对步骤的数字在原始事件里查无出处：界面 ${scan.count}/${scan.unit}，事件 ${JSON.stringify(events.map((s) => [s.tool, s.count, s.unit]))}`)
+  sawScanCount = scan.text
+}
+
+/** 等到某个工具的步骤把参数带回来（start 与 args 是两拍） */
+const waitStepArgs = async (tool, key, timeout = 180000) => {
+  const t0 = Date.now()
+  while (Date.now() - t0 < timeout) {
+    const s = (await rawSteps()).find((x) => x.tool === tool && x.args?.[key])
+    if (s) return s
+    await win.waitForTimeout(300)
+  }
+  return null
+}
+
+/**
+ * 折叠摘要里的 N 的口径（与 lib/step-stream.ts 的 resourceCount 同一套）：
+ * **只算「份」**（unit==='file'），阅读按篇。Grep 的行内命中（unit==='match'）
+ * 是一篇里的几十行，加进来就成了"检索了 42 份资料"的瞎报。
+ * 这里**独立重算一遍**，用来和界面上的数字对账。
+ */
+const expectResourceCount = (steps) => {
+  const readOnce = new Set()
+  let n = 0
+  for (const s of steps) {
+    if (s.failed) continue
+    if (s.tool === 'Read') {
+      const k = s.args?.file ?? s.id
+      if (readOnce.has(k)) continue
+      readOnce.add(k)
+      n += 1
+    } else if (['search_knowledge', 'Grep', 'Glob'].includes(s.tool) && s.unit === 'file') {
+      n += s.count ?? 0
+    }
+  }
+  return n
+}
+
+/** 整个步骤流区域一个英文工具名都不许出现（兜底文案也只说「正在处理」） */
+const TOOL_NAME_LEAK = /(search_knowledge|render_pptx|render_document|mcp__|\bRead\b|\bGrep\b|\bGlob\b|\bBash\b|\bWrite\b|\bEdit\b|\bWebFetch\b)/
+const assertNoToolNames = async (where) => {
+  const txt = await win
+    .locator('[data-testid="step-list"], [data-testid="steps-summary"], [data-testid="steps-summary-open"]')
+    .evaluateAll((els) => els.map((e) => e.textContent).join('\n'))
+  const hit = txt.match(TOOL_NAME_LEAK)
+  if (hit) throw new Error(`${where}：步骤流里漏出了工具原名「${hit[0]}」\n${txt.slice(0, 400)}`)
+  return txt
+}
+
+/** 「阅读《…》」这条至少要在整轮走查里出现一次并被验到参数层 */
+let sawReadTitle = null
+
 // E2E_CHAT=1 要真调 AI：本地模式没有 key，必须先用测试账号登录拿服务端下发的 key
 /** 收尾的 before-quit 断言要自己 close，finally 里别再关一次 */
 let closed = false
@@ -874,7 +1001,28 @@ try {
           if (p.kind === 'tool' && p.tool) window.__streamTools.push(p.tool)
         })
       })
+      // 过程可见性：把**主进程发出来的原始步骤事件**收下来。
+      // 断言必须拿它去比对界面上的文字（真检索词 / 真文件名 / 真数字），
+      // 而不是让 DOM 自己跟自己对——这一单的存在本身就是弱断言的教训。
+      await armSteps()
       await chatInput.press('Enter')
+
+      // ---- 48 过程可见性：步骤逐条出现，当前步骤转圈 ----
+      {
+        await win.locator('[data-testid="step-item"]').first().waitFor({ timeout: 180000 })
+        // 采样一次会空过：单条工具可能一秒就回来了，正好错开那一帧。
+        // 轮询"曾经出现过转圈的步骤"，抓到再截图
+        let live = []
+        for (let i = 0; i < 300; i++) {
+          live = await stepRows()
+          if (live.some((r) => r.status === 'running')) break
+          await win.waitForTimeout(200)
+        }
+        if (!live.some((r) => r.status === 'running'))
+          throw new Error('步骤流里始终没有"进行中"的那一条（当前步骤该转圈）：' + JSON.stringify(live))
+        await snap('48-步骤流-进行中', 150)
+        console.log('步骤流进行中 ✓', JSON.stringify(live.map((r) => `${r.status}|${r.text}`)))
+      }
       // 流式中：等第一段正文出来再截，光标才有东西可跟
       await win.locator('.streaming-body, .thinking-dots').first().waitFor({ timeout: 60000 }).catch(() => {})
       await snap('01d-工作台-流式中', 4000)
@@ -930,8 +1078,12 @@ try {
             if (!(await win.locator('button[title="停止生成"]').count()))
               throw new Error('切回生成中的对话后没有"进行中"状态（H-10）')
             const bodyBack = await win.locator('.streaming-body').first().innerText().catch(() => '')
-            const head = bodyNow.trim().slice(0, 12)
-            if (!bodyBack.includes(head))
+            // 比之前先把 markdown 记号剥掉：切走那一刻正文可能停在**没闭合**的强调里
+            // （`**结论：…`），那时候星号是当字面量画出来的；等它闭合成粗体，星号就没了。
+            // 直接比原文会在这个边界上假失败一次（2026-08-18 实测踩到）
+            const plain = (t) => t.replace(/[*_`~\s]/g, '')
+            const head = plain(bodyNow).slice(0, 12)
+            if (!plain(bodyBack).includes(head))
               throw new Error(`切回后半截正文没接上（draft 基线失效）：期望含「${head}」，实得「${bodyBack.slice(0, 40)}」`)
             await snap('28-切回生成中的对话', 200)
             console.log('H-10 切走切回 ✓', JSON.stringify({ 切走前: head, 切回后长度: bodyBack.length }))
@@ -988,6 +1140,337 @@ try {
           JSON.stringify({ 条数: recs.length, 任务类型: last.taskType, 实际模型: last.resolved_model, 耗时ms: last.durationMs })
         )
       }
+
+      // ================= 过程可见性：参数层断言 =================
+      //
+      // 全部断言都比对「主进程发出来的真参数」与「界面上那句话」，
+      // 不接受「有一条检索步骤」这种弱断言——本单的存在就是弱断言的教训。
+
+      // ---- 49/50 折叠摘要 + 点击展开 + 参数层比对（第一问那一轮）----
+      {
+        const gs = await rawStepGroups()
+        if (!gs.length) throw new Error('真实对话跑完，一条步骤事件都没有——参数透传链路没通')
+        // H-10 那段可能补发过一条提问，于是这个会话里有两轮。
+        // **只认最后一轮**：下面点开的也是最后那条摘要，两边必须指同一轮，
+        // 否则拿上一轮的检索词去比对这一轮的界面，绿了红了都没意义
+        const last = gs[gs.length - 1]
+
+        // ① 检索步骤必须含**真实关键词**
+        const search = last.find((s) => s.tool === 'search_knowledge' && s.args?.query)
+        if (!search) throw new Error('这一轮没有带参数的检索步骤：' + JSON.stringify(last))
+
+        // 摘要必须已经折叠（回答开始输出那一刻收起来的）
+        const summary = win.locator('[data-testid="steps-summary"]').last()
+        // 等不到就把步骤区的整个状态 dump 出来：只报"没等到"的话，
+        // "分组还挂着 live"和"用户点开过所以 pinned"长得一模一样（2026-08-18 为此白跑一轮）
+        await summary.waitFor({ timeout: 30000 }).catch(async (e) => {
+          const state = await win.evaluate(() => ({
+            summary: document.querySelectorAll('[data-testid="steps-summary"]').length,
+            openHeader: document.querySelectorAll('[data-testid="steps-summary-open"]').length,
+            lists: [...document.querySelectorAll('[data-testid="step-list"]')].map((el) => ({
+              live: el.dataset.live,
+              pinned: el.dataset.pinned,
+            })),
+            assistantBubbles: document.querySelectorAll('.md-article').length,
+          }))
+          throw new Error(`回答落地了却没折叠成摘要，步骤区现状：${JSON.stringify(state)}\n原始错误：${e.message}`)
+        })
+        const sumText = (await summary.innerText()).trim()
+        await snap('49-步骤流-折叠摘要', 300)
+
+        // ② 折叠摘要的数字必须与步骤明细对得上（独立重算一遍，不信界面自己的话）
+        const wantN = expectResourceCount(last)
+        const gotN = Number((sumText.match(/检索了\s*(\d+)\s*份资料/) ?? [])[1] ?? NaN)
+        if (wantN > 0) {
+          if (gotN !== wantN)
+            throw new Error(
+              `折叠摘要的资料数不对：界面「${sumText}」，按步骤明细应为 ${wantN}\n${JSON.stringify(last)}`
+            )
+        } else if (!/未找到相关资料/.test(sumText)) {
+          throw new Error(`零命中那一轮的摘要文案不对：「${sumText}」`)
+        }
+        if (!/用时\s*\d+(\.\d+)?s/.test(sumText)) throw new Error(`折叠摘要没有用时：「${sumText}」`)
+
+        // ③ 点开看明细
+        await summary.click()
+        await win.locator('[data-testid="step-list"]').last().waitFor({ timeout: 10000 })
+        await snap('50-步骤流-展开明细', 400)
+        const rows = await stepRows()
+        if (!rows.length) throw new Error('点开折叠摘要之后没有步骤明细')
+
+        // ④ 检索步骤那一行必须含真实检索词（参数层）
+        const searchRow = rows.find((r) => r.kind === 'search')
+        if (!searchRow || !searchRow.text.includes(search.args.query))
+          throw new Error(
+            `检索步骤没有带出真实关键词：主进程发的是「${search.args.query}」，界面上是「${searchRow?.text}」`
+          )
+
+        // ⑤ 阅读步骤（有就验）：书名号里必须是真实文件名
+        const readEv = last.find((s) => s.tool === 'Read' && s.args?.file)
+        if (readEv) {
+          const title = readEv.args.file.split('/').pop().replace(/\.[a-z0-9]+$/i, '')
+          const readRow = rows.find((r) => r.kind === 'read')
+          if (!readRow || !readRow.text.includes(`《${title}》`))
+            throw new Error(`阅读步骤没有带出书名号文件名「《${title}》」：${readRow?.text}`)
+          sawReadTitle = readRow.text
+        }
+
+        // ⑥ 核对步骤：目标 + 数字 + 量词与单位对得上
+        assertScanRow(rows, last)
+        await assertNoToolNames('第一问步骤流')
+        console.log(
+          '过程可见性 · 第一问 ✓',
+          JSON.stringify({ 摘要: sumText, 资料数对账: { 界面: gotN, 明细算出: wantN }, 检索词: search.args.query, 步骤: rows.map((r) => r.text) })
+        )
+      }
+
+      // ---- 检索策略失控的回归闸门（真人实测 2026-08-18：同一问题 188s，Grep 穷举猜路径）----
+      //
+      // 机械护栏硬断言；"猜没猜"这种要人看的，把事实打出来给人判断，不自己编一个通过标准
+      {
+        const g0 = (await rawStepGroups())[0] ?? []
+        const scans = g0.filter((s) => ['Grep', 'Glob'].includes(s.tool))
+        const allowed = scans.filter((s) => !s.failed)
+        // 硬闸：主进程侧的 SCAN_LIMIT=5，放行的绝不该超（超了就是护栏没生效）
+        if (allowed.length > 5)
+          throw new Error(`文件查找放行 ${allowed.length} 次，超过硬上限 5（canUseTool 闸门没生效）`)
+        // 技术黑话：步骤区不许出现 my_script / source_type 这类内部字段名
+        const areaText = await win
+          .locator('[data-testid="step-list"], [data-testid="steps-summary"], [data-testid="steps-summary-open"]')
+          .evaluateAll((els) => els.map((e) => e.textContent).join('\n'))
+        const techy = areaText.match(/[a-z][a-z0-9]*_[a-z0-9]+/)
+        if (techy) throw new Error(`步骤流里出现技术黑话「${techy[0]}」：${areaText.slice(0, 300)}`)
+
+        const zeroGuess = g0.filter(
+          (s) => ['Grep', 'Glob'].includes(s.tool) && s.count === 0 && !s.failed
+        )
+        const ym = new Date().toISOString().slice(0, 7)
+        const f = join(userData, 'usage', `${ym}.jsonl`)
+        const recs = existsSync(f)
+          ? readFileSync(f, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+          : []
+        const durMs = recs.filter((r) => r.taskType === 'chat').pop()?.durationMs ?? 0
+        console.log(
+          '检索策略（第一问）',
+          JSON.stringify({
+            耗时秒: +(durMs / 1000).toFixed(1),
+            达标60秒: durMs > 0 && durMs <= 60000,
+            检索次数: g0.filter((s) => s.tool === 'search_knowledge').length,
+            文件查找放行: allowed.length,
+            被护栏拒绝: scans.length - allowed.length,
+            零命中扫描: zeroGuess.length,
+            零命中扫描的词: zeroGuess.map((s) => s.args?.pattern ?? s.args?.glob ?? ''),
+            步骤: g0.length,
+          })
+        )
+        // 明显还在失控（远超上一轮的 188s 那一类）才判失败；60 秒那条线由人看上面这行数字定夺
+        if (durMs > 120000) throw new Error(`第一问耗时 ${(durMs / 1000).toFixed(1)}s，仍然失控`)
+      }
+
+      // ---- 51 验证性扫描：检索 0 命中 → 「正在确认库中没有相关记录」 ----
+      //
+      // 怎么**确定性**地造出 0 命中：登录态下 search_knowledge 先走云端语义检索，
+      // 而语义检索没有相似度阈值（migration 012 的 RPC 只有 order+limit），
+      // 库里只要有东西就一定返回 6 条，问什么都不会是 0。
+      // 所以把 apiBaseUrl 临时指到一个 404 前缀 —— searchCloud 拿到非 2xx 回 null，
+      // 走产品自己的「回退本地全文检索」那条路，本地检索一个不存在的词才真是 0 命中。
+      // 用 404 而不是黑洞地址：传输层失败会点亮「云端离线」条，糊在后面每一张截图上。
+      {
+        const apiBase0 = (await win.evaluate(() => window.api.settings.get())).apiBaseUrl
+        await win.evaluate((u) => window.api.settings.setApiBase(u), `${apiBase0}/e2e-force-local-search`)
+        try {
+          /**
+           * 问一件**库里绝对没有、而且拆不出真词**的事。
+           *
+           * 踩了两次才明白：检索 0 命中好造（本地检索兜底就行），难的是**紧接着那一遍扫描
+           * 也得是 0**——模型会把问题拆成关键词做 `A|B|C` 的 Grep，只要有一个词在库里真有，
+           * 那一步就（正确地）回到「核对了 1 份…」，`已确认库中没有相关记录` 就出不来。
+           *   - 「南极科考队后勤预算」→ 拆出「后勤」，命中 1
+           *   - 「磷虾捕捞配额」→ 拆出「配额」，命中 1
+           * 所以要用一个**没有业务语义、拆不开**的专名。
+           */
+          const ABSENT = [
+            '库里有没有霍格沃茨的资料？',
+            '库里有没有文件名里带「霍格沃茨」的笔记？直接按文件名找。',
+          ]
+          let running = null
+          let doneVerify = null
+          let rows = []
+          let steps = []
+          for (const q of ABSENT) {
+            await win.locator('button[title="新对话"]').click()
+            await win.waitForTimeout(600)
+            await armSteps()
+            await chatInput.fill(q)
+            await chatInput.press('Enter')
+
+            // 认 `data-verify` 而不是 `kind==='verify'`：扫到东西时 kind 会（正确地）变回 scan。
+            // 先等这一轮真的动起来，否则第一圈就因为"停止按钮还没出现"直接 break 掉
+            await win.locator('[data-testid="step-item"]').first().waitFor({ timeout: 180000 }).catch(() => {})
+            for (let i = 0; i < 3000; i++) {
+              const now = await stepRows()
+              const v = now.find((r) => r.verify && r.status === 'running')
+              if (v) {
+                running = v
+                break
+              }
+              if (!(await win.locator('button[title="停止生成"]').count())) break
+              await win.waitForTimeout(60)
+            }
+            // 立刻截，一毫秒都别等：验证性扫描往往 100ms 内就回来了，
+            // 等一下截到的就是它**完成之后**那一帧（2026-08-18 实测，基线因此失真）
+            if (running) await snap('51-步骤流-确认库中没有', 0)
+            await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 300000 }).catch(() => {})
+
+            steps = (await rawStepGroups()).pop() ?? []
+            const searched = steps.find((s) => s.tool === 'search_knowledge')
+            if (!searched || searched.count !== 0)
+              throw new Error(
+                `「${q}」没有制造出"检索 0 命中"（云端回退没生效？）：${JSON.stringify(steps.map((s) => [s.tool, s.count]))}`
+              )
+            const sum = win.locator('[data-testid="steps-summary"]').last()
+            if (await sum.count()) await sum.click()
+            rows = await stepRows()
+            if (!rows.some((r) => r.verify))
+              throw new Error(`「${q}」检索 0 命中之后没有任何一步被判成"验证性扫描"：` + JSON.stringify(rows))
+            doneVerify = rows.find((r) => r.verify && /确认库中没有相关记录/.test(r.text))
+            if (doneVerify || running) break
+            console.log(`（「${q}」那一遍扫描真扫到了东西，换一个更刁钻的问法再试一次）`)
+          }
+          // 进行中那一帧极短（grep 往往 100ms 内就回来），抓不到不算失败——
+          // 收尾那条「已确认库中没有相关记录」是同一个特性，截它一样算数
+          // 收尾是「已确认库中没有相关记录」的话，用它覆盖一次：完成态是**静止**的，
+          // 比抢那一帧进行中稳得多，基线截图要的就是稳
+          if (doneVerify) await snap('51-步骤流-确认库中没有', 200)
+          else if (!running)
+            throw new Error('两种问法都没能让验证性扫描落到"确认没有"上，51 截不出来：' + JSON.stringify(rows))
+          // 每一条验证性扫描的文案都必须是三种合法形态之一
+          for (const r of rows.filter((x) => x.verify)) {
+            if (!/^(正在确认库中没有相关记录|已确认库中没有相关记录|核对了)/.test(r.text))
+              throw new Error(`验证性扫描文案不对：「${r.text}」`)
+          }
+
+          assertScanRow(rows, steps)
+          await assertNoToolNames('验证性扫描步骤流')
+          console.log(
+            '过程可见性 · 验证性扫描 ✓',
+            JSON.stringify({
+              抓到进行中: running?.text ?? null,
+              收尾确认态: doneVerify?.text ?? null,
+              全部步骤: rows.map((r) => r.text),
+            })
+          )
+        } finally {
+          await win.evaluate((u) => window.api.settings.setApiBase(u), apiBase0)
+        }
+      }
+
+      // ---- 52 产物步骤的时长文案：两种形态都要真实截图，且都不是写死的 ----
+      //
+      // 形态一（无历史）：走查用的是全新 userData，usage/ 里还没有 make-docx 记录 →「内容较多时需要几分钟」
+      // 形态二（有历史）：形态一跑完就落了一条真实 durationMs → 下一轮变成「通常约 X 秒」（X 来自中位数）
+      {
+        const ym = new Date().toISOString().slice(0, 7)
+        const usageFile = join(userData, 'usage', `${ym}.jsonl`)
+        const medianOf = (type) => {
+          const rs = (existsSync(usageFile) ? readFileSync(usageFile, 'utf-8').split('\n').filter(Boolean) : [])
+            .map((l) => JSON.parse(l))
+            .filter((r) => r.taskType === type && r.durationMs > 0)
+            .map((r) => r.durationMs)
+            .sort((a, b) => a - b)
+          if (!rs.length) return 0
+          const m = rs.length >> 1
+          return rs.length % 2 ? rs[m] : Math.round((rs[m - 1] + rs[m]) / 2)
+        }
+        if (medianOf('make-docx') > 0)
+          throw new Error('跑到这里本不该有 make-docx 历史（走查是全新 userData），"无历史"那一形态造不出来了')
+
+        /** 发一条产物请求，抓「正在生成…」那一行 */
+        const askDoc = async (name) => {
+          await win.locator('button[title="新对话"]').click()
+          await win.waitForTimeout(600)
+          await armSteps()
+          await chatInput.fill(`把灰太太的情况整理成一份 Word 文档，文件名叫「${name}」，两三段就够。`)
+          await chatInput.press('Enter')
+          // 等**带上了格式**的那一帧：tool_use 刚开始时入参还在流，那一瞬只知道"在做文档"，
+          // 拿到 format 之后才说得出「Word 文档」。截早了截到的是半成品文案
+          let row = null
+          for (let i = 0; i < 2000 && !row; i++) {
+            row = (await stepRows()).find(
+              (r) => r.kind === 'artifact' && r.status === 'running' && /正在生成 Word 文档/.test(r.text)
+            )
+            if (!row) await win.waitForTimeout(60)
+          }
+          return row
+        }
+
+        const noHistory = await askDoc('步骤流走查A')
+        if (!noHistory) throw new Error('第一次做产物时没抓到"正在生成…"那一步（模型没调渲染工具？）')
+        await snap('52-产物步骤-无历史时长', 0)
+        if (!/正在生成 Word 文档（内容较多时需要几分钟）/.test(noHistory.text))
+          throw new Error(`无历史时的时长文案不对：「${noHistory.text}」`)
+        await assertNoToolNames('产物步骤（无历史）')
+        await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 600000 }).catch(() => {})
+
+        const median = medianOf('make-docx')
+        if (!median) throw new Error('第一份文档跑完，用量里没有 make-docx 记录，"有历史"那一形态无从谈起')
+        const withHistory = await askDoc('步骤流走查B')
+        if (!withHistory) throw new Error('第二次做产物时没抓到"正在生成…"那一步')
+        await snap('52b-产物步骤-有历史时长', 0)
+        // 秒数必须**来自本机中位数**，不是写死的常量
+        const want = `正在生成 Word 文档（通常约 ${Math.round(median / 1000)} 秒）`
+        if (withHistory.text !== want)
+          throw new Error(`有历史时的时长文案不对：期望「${want}」（中位数 ${median}ms），实得「${withHistory.text}」`)
+        await assertNoToolNames('产物步骤（有历史）')
+        await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 600000 }).catch(() => {})
+        console.log(
+          '过程可见性 · 产物时长两形态 ✓',
+          JSON.stringify({ 无历史: noHistory.text, 有历史: withHistory.text, 中位数ms: median })
+        )
+      }
+
+      // ---- 53 失败步骤要标出来（读一个不存在的文件）----
+      // 这一步靠模型肯照做，抓不到就只报警不判失败：它不在硬断言清单里，
+      // 而为了它去改产品加测试钩子，代价比收益大
+      {
+        await win.locator('button[title="新对话"]').click()
+        await win.waitForTimeout(600)
+        await armSteps()
+        await chatInput.fill(`直接打开 ${vaultCopy}/根本不存在的笔记.md 这个文件，告诉我里面写了什么。`)
+        await chatInput.press('Enter')
+        let failedRow = null
+        for (let i = 0; i < 400 && !failedRow; i++) {
+          failedRow = (await stepRows()).find((r) => r.status === 'failed')
+          if (!failedRow) await win.waitForTimeout(400)
+        }
+        if (failedRow) {
+          await snap('53-步骤流-失败步骤', 200)
+          if (!/这一步没成功/.test(failedRow.text)) throw new Error(`失败步骤没有标出来：「${failedRow.text}」`)
+          if (/《根本不存在的笔记》/.test(failedRow.text)) sawReadTitle = failedRow.text
+          await assertNoToolNames('失败步骤')
+          console.log('过程可见性 · 失败步骤 ✓', JSON.stringify(failedRow))
+        } else {
+          console.log('⚠️ 没能造出失败的工具步骤（模型没照做），跳过 53（不算回归）')
+        }
+        await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 300000 }).catch(() => {})
+        // 展开看一眼，顺带把"阅读《…》"这条硬断言补上
+        const sum = win.locator('[data-testid="steps-summary"]').last()
+        if (await sum.count()) await sum.click()
+        const readRow = (await stepRows()).find((r) => r.kind === 'read')
+        const readEv = ((await rawStepGroups()).pop() ?? []).find((s) => s.tool === 'Read' && s.args?.file)
+        if (readRow && readEv) {
+          const title = readEv.args.file.split('/').pop().replace(/\.[a-z0-9]+$/i, '')
+          if (!readRow.text.includes(`《${title}》`))
+            throw new Error(`阅读步骤没有带出书名号文件名「《${title}》」：${readRow.text}`)
+          sawReadTitle = readRow.text
+        }
+      }
+
+      if (!sawReadTitle)
+        throw new Error('整轮走查里一次都没验到「阅读《文件名》」这条步骤——阅读步骤的参数层没被覆盖')
+      if (!sawScanCount)
+        throw new Error('整轮走查里一次都没验到带数字的核对步骤——核对步骤的参数层没被覆盖')
+      console.log('过程可见性 · 参数层覆盖 ✓', JSON.stringify({ 阅读: sawReadTitle, 核对: sawScanCount }))
 
       // ---- 46 会话恢复失败自动降级：拿一个**过期的 session id** 发消息，必须照常答上来 ----
       // 用户实测撞到的形态：在历史对话里发消息 → `No conversation found with session ID: …`。
@@ -3070,6 +3553,8 @@ const OWNED_BY_OTHER_SCRIPT = {
   '00b-登录门.png': 'login-provision.mjs',
   '11-登录即用-key就绪.png': 'login-provision.mjs',
   '12-登录即用-对话成功.png': 'login-provision.mjs',
+  // 投递链路验收单独一个脚本（desktop/CLAUDE.md 的验收铁律），别每轮都报它是残留
+  'a1-拖入无可入库文件-明确提示.png': 'a1-enqueue.mjs',
 }
 /**
  * 只有 `E2E_CHAT=1`（真实 AI 调用）那一轮才刷得到的截图。
@@ -3088,6 +3573,14 @@ const ONLY_IN_CHAT_RUN = {
   '41d-流式出错-重试后不重复提问.png': 'M-11 异步出错重试',
   '41e-出错重试-端点恢复后成功.png': 'M-11 端点恢复后重试成功',
   '46-会话恢复降级-照常回答.png': '过期 session 自动降级重开（要真答一轮才验得了上下文接没接上）',
+  // 过程可见性：步骤流只有真调 AI 才会产生，本地模式一条都没有
+  '48-步骤流-进行中.png': '步骤逐条出现、当前步骤转圈',
+  '49-步骤流-折叠摘要.png': '回答开始输出后折叠成一行摘要',
+  '50-步骤流-展开明细.png': '点摘要展开看明细',
+  '51-步骤流-确认库中没有.png': '检索 0 命中后的验证性扫描',
+  '52-产物步骤-无历史时长.png': '产物步骤（本机还没有历史耗时）',
+  '52b-产物步骤-有历史时长.png': '产物步骤（秒数取自本机耗时中位数）',
+  '53-步骤流-失败步骤.png': '工具失败的那一步标出来（靠模型肯照做，抓不到会打印跳过原因）',
   // 45e（老用户升级机的增强档回落）两轮都刷得到，不列进来
   // 47b/47c 两轮都刷得到，不列进来
 }
