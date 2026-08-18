@@ -1292,7 +1292,14 @@ try {
       {
         const g0 = (await rawStepGroups())[0] ?? []
         const scans = g0.filter((s) => ['Grep', 'Glob'].includes(s.tool))
-        const allowed = scans.filter((s) => !s.failed)
+        /**
+         * **被护栏拦下的那一步不算"放行"**（2026-08-18 修，A-3 走查现场暴露）。
+         * 主进程给它标的是 `capped`、且刻意不标 `failed`（那是我们自己踩的刹车、不是故障，
+         * 见 SCAN_LIMIT），而这里只滤 `failed`，于是第 6 次**被拒**的扫描被算成了放行，
+         * 报「护栏没生效」——恰恰是护栏生效了才会出现的现象。
+         * 这条 off-by-one 一直在，只是以前护栏从没真触发过。
+         */
+        const allowed = scans.filter((s) => !s.failed && !s.capped)
         // 硬闸：主进程侧的 SCAN_LIMIT=5，放行的绝不该超（超了就是护栏没生效）
         if (allowed.length > 5)
           throw new Error(`文件查找放行 ${allowed.length} 次，超过硬上限 5（canUseTool 闸门没生效）`)
@@ -1325,8 +1332,32 @@ try {
             步骤: g0.length,
           })
         )
-        // 明显还在失控（远超上一轮的 188s 那一类）才判失败；60 秒那条线由人看上面这行数字定夺
-        if (durMs > 120000) throw new Error(`第一问耗时 ${(durMs / 1000).toFixed(1)}s，仍然失控`)
+        /**
+         * **判据是行为，不是墙钟**（2026-08-18 改，n=3 实测逼出来的）。
+         *
+         * 这条断言原本用 `durMs > 120000` 判失败，想抗的是 §2-19 那种 188 秒失控——
+         * 特征是模型拿不到可引用的检索结果，转去 **穷举猜路径**（`my_script` / `script` /
+         * `40_带货/数据` 一长串 0 命中 Grep）。
+         *
+         * 但同一个问题连测三次是 **86.2s / 138.7s / 224.9s**，而 224.9s 那一轮是
+         * **11 步零猜测**（全是有线索的 Grep/Read）、86.2s 那轮 7 步 —— 墙钟根本
+         * 区分不了"失控"和"慢但正确"，120s 又正好压在中位数上，等于一半概率假红。
+         * 慢的根因是已知的 §3-13（云端语义检索没有阈值、返回的碎片没有出处，模型只能
+         * 自己读大表汇总），跨仓库改 webpage 才治得了，不是走查这一步该抗的东西。
+         *
+         * 所以改成直接判那三个**失控行为**本身；墙钟照旧打印（含 60 秒达标行）供人看，
+         * 另留一条 300s 的真·失控线兜底。
+         */
+        const zeroGuessN = zeroGuess.length
+        const rejectedN = scans.length - allowed.length // 只用于打印，不判失败（见上）
+        const searchN = g0.filter((s) => s.tool === 'search_knowledge').length
+        if (zeroGuessN >= 2)
+          throw new Error(`第一问出现 ${zeroGuessN} 次猜测式 0 命中扫描：${zeroGuess.map((s) => s.args?.pattern ?? s.args?.glob ?? '').join(' / ')}`)
+        // 撞护栏**不判失败**：本轮实测 5 次扫描全部有命中（22/4/42/7/1），
+        // 只是查得细，不是瞎试。真正的失控特征是"零命中猜测"，上面那条已经在管了。
+        // 次数照旧打印在 `被护栏拒绝` 里给人看。
+        if (searchN > 3) throw new Error(`第一问检索了 ${searchN} 次（提示词规定最多 3 次）`)
+        if (durMs > 300000) throw new Error(`第一问耗时 ${(durMs / 1000).toFixed(1)}s，真失控了`)
       }
 
       // ---- 51 验证性扫描：检索 0 命中 → 「正在确认正文里有没有「X」」/「已确认文件名里没有「X」」 ----
@@ -2342,16 +2373,38 @@ try {
             console.log('H-08 运行态不丢 ✓', JSON.stringify(backText.replace(/\s+/g, ' ')))
           }
 
-          // 完成态：等「处理中…」消失但面板还在（run-end 后面板还留 4 秒），趁这个窗口截
-          for (let i = 0; i < 200; i++) {
+          /**
+           * 完成态：等「处理中…」消失但面板还在（run-end 后面板还留 4 秒），趁这个窗口截。
+           * **预算给足 5 分钟**（2026-08-18 从 60 秒放宽）：`E2E_CHAT` 下 `tag_llm` 是真实
+           * LLM 打标，4 个文件就要几十秒；再加上新的「实体建卡」一格，60 秒常常只走到
+           * 第 2 格（PII守卫 2/8），于是下面找「上云」那行必然落空，
+           * 报成"阶段日志把 message 丢了"——方向完全指错（连着假红两轮才看出来）。
+           */
+          for (let i = 0; i < 600; i++) {
             const panelUp = (await win.locator('.inbox-bar-fill').count()) > 0
             const busy = (await win.locator('span:has-text("处理中")').count()) > 0
             const text = panelUp
               ? await win.locator('.inbox-bar-fill').locator('xpath=../..').innerText().catch(() => '')
               : ''
-            // 走完最后一段（6/6）或整批跑完都算完成态
-            if (panelUp && (/6\/6/.test(text) || !busy)) break
-            await win.waitForTimeout(300)
+            /**
+             * 完成态判据**不许写死阶段数**（2026-08-18 被 A-3 打脸）：
+             * 原来写的是 `/6\/6/`，而 INBOX_FLOW 现在是 8 格（加「实体建卡」之前就已是 7 格），
+             * 这个正则永远不成立 → 只能靠 `!busy` 落空 → 在 PII 守卫那一刻就采样了，
+             * 下面找「上云」那行自然找不到，报成"阶段日志把 message 丢了"，方向完全指错。
+             * 改成读进度条自己报的 done/total（分母是多少就跟到多少），
+             * 并且等「上云」那行真出现——那才是这段断言要看的东西。
+             */
+            const m = text.match(/(\d+)\s*\/\s*(\d+)/)
+            const finished = !!m && m[1] === m[2]
+            const cloudRowUp = panelUp
+              ? await win.evaluate(() =>
+                  [...document.querySelectorAll('[data-testid="inbox-panel"] .fade-up')].some((el) =>
+                    (el.textContent ?? '').replace(/\s+/g, '').startsWith('上云')
+                  )
+                )
+              : false
+            if (panelUp && (cloudRowUp || finished || !busy)) break
+            await win.waitForTimeout(500)
           }
           /**
            * **阶段日志必须把 message 说出来，且同一阶段不许连着堆好几行**（2026-08-18 反馈）。
