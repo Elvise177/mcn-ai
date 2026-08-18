@@ -806,9 +806,22 @@ try {
      *    等点它的时候人早没了（`Element is not attached to the DOM`）
      * 所以现在每段都从「发一条新的」开始，谁也不指望上一段留下的元素还活着。
      */
+    /**
+     * 发一条新 toast 并拿到句柄。**只动测试，与任何产品改动无关**。
+     *
+     * 这一处前后踩了四个竞态，前两个已随「拿最老那条」「两段共享元素」修掉，剩下这两个：
+     *  ③ 固定睡 150ms 再抓 `.last()`：机器一忙新 toast 还没渲染出来，抓到的是上一条
+     *    **快过期的**，于是「悬停 5 秒后还在」当场假红（纯 HEAD 上复现过）
+     *  ④ 上一段验完悬停后鼠标还压在那条上、倒计时永久暂停——所以要先把鼠标挪开，
+     *    否则下面等「屏上一条不剩」会直接等到超时
+     * 现在每次都从干净状态起步，`.last()` 必然就是刚发的那条、寿命是满的。
+     * （数量涨没涨不能当判据：同屏限流 3 条，满了之后再发数量也不变。）
+     */
     const emitToast = async () => {
+      await win.mouse.move(0, 0)
+      await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 10000 })
       await win.click('button[title="添加附件（即将支持）"]')
-      await win.waitForTimeout(150)
+      await win.locator('[data-testid="toast"]').first().waitFor({ timeout: 8000 })
       const h = await win.locator('[data-testid="toast"]').last().elementHandle()
       if (!h) throw new Error('补发的 toast 没出现，拿不到句柄')
       return h
