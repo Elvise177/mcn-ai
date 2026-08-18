@@ -960,6 +960,65 @@ try {
         )
       }
 
+      // ---- 46 会话恢复失败自动降级：拿一个**过期的 session id** 发消息，必须照常答上来 ----
+      // 用户实测撞到的形态：在历史对话里发消息 → `No conversation found with session ID: …`。
+      // 真实成因是 SDK 会话文件没了（换库改 cwd / 保留期清理 / 换机器），这里用伪造 id 等价复现。
+      // 断言的重点不是"没报错"，而是**上下文真的被拼回去了**——所以先让它记一个数字再问。
+      {
+        await win.locator('button[title="新对话"]').click()
+        await win.waitForTimeout(600)
+        await chatInput.fill('记住这个数字：4271。只回复"记住了"，不要检索知识库，不要调用任何工具。')
+        await chatInput.press('Enter')
+        await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 300000 }).catch(() => {})
+
+        const conv = await win.evaluate(async () => {
+          const [c] = await window.api.chat.list()
+          return c ? { id: c.id, sdk: c.sdkSessionId, n: c.messages.length } : null
+        })
+        if (!conv?.sdk) throw new Error(`第一轮没拿到 sdkSessionId，伪造过期会话无从谈起：${JSON.stringify(conv)}`)
+
+        // 伪造：格式合法但 SDK 侧根本不存在的 id。走的是和真实故障完全相同的那条错误路径
+        const GHOST = 'a1b2c3d4-1111-4222-8333-444455556666'
+        const sent = await win.evaluate(
+          ([id, ghost]) =>
+            window.api.chat.send(id, '刚才让你记的数字是多少？只回数字本身，不要检索知识库。', ghost, 'standard'),
+          [conv.id, GHOST]
+        )
+        if (sent?.ok === false) throw new Error('伪造会话那条消息主进程没收：' + JSON.stringify(sent))
+
+        // 必须以**发之前的条数**为基线等新消息。直接取"最后一条 assistant"会立刻拿到
+        // 上一轮那句「记住了」，断言就变成了拿第一轮的回答去验第二轮（第一版就是这么假失败的）
+        let last = null
+        for (let i = 0; i < 240 && !last; i++) {
+          await win.waitForTimeout(1000)
+          last = await win.evaluate(
+            async ([id, base]) => {
+              const c = (await window.api.chat.list()).find((x) => x.id === id)
+              if (!c || c.messages.length <= base) return null
+              const m = c.messages[c.messages.length - 1]
+              return m.role === 'assistant' ? { text: m.text, error: !!m.error } : null
+            },
+            [conv.id, conv.n]
+          )
+        }
+        if (!last) throw new Error('过期 session 发消息后 4 分钟没有任何回答（降级重发没生效？）')
+        // ① 不许报错——这是这一单的全部意义：上游那句英文原文不该再有机会抵达用户
+        if (last.error || /No conversation found|session/i.test(last.text))
+          throw new Error(`过期 session 仍然把错误抛给了用户：${last.text.slice(0, 160)}`)
+        // ② 上下文真的接上了：答得出第一轮记的数字，才证明历史被拼进了新会话
+        if (!last.text.includes('4271'))
+          throw new Error(`降级重开后上下文没接上（期望含 4271）：${last.text.slice(0, 160)}`)
+        // ③ 短对话是**无损**恢复，不该打扰用户——那条提示只在历史超预算被截时才出现
+        const noticed = await win.locator('[data-testid="toast"]:has-text("已开始新的会话")').count()
+        if (noticed) throw new Error('短对话无损恢复却弹了"较早的上下文可能不被记住"提示')
+        // ④ 降级必须在日志里留痕（"用户无感"不等于"运维也看不见"）
+        const logs = readFileSync(join(userData, 'logs', 'main.log'), 'utf-8')
+        if (!logs.includes('在 SDK 侧已不存在'))
+          throw new Error('日志里没有降级记录：走的可能根本不是恢复路径')
+        await snap('46-会话恢复降级-照常回答', 600)
+        console.log('会话恢复降级 ✓', JSON.stringify({ 伪造id: GHOST.slice(0, 8), 回答: last.text.replace(/\s+/g, ' ').slice(0, 40) }))
+      }
+
       // ---- H-09 停止留半截 + H-10 生成中重复发送被拒 ----
       {
         await chatInput.fill('把灰太太的情况尽量详细地展开讲讲，分点写，越长越好')
@@ -2909,6 +2968,7 @@ const ONLY_IN_CHAT_RUN = {
   '41c-流式出错-提问仍在且可重试.png': 'M-11 异步出错分支（401 桩）',
   '41d-流式出错-重试后不重复提问.png': 'M-11 异步出错重试',
   '41e-出错重试-端点恢复后成功.png': 'M-11 端点恢复后重试成功',
+  '46-会话恢复降级-照常回答.png': '过期 session 自动降级重开（要真答一轮才验得了上下文接没接上）',
   '47-用量页-空态.png': '空态只在本地模式刷（E2E_CHAT 那轮本月已有真实记录）',
   // 45e（老用户升级机的增强档回落）两轮都刷得到，不列进来
   // 47b/47c 两轮都刷得到，不列进来

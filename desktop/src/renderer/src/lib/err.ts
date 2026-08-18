@@ -21,6 +21,13 @@ export function errText(e: unknown): string {
  * 猜着翻比不翻更危险。
  */
 const PATTERNS: Array<[RegExp, string]> = [
+  /**
+   * 会话恢复失败。**正常情况下用户看不到这条**——主进程会自动放弃过期会话、
+   * 拼本地历史开新会话重发（`agent/resume-recovery.ts`）。这里兜的是"连重开那一轮也没成"。
+   * 排在最前面是因为原文里带 session ID，落到最后那条英文兜底分支就会把
+   * `0d4924db-…` 和「把这句发给管理员」一起端到客户脸上——那串 id 对用户毫无意义。
+   */
+  [/No conversation found|Session\b(?![^\n]{0,40}\bon server\b)[^\n]{0,80}?\bnot found\b/i, '之前的对话上下文已经过期了，点「重试」会重新开始一段对话；早先聊过的内容可能需要你再说一遍'],
   [/balance is insufficient|insufficient balance|insufficient_quota/i, 'AI 服务余额不足，请联系管理员充值（不是密码问题）'],
   [/rate.?limit|429|too many requests/i, 'AI 服务请求过于频繁，稍等一会儿再试'],
   [/401|unauthorized|invalid api key|authentication_error/i, 'AI 服务的密钥无效或已过期，请在设置里重新获取服务端配置'],

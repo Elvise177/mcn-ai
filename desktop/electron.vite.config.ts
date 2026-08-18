@@ -14,6 +14,7 @@ export default defineConfig({
           'search-worker': resolve(__dirname, 'src/main/vault/search-worker.ts'),
           'smoke-chat': resolve(__dirname, 'src/main/smoke-chat.ts'),
           'smoke-provider': resolve(__dirname, 'src/main/smoke-provider.ts'),
+          'smoke-resume': resolve(__dirname, 'src/main/smoke-resume.ts'),
         },
       },
     },

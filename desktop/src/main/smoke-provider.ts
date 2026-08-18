@@ -162,7 +162,15 @@ async function runCase(c: Case): Promise<Result[]> {
     prompt: string,
     resume?: string,
     onDelta?: (n: number) => void
-  ): Promise<{ text: string; deltas: number; tools: string[]; sdkSessionId?: string; models: string[]; error?: string }> =>
+  ): Promise<{
+    text: string
+    deltas: number
+    tools: string[]
+    sdkSessionId?: string
+    models: string[]
+    error?: string
+    recovered?: boolean
+  }> =>
     new Promise((resolve) => {
       let text = ''
       let deltas = 0
@@ -170,10 +178,12 @@ async function runCase(c: Case): Promise<Result[]> {
       let sdkSessionId: string | undefined
       let models: string[] = []
       let error: string | undefined
+      /** 这一轮是不是走了「旧 session 失效 → 拼历史重开」的降级（见下面 resume 用例的断言） */
+      let recovered = false
       // 单轮硬超时：一轮既不 done 也不 error 时，事件循环会空掉、进程静默退出（看着像"跑完了"）
       const guard = setTimeout(() => {
         agentManager.tap = null
-        resolve({ text, deltas, tools, sdkSessionId, models, error: `单轮超时（${ROUND_TIMEOUT_MS}ms 无终结事件）` })
+        resolve({ text, deltas, tools, sdkSessionId, models, recovered, error: `单轮超时（${ROUND_TIMEOUT_MS}ms 无终结事件）` })
       }, ROUND_TIMEOUT_MS)
       agentManager.tap = (p) => {
         if (p.sessionId !== sessionId) return
@@ -182,6 +192,7 @@ async function runCase(c: Case): Promise<Result[]> {
           onDelta?.(deltas)
         }
         if (p.kind === 'tool' && p.tool) tools.push(p.tool)
+        if (p.recovered) recovered = true
         if (p.kind === 'assistant') {
           text = p.text ?? ''
           sdkSessionId = p.sdkSessionId
@@ -191,7 +202,7 @@ async function runCase(c: Case): Promise<Result[]> {
         if (p.kind === 'done' || p.kind === 'error') {
           clearTimeout(guard)
           agentManager.tap = null
-          resolve({ text, deltas, tools, sdkSessionId, models, error })
+          resolve({ text, deltas, tools, sdkSessionId, models, error, recovered })
         }
       }
       void agentManager.send(sessionId, prompt, resume, c.tier)
@@ -217,6 +228,9 @@ async function runCase(c: Case): Promise<Result[]> {
     if (!a.sdkSessionId) throw new Error('第一轮没有拿到 sdkSessionId，无法 resume')
     const b = await ask('smoke-2', '刚才让你记的数字是多少？只回数字本身。', a.sdkSessionId)
     if (b.error) throw new Error(b.error)
+    // 会话恢复失败时主进程会自动拼历史开新会话（`agent/resume-recovery.ts`）——那条兜底
+    // 会让下面这句"记住了数字"照样成立，**resume 真坏了也测不出来**。所以先否掉降级
+    if (b.recovered) throw new Error('resume 失败并走了降级重开：这一轮验的是 resume 本身，不认兜底结果')
     if (!b.text.includes('4271')) throw new Error(`resume 后没记住上下文：${b.text.slice(0, 80)}`)
     return `第二轮回「${b.text.replace(/\s+/g, ' ').slice(0, 20)}」`
   })

@@ -122,6 +122,10 @@ export default function App() {
         // 文案过 zhError：上游的英文原文（如 403 balance insufficient）直接抛给客户
         // 会把排查方向带偏（B-5/T-02）
         appendMessage(p.sessionId, { role: 'assistant', text: `⚠️ ${zhError(String(p.text ?? ''))}`, error: true })
+      } else if (p.kind === 'notice' && p.text) {
+        // 中性提示（如"旧上下文已过期、已开新会话"）。**不进对话历史**——
+        // 它是这一次的运行状况，不是 AI 说的话，塞进气泡会被下次重建上下文时喂回给模型
+        ui.toast(p.text)
       }
     })
     return () => {

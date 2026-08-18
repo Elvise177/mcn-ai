@@ -4,6 +4,8 @@ import Store from 'electron-store'
 export interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
+  /** 这条是错误提示气泡（渲染层 M-11 用它挂「重试」）。会话恢复失败重建上下文时要跳过它们 */
+  error?: boolean
 }
 
 export interface Conversation {
@@ -24,6 +26,17 @@ const convStore = new Store<{ conversations: Conversation[] }>({
 
 export function listConversations(): Conversation[] {
   return [...convStore.get('conversations')].sort((a, b) => b.updatedAt - a.updatedAt)
+}
+
+/**
+ * 取某个会话的本地历史。**会话恢复失败时靠它重建上下文**——本地这份始终是权威副本，
+ * SDK 侧的 session 掉了不代表内容没了。
+ *
+ * 调用时机很关键：渲染层是「先 `chat:send` 再 `chat:save`」，所以必须在 `send()` 的
+ * **第一个同步 tick** 就读，晚一步会把本轮提问也读进来（本轮 prompt 是单独传的，会重复一遍）。
+ */
+export function conversationMessages(id: string): ChatMessage[] {
+  return convStore.get('conversations').find((c) => c.id === id)?.messages ?? []
 }
 
 export function saveConversation(conv: Conversation): void {

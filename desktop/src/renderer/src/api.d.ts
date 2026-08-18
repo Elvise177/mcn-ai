@@ -230,7 +230,8 @@ interface UsageSummary {
 
 interface AgentStreamPayload {
   sessionId: string
-  kind: 'delta' | 'tool' | 'assistant' | 'done' | 'error'
+  /** `notice` = 说一句就完的中性提示（不是错误、也不终结这一轮），弹 toast */
+  kind: 'delta' | 'tool' | 'assistant' | 'done' | 'error' | 'notice'
   text?: string
   tool?: string
   sdkSessionId?: string
@@ -241,6 +242,8 @@ interface AgentStreamPayload {
   tier?: TierId
   /** B-6：回答里没有依据的引用（库里没有，或本轮从没读过） */
   unverifiedCitations?: string[]
+  /** 这一轮是「旧 session 失效 → 拼本地历史重开」之后跑出来的（界面不用，冒烟要用） */
+  recovered?: boolean
 }
 
 interface ArtifactInfo {

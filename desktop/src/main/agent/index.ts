@@ -14,10 +14,13 @@ import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { tasks } from '../tasks/registry'
 import type { AgentTask } from '../tasks/types'
+import { conversationMessages, type ChatMessage } from './conversations'
+import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
 
 export interface AgentStreamPayload {
   sessionId: string
-  kind: 'delta' | 'tool' | 'assistant' | 'done' | 'error'
+  /** `notice` = 说一句就完的中性提示（不是错误、也不终结这一轮），渲染层弹 toast */
+  kind: 'delta' | 'tool' | 'assistant' | 'done' | 'error' | 'notice'
   text?: string
   tool?: string
   sdkSessionId?: string
@@ -33,6 +36,26 @@ export interface AgentStreamPayload {
    * 提示词只要求"标注来源"，没有任何机制保证标的是对的——这就是那个机制。
    */
   unverifiedCitations?: string[]
+  /**
+   * 这一轮是「旧 session 已失效 → 放弃它、拼本地历史重开」之后跑出来的。
+   * 界面不用它，**冒烟要用**：不标出来的话 `smoke:provider` 的多轮 resume 用例
+   * 会靠拼回去的历史照样答对，resume 坏了也测不出来。
+   */
+  recovered?: boolean
+}
+
+/** 一轮对话的执行上下文。抽出来是因为「会话恢复失败」要拿同一份参数原样重跑一次 */
+interface TurnCtx {
+  sessionId: string
+  taskId: string
+  prompt: string
+  resume?: string
+  tier: TierId
+  /** 本地历史快照（不含本轮提问），只在带 resume 进来时才需要 */
+  history: ChatMessage[]
+  /** 还允许降级重开吗。只降一次：重开那轮再失败就是别的毛病，再重开只是烧钱 */
+  canRecover: boolean
+  recovered?: boolean
 }
 
 /** SDK 的 CLI 是平台二进制；打包后 asar 内路径无法 spawn（ENOTDIR），显式指到真实位置 */
@@ -190,6 +213,54 @@ export class AgentManager {
       conversationId: sessionId,
       draft: '',
     })
+    // 历史快照必须在这里（第一个同步 tick）拍：渲染层是「先 chat:send 再 chat:save」，
+    // 晚一步读到的历史里就混进了本轮提问，重建上下文时会把它重复一遍
+    const history = resumeSdkSessionId ? conversationMessages(sessionId) : []
+    await this.runTurn({
+      sessionId,
+      taskId,
+      prompt,
+      resume: resumeSdkSessionId,
+      tier,
+      history,
+      canRecover: !!resumeSdkSessionId,
+    })
+  }
+
+  /**
+   * 旧 session 在 SDK 侧已经不存在了：**不报错**——放弃它，拿本地历史拼出上下文开新会话
+   * 重发这条消息。本地那份始终是权威副本，SDK 侧掉了不代表内容没了（详见 resume-recovery.ts）。
+   */
+  private async recover(ctx: TurnCtx, reason: string): Promise<void> {
+    // 用户在这个空档里点了「停止」：任务已经收成 canceled 了，别再自作主张重开一轮
+    if (this.stopped.has(ctx.sessionId)) {
+      log('info', 'agent', `会话 ${ctx.sessionId} 已被用户停止，不做恢复重发`)
+      return
+    }
+    const built = buildRecoveryPrompt(ctx.history, ctx.prompt)
+    log(
+      'warn',
+      'agent',
+      `会话 ${ctx.resume} 在 SDK 侧已不存在，放弃旧会话并新开一个重发（带回历史 ` +
+        `${built.kept}/${built.total} 条${built.truncated ? '，已截断' : ''}）：${reason}`
+    )
+    // 这一轮死在启动阶段，理论上还没有正文；仍清一次，免得半截草稿混进重开的那轮。
+    // sdkSessionId 也一起抹掉：它已经被证伪了，别让它有机会再被写回对话
+    tasks.patch(ctx.taskId, { draft: '', toolLine: undefined, sdkSessionId: undefined } as Partial<AgentTask>)
+    if (built.truncated) {
+      // 只在**真的丢了东西**时才说话。短对话能无损恢复，每次都弹一条等于制造噪音
+      this.emit({
+        sessionId: ctx.sessionId,
+        kind: 'notice',
+        text: '已开始新的会话，较早的上下文可能不被记住',
+        tier: ctx.tier,
+      })
+    }
+    return this.runTurn({ ...ctx, prompt: built.text, resume: undefined, canRecover: false, recovered: true })
+  }
+
+  private async runTurn(ctx: TurnCtx): Promise<void> {
+    const { sessionId, taskId, prompt, tier } = ctx
     /** 预检不通过：这一轮压根没开始，任务直接撤掉（别在 Dock 上留一条红字） */
     const bail = (msg: string): void => {
       tasks.drop(taskId)
@@ -213,6 +284,8 @@ export class AgentManager {
     const surfaced = new Set<string>()
     const noteKey = (p: string): string => p.replace(/\.md$/i, '').toLowerCase()
     const startedAt = Date.now()
+    /** 扣住的错误型 result（见下面 result 分支）。子进程正常退出时由循环后面收尾 */
+    let errorResult = ''
 
     // draft 上移主进程：切走再切回来能补齐这段时间流出的字（H-08 的对话版），
     // 也是「停止生成保留半截」（H-09）与「同一会话拒绝重复发送」（H-10）的前提
@@ -328,7 +401,7 @@ export class AgentManager {
         options: {
           abortController: abort,
           cwd: root,
-          resume: resumeSdkSessionId,
+          resume: ctx.resume,
           model: provider.model,
           systemPrompt: this.buildSystemPrompt(),
           allowedTools: [
@@ -403,7 +476,17 @@ export class AgentManager {
           continue
         }
         if (message.type === 'result') {
-          const text = message.subtype === 'success' ? message.result : `出错：${message.subtype}`
+          // 错误型 result（`error_during_execution` 等）**先扣住不发**。
+          // 它有可能是「这个 session 已经不存在了」的讣告，那样的话这一轮马上会重开、
+          // 这条讣告不该落进对话。旧代码把它当正常回答画成「出错：error_during_execution」，
+          // 于是一次会话恢复失败在界面上留下两条报错——第一条就是它。
+          // 真的要展示时走 `kind:'error'`（过 zhError + 气泡里有「重试」），不再当成 AI 说的话。
+          if (message.subtype !== 'success') {
+            const errs = ((message as { errors?: string[] }).errors ?? []).map((e) => e.trim()).filter(Boolean)
+            errorResult = errs.join('; ') || `出错：${message.subtype}`
+            continue
+          }
+          const text = message.result
           // 服务端实际用的模型：对不上就是被端点静默换掉了（诊断日志留一行 + 记进用量）
           const modelUsage = (message as { modelUsage?: Record<string, unknown> }).modelUsage ?? {}
           const models = Object.keys(modelUsage)
@@ -461,33 +544,56 @@ export class AgentManager {
           if (unverified.length) {
             log('warn', 'agent', `回答引用了没有依据的笔记：${unverified.join('、')}（本轮看过 ${surfaced.size} 篇）`)
           }
+          /**
+           * **失败的轮次不许留下 sdkSessionId**（2026-08-18）。
+           * 这个 id 会被渲染层落盘、被后面每一次发送拿去 resume。首轮就失败时（403 余额、
+           * 线路挂了）那个 session 很可能压根没在 CLI 侧落过盘，于是这个对话此后**每次**
+           * 发消息都必然报「No conversation found」——一个失败的轮次把整个对话废掉了。
+           * 上面的降级重开能兜住表现，但病根在这里：只认跑成功那一轮给出的 id。
+           */
+          const usable = !res.is_error && !res.api_error_status ? message.session_id : undefined
           // 正文已经作为一条完整消息落进对话，草稿使命结束
-          tasks.patch(taskId, { draft: '', toolLine: undefined, sdkSessionId: message.session_id } as Partial<AgentTask>)
+          tasks.patch(taskId, { draft: '', toolLine: undefined, sdkSessionId: usable } as Partial<AgentTask>)
           this.emit({
             sessionId,
             kind: 'assistant',
             unverifiedCitations: unverified.length ? unverified : undefined,
             text,
-            sdkSessionId: message.session_id,
+            sdkSessionId: usable,
             costUsd,
             models,
             tier,
+            recovered: ctx.recovered,
           })
         }
       }
+      // 扣住的错误型 result：到这里还没抛异常，说明子进程正常退出了，该由这里收尾。
+      // 是「会话已不存在」就转降级重开，不当错误报出去
+      if (errorResult) {
+        if (ctx.canRecover && isResumeLost(errorResult)) return await this.recover(ctx, errorResult)
+        tasks.patch(taskId, { title: 'AI 回答出错' } as Partial<AgentTask>)
+        tasks.finish(taskId, 'failed', errorResult)
+        this.emit({ sessionId, kind: 'error', text: errorResult, tier })
+        return
+      }
       tasks.finish(taskId, 'succeeded')
-      this.emit({ sessionId, kind: 'done' })
+      this.emit({ sessionId, kind: 'done', recovered: ctx.recovered })
     } catch (err) {
-      if (!abort.signal.aborted) {
+      const raw = err instanceof Error ? err.message : String(err)
+      if (abort.signal.aborted) {
+        tasks.finish(taskId, 'canceled')
+        this.emit({ sessionId, kind: 'done' })
+      } else if (ctx.canRecover && isResumeLost(raw)) {
+        // 常走的就是这条：CLI 以非零码退出，SDK 把退出错误换成
+        // `Claude Code returned an error result: No conversation found with session ID: …` 抛出来
+        return await this.recover(ctx, raw)
+      } else {
         log('error', 'agent', err instanceof Error ? err : String(err))
         tasks.patch(taskId, { title: 'AI 回答出错' } as Partial<AgentTask>)
-        tasks.finish(taskId, 'failed', err instanceof Error ? err.message : String(err))
+        tasks.finish(taskId, 'failed', raw)
         // 增强档失败时把"还有一条路可走"说出来：光报错等于把用户堵在原地（同 §5.3 的原则）
         const hint = tier === 'enhanced' ? '（增强模式线路异常，可切换到标准模式重试）' : ''
         this.emit({ sessionId, kind: 'error', text: `${String(err)}${hint}`, tier })
-      } else {
-        tasks.finish(taskId, 'canceled')
-        this.emit({ sessionId, kind: 'done' })
       }
     } finally {
       this.live.delete(sessionId)
