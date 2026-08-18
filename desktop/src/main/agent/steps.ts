@@ -110,9 +110,22 @@ export function pickStepArgs(tool: string, input: Record<string, unknown> = {}, 
     case 'search_knowledge':
       put('query', str(input.query))
       break
-    case 'Read':
-      put('file', path(input.file_path) ?? path(input.path))
+    case 'Read': {
+      /**
+       * **入参得先像个文件路径才认**（2026-08-18 E2E_CHAT 走查现场抓到）。
+       *
+       * 现场：步骤流上出现「阅读了《call_0》」两条。`call_0` 是 DeepSeek 兼容端点给
+       * tool_use 编的 **id**，上游把它塞进了 `file_path`。产品这边照单全收，于是一个
+       * 内部标识符被当成书名画给了用户——正是规则 10「回答里不许出现工作机制」要挡的东西，
+       * 只不过这次漏在步骤流上。
+       *
+       * 上游怎么错管不了，显示层能管：不含路径分隔符、也没有扩展名的，一律不当文件名，
+       * 渲染层退回「正在阅读笔记」。宁可少说一个书名，不可把内部标识符甩给用户。
+       */
+      const f = path(input.file_path) ?? path(input.path)
+      put('file', f && (/[/\\]/.test(f) || /\.[a-z0-9]{1,6}$/i.test(f)) ? f : undefined)
       break
+    }
     case 'Grep':
       put('pattern', str(input.pattern))
       put('path', path(input.path))

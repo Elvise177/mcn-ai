@@ -53,7 +53,10 @@ check(
   check('产物工具不带 outline', !('outline_json' in a) && a.filename === '带货复盘', JSON.stringify(a).slice(0, 80))
 }
 check('未列出的工具回空对象', Object.keys(pickStepArgs('WebFetch', { url: 'https://x' })).length === 0)
-check('超长入参截断到 120', (pickStepArgs('Read', { file_path: 'a'.repeat(500) }).file ?? '').length === 120)
+// 夹具必须是**真实形状**的长路径：纯 'aaa…' 没有分隔符也没有扩展名，会先被
+// 「上游标识符不当文件名」那道闸门挡掉（见【10】），那样验的就不是截断了
+check('超长入参截断到 120',
+  (pickStepArgs('Read', { file_path: '很长的目录/'.repeat(60) + '笔记.md' }).file ?? '').length === 120)
 // 走查现场抓到的：模型给的是绝对路径，不剥库根就会说成「mcnai-e2e-vault 里含…的笔记」
 {
   const root = '/tmp/mcnai-e2e-vault'
@@ -211,6 +214,19 @@ console.log('\n【6】所有文案里不许出现工具原名')
     }
   }
   check('十种工具 × 四种阶段全部无工具名', bad.length === 0, bad.join(' | '))
+}
+
+console.log('\n【10】上游标识符不许被当成文件名（走查现场抓到「阅读了《call_0》」）')
+{
+  // DeepSeek 兼容端点给 tool_use 编的 id 就长 call_0 这样，上游把它塞进了 file_path
+  for (const junk of ['call_0', 'call_12', 'toolu_01ABC', 'tool_use_1']) {
+    check(`${junk} 不当文件名`, pickStepArgs('Read', { file_path: junk }).file === undefined)
+    check(`${junk} → 兜底文案不露它`, !zh('Read', pickStepArgs('Read', { file_path: junk })).includes(junk))
+  }
+  // 真文件名照常认（别把这条闸门收得太紧）
+  check('真文件名照常显示', pickStepArgs('Read', { file_path: '80_资料库/工作-管理类/年框.md' }).file ===
+    '80_资料库/工作-管理类/年框.md')
+  check('库根下的裸文件名也认', pickStepArgs('Read', { file_path: '欢迎.md' }).file === '欢迎.md')
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')
