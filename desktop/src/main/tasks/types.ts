@@ -122,5 +122,9 @@ export const INBOX_FLOW: Array<[string, string]> = [
   ['tag_rules', '规则打标'],
   ['sensitive_enrich', '实体建链'],
   ['gen_moc', '索引重建'],
+  // 实体建卡（A-3）：**跑在 pipeline 之后的主进程里**，不是 pipeline 阶段
+  // （拍板理由：冻结体积与 spec 漏项风险，且增量卡片该由持库者管理）。
+  // 它在 flow 里排在上云之前——新卡也要上云，而敏感卡要在上云前被拦下
+  ['build_cards', '实体建卡'],
   ['cloud_sync', '上云'],
 ]

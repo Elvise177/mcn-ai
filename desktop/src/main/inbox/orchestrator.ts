@@ -4,7 +4,7 @@ import { join, basename, extname, dirname } from 'path'
 import { type BrowserWindow } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
-import { vaultManager } from '../vault'
+import { buildEntityCards } from '../vault/entity-cards'
 import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
 import { pipelineBin } from '../lib/pipeline'
@@ -457,8 +457,44 @@ export class InboxOrchestrator {
     this.debounce = setTimeout(() => void this.run(), 3000)
   }
 
+  /**
+   * 实体建卡（A-3）：扫全库 `entities_*` → 归一 → 建/更新三类卡 → 卡与文档互建双链。
+   * 跑在 pipeline 之后、上云之前——新卡要上云，而敏感卡必须在上云前就被识别出来。
+   * 实现在 `vault/entity-cards.ts`（不在 pipeline 里，见那里的头注释）。
+   */
+  private async buildCards(): Promise<string[]> {
+    if (!this.vaultRoot) return []
+    try {
+      const libName = await this.libraryName(this.vaultRoot)
+      const st = await buildEntityCards(this.vaultRoot, libName)
+      const bits = [`实体 ${st.entities} 个`, `新建卡 ${st.created}`]
+      if (st.updated) bits.push(`更新 ${st.updated}`)
+      if (st.merged) bits.push(`归一合并 ${st.merged}`)
+      if (st.links) bits.push(`双链 ${st.links} 条`)
+      if (st.sensitiveCards) bits.push(`${st.sensitiveCards} 张敏感卡仅存本地`)
+      // 冲突必须**说出来**：静默覆盖用户手工编辑过的卡是不可接受的（同 M-27 的原则）
+      if (st.conflicted) bits.push(`${st.conflicted} 张你改过的卡未覆盖，新内容放在「待合并」里`)
+      this.send({ type: 'stage', stage: 'build_cards', status: st.conflicted ? 'warn' : 'ok', message: bits.join('，') })
+      return st.sensitivePaths
+    } catch (e) {
+      this.send({ type: 'stage', stage: 'build_cards', status: 'error', message: String(e) })
+      return []
+    }
+  }
+
+  /** 资料库目录名：与 pipeline 的 `cli.py` 同一套判据（layout.json → 老库名 → 默认） */
+  private async libraryName(root: string): Promise<string> {
+    try {
+      const layout = JSON.parse(await fs.readFile(join(root, '.mcnai', 'layout.json'), 'utf-8'))
+      if (layout.library) return String(layout.library)
+    } catch {
+      /* 没有 layout：按老库探测 */
+    }
+    return existsSync(join(root, '80_Library')) ? '80_Library' : '80_资料库'
+  }
+
   /** 入库成功后：本轮修改过的 md 上云（私人层）。未登录直接跳过 */
-  private async cloudSync(sinceMs: number): Promise<void> {
+  private async cloudSync(sinceMs: number, extraSensitive: string[] = []): Promise<void> {
     if (!this.vaultRoot) return
     if (!(await getAccessToken())) {
       this.send({ type: 'stage', stage: 'cloud_sync', status: 'skipped', message: '未登录' })
@@ -485,10 +521,38 @@ export class InboxOrchestrator {
       // 标记由 09_pii_guard 写进 frontmatter——不读 pipeline 的 .checkpoint.jsonl，
       // 那是它的内部文件，让主进程去读是错误的依赖方向
       const allowCloud = store.get('sensitiveAllowCloud')
-      const isSensitive = (rel: string): boolean =>
-        vaultManager.noteAt(rel)?.frontmatter?.sensitive === true
-      const held = allowCloud ? [] : changed.filter(isSensitive)
-      const toPush = allowCloud ? changed : changed.filter((r) => !isSensitive(r))
+      /**
+       * **判敏感必须读盘，不能读内存索引**（2026-08-18 修，A-3 单查出）。
+       *
+       * 旧写法是 `vaultManager.noteAt(rel)?.frontmatter?.sensitive`，而那个 Map 由
+       * vault watcher 填充、`awaitWriteFinish` 是 **800ms**。09 写的标记之所以一直没出事，
+       * 是因为它在链路很靠前、到收尾时早进索引了；而**实体建卡就在这一步的前一刻**才写完卡，
+       * 内存里极可能还没有它 → `sensitive` 判 false → 敏感继承卡照样上云，
+       * 正好打穿 A-8 刚修好的边界。读盘慢一点，但这条边界不能赌时序。
+       */
+      const extra = new Set(extraSensitive)
+      const sensitiveCache = new Map<string, boolean>()
+      const isSensitive = async (rel: string): Promise<boolean> => {
+        if (extra.has(rel)) return true
+        const hit = sensitiveCache.get(rel)
+        if (hit !== undefined) return hit
+        let v = false
+        try {
+          const head = (await fsp.readFile(join(this.vaultRoot!, rel), 'utf-8')).slice(0, 800)
+          v = /^sensitive:\s*true\s*$/m.test(head)
+        } catch {
+          // 读不到就当敏感：宁可少传一篇，不可误传一篇
+          v = true
+        }
+        sensitiveCache.set(rel, v)
+        return v
+      }
+      const held: string[] = []
+      const toPush: string[] = []
+      for (const rel of changed) {
+        if (!allowCloud && (await isSensitive(rel))) held.push(rel)
+        else toPush.push(rel)
+      }
 
       // A-7：**全量同步，不再截断**。旧实现是 `changed.slice(0, 50)`——92 篇的批量导入
       // 只推前 50 篇，另外 42 篇永远不上云且不提示；而问库在登录态下走的是云端语义检索，
@@ -602,8 +666,10 @@ export class InboxOrchestrator {
       })
     })
 
+    // 建卡 → 上云。顺序不能反：新卡也要上云，而敏感继承卡必须在上云前就被识别出来
+    const sensitiveCards = ok && !this.canceledBy ? await this.buildCards() : []
     // 被停掉的那一轮不再上云：半截结果没必要推到云端，也别让用户多等一次网络往返
-    if (ok && !this.canceledBy) await this.cloudSync(runStart)
+    if (ok && !this.canceledBy) await this.cloudSync(runStart, sensitiveCards)
 
     const canceled = !!this.canceledBy
 
