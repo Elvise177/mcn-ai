@@ -124,13 +124,40 @@ const PPT_GUIDE = `render_pptx 的 outline JSON 格式：
  {"type":"steps","title":"流程","items":["步骤"],"footer":"金句"},
  {"type":"matrix","title":"矩阵","items":["项"],"highlight":[0],"cols":4},
  {"type":"timeline","title":"轴","nodes":[{"time":"0天","label":"阶段","status":"状态"}]},
- {"type":"bignum","title":"看板","cards":[{"num":"¥199","label":"名","lines":["说明"],"style":"accent"}]}]}
-版式选择：对比→vs；观点→quote；行动项→checklist；数字→bars；流程→steps；多选一→matrix；阶段→timeline；价格→bignum。
+ {"type":"bignum","title":"看板","cards":[{"num":"¥199","label":"名","lines":["说明"],"style":"accent"}]},
+ {"type":"image","title":"配图页","images":["/绝对路径/图.png"],"caption":"图注"},
+ {"type":"chart","chart":"bar|line|pie","title":"数据图","categories":["1月","2月"],"series":[{"name":"系列名","values":[100,200]}]}]}
+版式选择：对比→vs；观点→quote；行动项→checklist；流程→steps；多选一→matrix；阶段→timeline；价格→bignum。
 整份至少混用 3 种版式，同一版式禁止连续超过 2 页，禁止全篇 bullets；内容必须来自检索到的库内资料，不得编造。
 
+**图（image 版式）**：两个来源都能用——① 用户本轮附件（路径在【本轮附件】里，原样填）；
+② 库内笔记里的嵌图（正文里形如 \`![](_assets/…/img01.png)\` 的引用，把它换算成绝对路径填进来）。
+一页最多 4 张。没有图就别用这个版式，不要编路径。
+
+**数据用 chart 不用 bars**：只要数字来自库内表格（GMV、场次、占比、月度趋势…），
+一律用 \`chart\`——它生成的是真的 PPT 图表对象，能点开改数据。\`bars\` 只用于没有真实数据的
+观感对比（比如"你以为 100 / 实际 50"）。categories 与每个 series 的 values 必须等长。
+
 render_document 的 spec JSON（Word/PDF 用 doc 结构，Excel 用 sheets 结构）：
-doc:  {"title":"标题","subtitle":"副标题","sections":[{"heading":"小节","paragraphs":["段落"],"bullets":["要点"],"table":{"headers":["列"],"rows":[["值"]]}}]}
+doc:  {"title":"标题","subtitle":"副标题","sections":[{"heading":"小节","paragraphs":["段落"],"bullets":["要点"],"images":["/绝对路径/图.png"],"table":{"headers":["列"],"rows":[["值"]]}}]}
 xlsx: {"title":"名","sheets":[{"name":"表名","headers":["列1"],"rows":[["值"]],"widths":[16]}]}`
+
+/**
+ * 往渲染 spec 里注入库根。**由主进程注入，不是让模型填**：
+ * 库内嵌图在笔记正文里是相对引用（`../../_assets/x/img01.png`），要变成能打开的路径
+ * 得知道库根。指望模型自己换算是在赌它算得对——算错的表现是整页空图，
+ * 而且从产物上根本看不出是路径错了还是图丢了。渲染器拿到 `vault` 就能自己解析（见
+ * `render_pptx.resolve_image`）。JSON 坏了就原样传下去，让渲染器去报它自己的错。
+ */
+function withVault(specJson: string, root: string): string {
+  try {
+    const o = JSON.parse(specJson)
+    if (o && typeof o === 'object') return JSON.stringify({ ...o, vault: root })
+  } catch {
+    /* 模型给的 JSON 有问题：交给渲染器报错，别在这儿把原文吞了 */
+  }
+  return specJson
+}
 
 export class AgentManager {
   private win: BrowserWindow | null = null
@@ -426,7 +453,7 @@ export class AgentManager {
               const outDir = join(artifactsDir, `${day}_${safe}`)
               await fs.mkdir(outDir, { recursive: true })
               const specPath = join(tmpdir(), `mcnai-spec-${Date.now()}.json`)
-              await fs.writeFile(specPath, outline_json, 'utf-8')
+              await fs.writeFile(specPath, withVault(outline_json, root), 'utf-8')
               const outPath = join(outDir, `${safe}.pptx`)
               const result = await new Promise<string>((resolve) => {
                 const child = spawn(pipelineBin(), ['render-pptx', specPath, outPath])
@@ -453,7 +480,7 @@ export class AgentManager {
               const outDir = join(artifactsDir, `${day}_${safe}`)
               await fs.mkdir(outDir, { recursive: true })
               const specPath = join(tmpdir(), `mcnai-doc-${Date.now()}.json`)
-              await fs.writeFile(specPath, spec_json, 'utf-8')
+              await fs.writeFile(specPath, withVault(spec_json, root), 'utf-8')
               const outPath = join(outDir, `${safe}.${format}`)
               const result = await new Promise<string>((resolve) => {
                 const child = spawn(pipelineBin(), [`render-${format}`, specPath, outPath])
