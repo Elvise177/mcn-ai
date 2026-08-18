@@ -1084,9 +1084,16 @@ try {
       }
     }
     // ---- M-11 AI 出错要能一键重试：复用上一条 user 消息重发，且不把提问复制成两条 ----
-    // 造一个**确定失败**的线路：这台机器上增强档没有 key，选过去发出的第一条就会被
-    // 主进程预检 bail 掉 → 本地模式和 E2E_CHAT 模式跑到的是同一条路径。
-    // 顺便这一步就是"档位真能选到增强"的用户路径断言
+    //
+    // 增强档的失败**怎么造**，两种模式已经不一样了（2026-08-18 修）：
+    //  - 本地模式：增强档确实没有 key → 主进程预检 `bail` → **同步**错误。这是竞态最宽的
+    //    那条窗口（错误抢在 React 提交用户消息之前到达），仍然由这一轮守着
+    //  - `E2E_CHAT`：登录之后增强档**是有 key 的**——2026-08-17 起没配独立 key 会回落到
+    //    共享密钥（45e）。"增强档没 key 所以必然快速失败"这个前提就此消失，旧写法会在这里
+    //    干等 30 秒等不到错误气泡（实测卡死在这，整轮 E2E_CHAT 跑不到终点）。
+    //    **不能靠"测试环境别下发共享密钥"来复原**——那是为测试削产品。
+    //    改成把**增强档的地址**临时指到一个秒回 401 的本地桩：失败照样确定、只要几秒、零 token，
+    //    产品侧一行不动，跑完立刻还原（同 41c 已经验证过的手法）
     {
       await win.click('button[title="新对话"]')
       await win.waitForTimeout(500)
@@ -1096,9 +1103,33 @@ try {
       if ((await win.locator('[data-testid="tier-selector"]').getAttribute('data-tier')) !== 'enhanced')
         throw new Error('点了增强档但选择器没切过去')
       await snap('45c-档位选择器-已切到增强', 200)
+
+      // 桩要在**选完档位之后**才架：健康探针的结论缓存 5 分钟，先坏地址会让选择器直接置灰
+      let enhStub = null
+      let enhOrigBase = null
+      if (CHAT) {
+        const { createServer: createHttpServer } = await import('http')
+        enhStub = createHttpServer((_req, res) => {
+          res.writeHead(401, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'e2e 模拟增强档失败' } }))
+        })
+        await new Promise((r) => enhStub.listen(0, '127.0.0.1', r))
+        enhOrigBase = await win.evaluate(async () => {
+          const r = await window.api.ai.tiers()
+          return r.tiers.find((t) => t.id === 'enhanced').baseUrl
+        })
+        await win.evaluate(
+          (port) => window.api.ai.setTierConfig('enhanced', { baseUrl: `http://127.0.0.1:${port}` }),
+          enhStub.address().port
+        )
+        console.log('增强档临时指到 401 桩', JSON.stringify({ 原地址: enhOrigBase, 桩端口: enhStub.address().port }))
+      }
+      // 本地模式是同步 bail（毫秒级）；CHAT 模式要真发一次请求再收 401，给足余量
+      const ERR_WAIT = CHAT ? 180000 : 30000
+
       await chatInput.fill('M-11 重试走查：这条一定会失败')
       await chatInput.press('Enter')
-      await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 30000 })
+      await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: ERR_WAIT })
       const errText1 = await win.locator('.md-article').last().innerText()
       if (!errText1.includes('⚠️')) throw new Error(`错误没有落成气泡：「${errText1}」`)
       // 预检失败的错误是**同步**发回来的，抢在 React 提交用户那条消息之前——
@@ -1123,7 +1154,7 @@ try {
       })
       await win.click('[data-testid="retry-answer"]')
       await win.waitForTimeout(1200)
-      await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 30000 })
+      await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: ERR_WAIT })
       const gone = await win.evaluate(() => window.__m11Gone)
       if (!gone) throw new Error('点了重试，错误气泡从没被撤掉过（这次重发根本没发生）')
       const counts = await win.evaluate(() => {
@@ -1163,6 +1194,40 @@ try {
       })
       if (savedTier !== 'enhanced') throw new Error(`会话档位没落盘：${savedTier}`)
       console.log('档位按会话记忆 ✓', JSON.stringify({ 失败会话: failedTitle, 落盘: savedTier }))
+
+      // ---- 那颗「切换到标准模式重试」真点一次：出口得能走通，不能只是长在那儿 ----
+      // 顺带把失败的 agent 任务收干净：本地模式的 `bail` 走的是 `tasks.drop`（Dock 上不留痕），
+      // 而 CHAT 模式这两轮是真失败（`tasks.finish('failed')`），会在 Dock 上挂 30 分钟
+      // （`RECENT_TTL_MS`，且按钮文案里失败优先于「N 条待同步」），不收的话后面 41e 与 M-03
+      // 的断言会被它挡掉——这正是走查历史上踩过的坑。**必须放在档位记忆断言之后**：
+      // 换档重试会把会话的档位记忆改成 standard，先点就把上面那条验没了
+      if (CHAT) {
+        enhStub.close()
+        await win.evaluate((b) => window.api.ai.setTierConfig('enhanced', { baseUrl: b }), enhOrigBase)
+        const restoredEnh = await win.evaluate(async () => {
+          const r = await window.api.ai.tiers()
+          return r.tiers.find((t) => t.id === 'enhanced').baseUrl
+        })
+        if (restoredEnh !== enhOrigBase) throw new Error(`增强档地址没还原：${restoredEnh}`)
+        await win.click('[data-testid="retry-standard"]')
+        await win.locator('button[title="停止生成"]').waitFor({ state: 'hidden', timeout: 300000 }).catch(() => {})
+        const switched = await win.evaluate(async (title) => {
+          const c = (await window.api.chat.list()).find((x) => x.title.startsWith(title.slice(0, 8)))
+          return { tier: c?.tier, msgs: c?.messages.length, hasErr: c?.messages.some((m) => m.error) }
+        }, failedTitle)
+        if (switched.hasErr) throw new Error('切到标准模式重试之后仍然是错误：' + JSON.stringify(switched))
+        if (switched.tier !== 'standard') throw new Error(`换档重试没把会话档位改过来：${switched.tier}`)
+        if (switched.msgs !== 2)
+          throw new Error(`换档重试后应当只剩「提问 + 回答」两条：${JSON.stringify(switched)}`)
+        const stillFailed = await win.evaluate(async () => {
+          const s = await window.api.tasks.list()
+          return s.tasks.filter((t) => t.kind === 'agent' && t.status === 'failed').map((t) => t.title)
+        })
+        if (stillFailed.length)
+          throw new Error('增强档那两轮失败没被收干净，会挡掉后面的断言：' + JSON.stringify(stillFailed))
+        console.log('45d 出口真点一次 ✓', JSON.stringify({ ...switched, 还原地址: restoredEnh }))
+      }
+
       // 回到标准档再往下走，别把后面的步骤带偏
       await win.click('button[title="新对话"]')
       await win.waitForTimeout(400)
@@ -2969,14 +3034,24 @@ const ONLY_IN_CHAT_RUN = {
   '41d-流式出错-重试后不重复提问.png': 'M-11 异步出错重试',
   '41e-出错重试-端点恢复后成功.png': 'M-11 端点恢复后重试成功',
   '46-会话恢复降级-照常回答.png': '过期 session 自动降级重开（要真答一轮才验得了上下文接没接上）',
-  '47-用量页-空态.png': '空态只在本地模式刷（E2E_CHAT 那轮本月已有真实记录）',
   // 45e（老用户升级机的增强档回落）两轮都刷得到，不列进来
   // 47b/47c 两轮都刷得到，不列进来
+}
+/**
+ * 反过来：只有**本地模式**才刷得到的。原来 `47-用量页-空态` 被塞在上面那张表里，
+ * 可它的说明写的是"空态只在本地模式刷"——归属和判据正好相反，于是每跑一次 E2E_CHAT
+ * 收尾都要报一条假警（"开了 E2E_CHAT 却没刷到"）。假警和真残留混在一起就没人看这段了。
+ */
+const ONLY_IN_LOCAL_RUN = {
+  '47-用量页-空态.png': '空态只有本地模式刷得到（E2E_CHAT 那轮本月已经有真实记录了）',
 }
 const notWritten = readdirSync(shots).filter((f) => f.endsWith('.png') && !written.has(f))
 const fromOthers = notWritten.filter((f) => OWNED_BY_OTHER_SCRIPT[f])
 const chatOnly = notWritten.filter((f) => !OWNED_BY_OTHER_SCRIPT[f] && ONLY_IN_CHAT_RUN[f])
-const orphans = notWritten.filter((f) => !OWNED_BY_OTHER_SCRIPT[f] && !ONLY_IN_CHAT_RUN[f])
+const localOnly = notWritten.filter((f) => !OWNED_BY_OTHER_SCRIPT[f] && ONLY_IN_LOCAL_RUN[f])
+const orphans = notWritten.filter(
+  (f) => !OWNED_BY_OTHER_SCRIPT[f] && !ONLY_IN_CHAT_RUN[f] && !ONLY_IN_LOCAL_RUN[f]
+)
 console.log(`\n本次刷新 ${written.size} 张`)
 if (fromOthers.length) {
   console.log('ℹ️  以下截图由别的脚本产出，请确认它们也是本轮跑的：')
@@ -2989,6 +3064,14 @@ if (chatOnly.length) {
       : 'ℹ️  以下截图属于 E2E_CHAT 专属（本轮是本地模式，未刷新属正常，不算残留）：'
   )
   for (const f of chatOnly) console.log(`   - ${f}  ←  ${ONLY_IN_CHAT_RUN[f]}`)
+}
+if (localOnly.length) {
+  console.log(
+    CHAT
+      ? 'ℹ️  以下截图属于本地模式专属（本轮是 E2E_CHAT，未刷新属正常，不算残留）：'
+      : '⚠️  以下截图属于本地模式专属，但本轮就是本地模式却没刷到，请查上面的跳过原因：'
+  )
+  for (const f of localOnly) console.log(`   - ${f}  ←  ${ONLY_IN_LOCAL_RUN[f]}`)
 }
 if (orphans.length) {
   console.log('⚠️  以下截图本次没刷新、也不属于任何脚本，八成是旧版本残留，删掉或补跑：')
