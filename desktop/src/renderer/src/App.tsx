@@ -57,7 +57,17 @@ export default function App() {
   activeRef.current = active
 
   const upsert = useCallback((c: Conversation) => {
-    window.api.chat.save(c)
+    /**
+     * **落库前剥掉附件缩略图**：thumb 是 dataURL，一张就几十 KB，进 conversations
+     * 会连着上云的聊天记录一起变胖，而它的价值只在"这一轮看得见"。
+     * 与步骤流同一条原则——内存态的东西不进持久层（文件名留着，重启后气泡仍说得清带过什么）。
+     */
+    window.api.chat.save({
+      ...c,
+      messages: c.messages.map((m) =>
+        m.attachments?.length ? { ...m, attachments: m.attachments.map(({ name }) => ({ name })) } : m
+      ),
+    })
     convsRef.current = [c, ...convsRef.current.filter((x) => x.id !== c.id)]
     setConvs(convsRef.current)
     if (activeRef.current.id === c.id) {
@@ -181,9 +191,15 @@ export default function App() {
    * 拒绝时给一条**带「停止当前生成」动作**的提示——光说"不行"等于把用户堵死在原地（设计 §5.3）。
    */
   const handleSend = useCallback(
-    async (text: string): Promise<boolean> => {
+    async (text: string, attachments: { path: string; name: string; thumb: string }[] = []): Promise<boolean> => {
       const base = activeRef.current
-      const r = await window.api.chat.send(base.id, text, base.sdkSessionId, base.tier ?? 'standard')
+      const r = await window.api.chat.send(
+        base.id,
+        text,
+        base.sdkSessionId,
+        base.tier ?? 'standard',
+        attachments.map((a) => a.path)
+      )
       if (r && r.ok === false) {
         ui.toast(r.error ?? '这个对话还在生成中', 'error', {
           label: '停止当前生成',
@@ -197,7 +213,12 @@ export default function App() {
       const arrived = cur.messages.slice(base.messages.length)
       upsert({
         ...cur,
-        messages: [...base.messages, { role: 'user', text }, ...arrived],
+        messages: [
+          ...base.messages,
+          // thumb 跟着消息进内存（气泡要显示），但 upsert 落库前会剥掉它
+          { role: 'user', text, ...(attachments.length ? { attachments: attachments.map(({ name, thumb }) => ({ name, thumb })) } : {}) },
+          ...arrived,
+        ],
         title: base.title === '新对话' ? text.slice(0, 18) : cur.title,
         updatedAt: Date.now(),
       })

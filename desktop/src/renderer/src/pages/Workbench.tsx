@@ -42,7 +42,7 @@ export default function Workbench({
 }: {
   conv: Conversation
   /** 返回 false = 主进程拒了这次发送（同一会话已在生成中，H-10），输入框内容要留着 */
-  onSend: (text: string) => Promise<boolean>
+  onSend: (text: string, attachments?: { path: string; name: string; thumb: string }[]) => Promise<boolean>
   /** M-11：重发错误气泡前面那条 user 消息，并把错误气泡就地撤掉。
       tier 传值 = 换档重试（增强档线路失败时的出口） */
   onRetry: (index: number, tier?: TierId) => Promise<boolean>
@@ -56,6 +56,11 @@ export default function Workbench({
   // 消息以 conv prop 为准（App 统一持久化）；这里只管流式草稿/工具行/输入框
   const messages = conv.messages
   const [input, setInput] = useState('')
+  /**
+   * 本轮附件（A-3 B'）。**放在这一层而不是 InputBox 里**：发送成功要清空、被主进程拒了
+   * 要原样留着，这两件事都归 send 管。thumb 是 dataURL，只在内存里活着（不落库）
+   */
+  const [attachments, setAttachments] = useState<{ path: string; name: string; thumb: string }[]>([])
   const [sending, setSending] = useState(false)
   const [draft, setDraft] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -140,12 +145,14 @@ export default function Workbench({
         setSending(true)
         setDraft('')
       }
-      const ok = await onSend(t)
-      // 被拒：输入原样留着，用户点了 toast 上的「停止当前生成」就能接着发
-      if (ok) setInput('')
-      else if (!busy) setSending(false)
+      const ok = await onSend(t, attachments)
+      // 被拒：输入与附件都原样留着，用户点了 toast 上的「停止当前生成」就能接着发
+      if (ok) {
+        setInput('')
+        setAttachments([])
+      } else if (!busy) setSending(false)
     },
-    [streaming, onSend]
+    [streaming, onSend, attachments]
   )
 
   /**
@@ -232,6 +239,8 @@ export default function Workbench({
               streaming={false}
               tier={tier}
               onTierChange={onTierChange}
+              attachments={attachments}
+              onAttach={setAttachments}
               wide
             />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
@@ -254,7 +263,29 @@ export default function Workbench({
                 {messages.map((m, i) =>
                   m.role === 'user' ? (
                     <div key={i} className="flex justify-end">
-                      <div className="max-w-[80%] rounded-xl bg-sidebar px-4 py-2.5 text-md">{m.text}</div>
+                      <div className="max-w-[80%] rounded-xl bg-sidebar px-4 py-2.5 text-md">
+                        {!!m.attachments?.length && (
+                          <div data-testid="bubble-attachments" className="mb-2 flex flex-wrap gap-2">
+                            {m.attachments.map((a, k) =>
+                              a.thumb ? (
+                                <img
+                                  key={k}
+                                  src={a.thumb}
+                                  alt={a.name}
+                                  title={a.name}
+                                  className="h-16 w-16 rounded-lg border border-line object-cover"
+                                />
+                              ) : (
+                                // 重启后 thumb 没了（内存态），留个文件名占位比空着强
+                                <span key={k} className="rounded-lg border border-line px-2 py-1 text-sm text-muted">
+                                  {a.name}
+                                </span>
+                              )
+                            )}
+                          </div>
+                        )}
+                        {m.text}
+                      </div>
                     </div>
                   ) : (
                     <div key={i} className="group flex gap-3">
@@ -335,6 +366,8 @@ export default function Workbench({
                   streaming={streaming}
                   tier={tier}
                   onTierChange={onTierChange}
+                  attachments={attachments}
+                  onAttach={setAttachments}
                 />
               </div>
             </div>
@@ -415,6 +448,8 @@ function InputBox({
   streaming,
   tier,
   onTierChange,
+  attachments,
+  onAttach,
   wide,
 }: {
   value: string
@@ -424,6 +459,8 @@ function InputBox({
   streaming: boolean
   tier: TierId
   onTierChange: (t: TierId) => void
+  attachments: { path: string; name: string; thumb: string }[]
+  onAttach: (a: { path: string; name: string; thumb: string }[]) => void
   wide?: boolean
 }) {
   // 高度跟随实际内容（含自动折行）：rows 按 \n 计数会漏掉软换行，长句折行时上一行被顶出视野
@@ -440,12 +477,43 @@ function InputBox({
         wide ? 'w-full max-w-2xl' : ''
       }`}
     >
+      {!!attachments.length && (
+        <div data-testid="attach-strip" className="flex flex-wrap gap-2 px-3 pt-3">
+          {attachments.map((a) => (
+            <div key={a.path} className="group relative">
+              <img
+                src={a.thumb}
+                alt={a.name}
+                title={a.name}
+                className="h-14 w-14 rounded-lg border border-line object-cover"
+              />
+              <button
+                data-testid="attach-remove"
+                onClick={() => onAttach(attachments.filter((x) => x.path !== a.path))}
+                title="移除"
+                className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-line bg-card text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:text-ink"
+              >
+                <X size={11} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {/* 主行：附件位 + 正文 + 发送/停止。**档位控件不在这一行**，见下方控制条 */}
       <div className="flex min-h-input items-end gap-2 px-3 py-2.5">
-        {/* 附件入口：本次只占位，先把位置和视觉留出来 */}
+        {/* 附件入口：选图片随这条消息发给 AI（make-ppt/make-docx 可以把它编排进产物）。
+            选择框在主进程弹（渲染进程零 FS 能力），缩略图也由主进程用 nativeImage 生成 */}
         <button
-          onClick={() => ui.toast('附件上传即将支持，先把文件拖进窗口即可入库')}
-          title="添加附件（即将支持）"
+          data-testid="attach-btn"
+          onClick={async () => {
+            const picked = await window.api.chat.pickAttachments()
+            if (!picked.length) return
+            // 按路径去重，重复挑同一张不该堆两遍
+            const merged = [...attachments]
+            for (const p of picked) if (!merged.some((x) => x.path === p.path)) merged.push(p)
+            onAttach(merged.slice(0, 8))
+          }}
+          title="添加图片附件"
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-hover hover:text-ink"
         >
           <Paperclip size={16} />

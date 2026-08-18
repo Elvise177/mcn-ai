@@ -830,7 +830,50 @@ try {
   // offsetHeight：含 1px 边框的实际高度（box-sizing: border-box，clientHeight 会少掉两条边）
   const boxH = await win.locator('textarea').first().evaluate((el) => el.parentElement.offsetHeight)
   if (boxH < 60) throw new Error(`输入框高度不足 60px：${boxH}`)
-  if (!(await win.locator('button[title="添加附件（即将支持）"]').count())) throw new Error('输入框缺附件占位按钮')
+  if (!(await win.locator('[data-testid="attach-btn"]').count())) throw new Error('输入框缺附件按钮')
+  // 附件已经做实（A-3 B'）：按钮不再是占位、也不再吐 toast，标题里不许再写「即将支持」
+  {
+    const t = (await win.locator('[data-testid="attach-btn"]').getAttribute('title')) ?? ''
+    if (/即将|敬请|占位/.test(t)) throw new Error(`附件按钮还是占位文案：「${t}」`)
+
+    /**
+     * 挑图 → 缩略图条 → 移除。**这里只验界面这一半，不发消息**：主走查后面有一串
+     * 按消息条数写的断言，中途多发一轮会把它们整体推偏（同 a1-enqueue 拆出去的理由）。
+     * 「发出去之后附件到没到主进程、thumb 有没有被剥掉」在 e2e/attachments.mjs 里验。
+     */
+    /**
+     * 用**仓库里真实的 logo.png** 当附件样本，不要手搓 base64——
+     * 第一版就是内联了一段 base64，`nativeImage` 解不出来 → `thumb` 是空串 →
+     * `<img src="">` → naturalWidth=0，断言红了才发现"图不合法"而不是"链路坏了"。
+     */
+    const pic = join(root, 'src/renderer/src/assets/logo.png')
+    if (!existsSync(pic)) throw new Error(`附件样本图不存在：${pic}`)
+    const restore = await app.evaluate(({ dialog }, f) => {
+      const orig = dialog.showOpenDialog
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [f] })
+      // 走查后面还要用 showOpenDialog（换库选目录），用完必须还回去
+      globalThis.__restoreOpenDialog = () => { dialog.showOpenDialog = orig }
+      return true
+    }, pic)
+    if (!restore) throw new Error('桩 showOpenDialog 失败')
+    await win.click('[data-testid="attach-btn"]')
+    await win.locator('[data-testid="attach-strip"]').waitFor({ timeout: 8000 })
+    const thumb = await win.evaluate(() => {
+      const i = document.querySelector('[data-testid="attach-strip"] img')
+      return i ? { w: i.naturalWidth, isData: (i.getAttribute('src') || '').startsWith('data:') } : null
+    })
+    // 量像素不数标签：<img> 在但 naturalWidth=0 正是这条链路最典型的失败形态
+    if (!thumb || thumb.w <= 0) throw new Error(`附件缩略图没渲染出来：${JSON.stringify(thumb)}`)
+    if (!thumb.isData) throw new Error('附件缩略图不是内存态 dataURL（不落库的前提）')
+    await snap('01h-附件缩略图条', 200)
+    await win.locator('[data-testid="attach-strip"] .group').first().hover()
+    await win.locator('[data-testid="attach-remove"]').first().click()
+    await win.waitForTimeout(300)
+    if (await win.locator('[data-testid="attach-strip"]').count())
+      throw new Error('移除最后一张附件后，缩略图条没有消失')
+    await app.evaluate(() => globalThis.__restoreOpenDialog?.())
+    console.log('附件直供（界面半）✓', JSON.stringify(thumb))
+  }
 
   // ---- 会话级模型档位：选择器在输入框**下沿控制条**上（不在输入框里）、新会话默认标准 ----
   {
@@ -913,11 +956,30 @@ try {
   await snap('01g-chips点击填充', 200)
 
   // ---- L-03 toast：同屏最多 3 条 / 悬停暂停倒计时 / 点击立刻关掉 ----
-  // 附件按钮每点一次吐一条 toast，正好当发生器（它本身是 L-05 的占位控件）
+  /**
+   * toast 发生器（2026-08-18 迁移）：原来点「附件」按钮，那颗按钮每点一次吐一条 toast，
+   * 正好当发生器。附件做实之后它不再吐 toast 了，于是换成**往工作台拖一个空目录**——
+   * `enqueue` 收到 0 个可入库文件必回一条「未发现可入库的文件」，而且 `added=0`
+   * **不会往投递箱写任何东西、不会踢起 pipeline**（这一点很关键，见 a1-enqueue.mjs 的头注释：
+   * 主走查中段起一轮 pipeline 会把后面按时序写的断言整体推偏）。
+   */
+  const TOAST_SRC = '/tmp/mcnai-e2e-toast-src'
+  mkdirSync(TOAST_SRC, { recursive: true })
+  const emitToastOnce = async () => {
+    await win.evaluate((p) => {
+      const dt = new DataTransfer()
+      const f = new File([''], p.split('/').pop())
+      Object.defineProperty(f, 'path', { value: p })
+      dt.items.add(f)
+      const el = document.querySelector('textarea')?.closest('div[class*="rounded"]')?.parentElement ?? document.body
+      el.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    }, TOAST_SRC)
+  }
+
   {
     await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
     for (let i = 0; i < 5; i++) {
-      await win.click('button[title="添加附件（即将支持）"]')
+      await emitToastOnce()
       await win.waitForTimeout(120)
     }
     const n = await win.locator('[data-testid="toast"]').count()
@@ -947,7 +1009,7 @@ try {
     const emitToast = async () => {
       await win.mouse.move(0, 0)
       await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 10000 })
-      await win.click('button[title="添加附件（即将支持）"]')
+      await emitToastOnce()
       await win.locator('[data-testid="toast"]').first().waitFor({ timeout: 8000 })
       const h = await win.locator('[data-testid="toast"]').last().elementHandle()
       if (!h) throw new Error('补发的 toast 没出现，拿不到句柄')
@@ -3562,6 +3624,8 @@ const OWNED_BY_OTHER_SCRIPT = {
   '12-登录即用-对话成功.png': 'login-provision.mjs',
   // 投递链路验收单独一个脚本（desktop/CLAUDE.md 的验收铁律），别每轮都报它是残留
   'a1-拖入无可入库文件-明确提示.png': 'a1-enqueue.mjs',
+  'assets-嵌图渲染.png': 'assets-render.mjs',
+  'attach-附件缩略图.png': 'attachments.mjs',
 }
 /**
  * 只有 `E2E_CHAT=1`（真实 AI 调用）那一轮才刷得到的截图。

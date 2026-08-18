@@ -152,11 +152,23 @@ interface GraphData {
   links: { source: string; target: string }[]
 }
 
+/**
+ * 本轮附件（A-3 图片能力 B'）。**thumb 不落库**：`chat.save` 前会剥掉它
+ * （与步骤流同一条原则——内存态的东西不进持久层）。重启后气泡里只剩文件名，
+ * 这是刻意的；「翻历史把当时的附件再拿出来」另立项。
+ */
+interface ChatAttachment {
+  name: string
+  /** 小尺寸 dataURL，只在内存里活着 */
+  thumb?: string
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant'
   text: string
   /** 这条 assistant 消息是错误提示（M-11）：气泡里要挂「重试」，复用上一条 user 消息重发 */
   error?: boolean
+  attachments?: ChatAttachment[]
 }
 
 interface Conversation {
@@ -384,8 +396,12 @@ interface Window {
         sessionId: string,
         prompt: string,
         resume?: string,
-        tier?: TierId
+        tier?: TierId,
+        /** 本轮附件的**原始文件路径**（主进程会先拷进临时目录再交给 agent） */
+        attachments?: string[]
       ) => Promise<{ ok: boolean; reason?: 'busy'; error?: string }>
+      /** 弹系统选择框挑图片，返回带缩略图的附件列表 */
+      pickAttachments: () => Promise<{ path: string; name: string; size: number; thumb: string }[]>
       stop: (sessionId: string) => Promise<void>
       list: () => Promise<Conversation[]>
       save: (conv: Conversation) => Promise<void>

@@ -13,6 +13,7 @@ import { searchCloud } from '../knowledge/client'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { tasks } from '../tasks/registry'
+import { attachmentNote, stageAttachments } from './attachments'
 import type { AgentTask } from '../tasks/types'
 import { conversationMessages, type ChatMessage } from './conversations'
 import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
@@ -234,7 +235,9 @@ export class AgentManager {
     sessionId: string,
     prompt: string,
     resumeSdkSessionId?: string,
-    tierId: TierId = DEFAULT_TIER
+    tierId: TierId = DEFAULT_TIER,
+    /** 本轮附件（用户原始路径）。拷进临时目录后再把路径拼进 prompt，见 agent/attachments.ts */
+    attachments: string[] = []
   ): Promise<void> {
     // H-10：同一 session 已在流式中就**拒绝**，不 abort 旧的。IPC 层已经先拦过一道并把
     // 「停止当前生成」的出口给了用户，这里是竞态兜底（拒绝之后 AbortController 覆盖问题随之消失）
@@ -258,10 +261,17 @@ export class AgentManager {
     // 历史快照必须在这里（第一个同步 tick）拍：渲染层是「先 chat:send 再 chat:save」，
     // 晚一步读到的历史里就混进了本轮提问，重建上下文时会把它重复一遍
     const history = resumeSdkSessionId ? conversationMessages(sessionId) : []
+    /**
+     * 附件先落到临时目录再进 prompt。**注意拼的是 `prompt` 不是 ctx 的别处**：
+     * 会话恢复重发（recover）会拿 `ctx.prompt` 重新组一遍上下文，附件说明就在里面，
+     * 重发那一轮照样带得上。
+     */
+    const staged = await stageAttachments(sessionId, attachments)
+    const promptWithFiles = prompt + attachmentNote(staged)
     await this.runTurn({
       sessionId,
       taskId,
-      prompt,
+      prompt: promptWithFiles,
       resume: resumeSdkSessionId,
       tier,
       history,

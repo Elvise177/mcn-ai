@@ -1,4 +1,4 @@
-import { ipcMain, dialog } from 'electron'
+import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { store, setLlmKey, hasApiKey, hasLlmKey, setSecretLater, isSecretPending } from './store'
 import {
   describeTier,
@@ -13,6 +13,7 @@ import { summarize, currentMonth, listMonths } from './usage'
 import { getPricing, setPricing } from './usage/pricing'
 import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
+import { pickAttachments } from './agent/attachments'
 import { login, logout, authState, provisionKeys, getProvisionError, cancelLogin } from './auth'
 import { retryAllSyncs } from './knowledge/sync-queue'
 import { artifactsWatcher } from './agent/artifacts'
@@ -203,13 +204,20 @@ export function registerIpc(): void {
    * 「我想重来」是两回事，静默 abort 会误伤正在生成的长回答。拒绝理由回给渲染层，
    * 由它弹一条带「停止当前生成」动作的提示（设计 §5.3），别把用户堵死在原地。
    */
-  ipcMain.handle('chat:send', (_e, sessionId: string, prompt: string, resume?: string, tier?: TierId) => {
-    if (agentManager.isStreaming(sessionId)) {
-      return { ok: false, reason: 'busy' as const, error: '这个对话还在生成中' }
+  ipcMain.handle(
+    'chat:send',
+    (_e, sessionId: string, prompt: string, resume?: string, tier?: TierId, attachments?: string[]) => {
+      if (agentManager.isStreaming(sessionId)) {
+        return { ok: false, reason: 'busy' as const, error: '这个对话还在生成中' }
+      }
+      // attachments 是**追加**的第 5 个参数：IPC 一次定死（§4-9）之后少见的签名变更，
+      // 按可选参数往后加，前四个位次一个不动
+      void agentManager.send(sessionId, prompt, resume, normalizeTier(tier ?? 'standard'), attachments ?? [])
+      return { ok: true }
     }
-    void agentManager.send(sessionId, prompt, resume, normalizeTier(tier ?? 'standard'))
-    return { ok: true }
-  })
+  )
+  /** 输入框的附件按钮：主进程弹系统选择框、生成缩略图，渲染进程零 FS 能力 */
+  ipcMain.handle('attach:pick', () => pickAttachments(BrowserWindow.getAllWindows()[0] ?? null))
   ipcMain.handle('chat:stop', (_e, sessionId: string) => agentManager.stop(sessionId))
   ipcMain.handle('chat:list', () => listConversations())
   ipcMain.handle('chat:save', (_e, conv: Conversation) => {

@@ -77,8 +77,10 @@ const auth = {
 }
 const chat = {
   /** tier = 这个会话选的档位（标准/增强），按会话记忆，随每次发送带上 */
-  send: (sessionId: string, prompt: string, resume?: string, tier?: string) =>
-    ipcRenderer.invoke('chat:send', sessionId, prompt, resume, tier),
+  send: (sessionId: string, prompt: string, resume?: string, tier?: string, attachments?: string[]) =>
+    ipcRenderer.invoke('chat:send', sessionId, prompt, resume, tier, attachments),
+  /** 附件选择：主进程弹系统框并出缩略图（渲染进程零 FS 能力） */
+  pickAttachments: () => ipcRenderer.invoke('attach:pick'),
   stop: (sessionId: string) => ipcRenderer.invoke('chat:stop', sessionId),
   list: () => ipcRenderer.invoke('chat:list'),
   save: (conv: unknown) => ipcRenderer.invoke('chat:save', conv),
