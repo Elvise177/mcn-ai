@@ -13,6 +13,11 @@ import { inboxOrchestrator } from './inbox/orchestrator'
 import { agentManager } from './agent'
 import { artifactsWatcher } from './agent/artifacts'
 import { tasks } from './tasks/registry'
+import { registerAssetScheme, registerAssetProtocol } from './vault/assets'
+
+// 库内图片协议：**注册 scheme 必须在 app ready 之前**（Electron 硬性要求），
+// handler 在 ready 之后挂。没有它，笔记里抽出来的嵌图在渲染进程里是死链（见 vault/assets.ts）
+registerAssetScheme()
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -117,6 +122,7 @@ function buildMenu(): void {
 app.whenReady().then(() => {
   buildMenu()
   registerIpc()
+  registerAssetProtocol()
   createWindow()
   void openStoredVault() // 启动即加载上次的库，工作台首页直接可问
   app.on('activate', () => {

@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { wikiLinkPlugin } from 'remark-wiki-link'
 import ForceGraph2D from 'react-force-graph-2d'
-import { FastMarkdown } from '../components/Markdown'
+import { FastMarkdown, assetUrl } from '../components/Markdown'
 import { VaultWizard } from '../components/VaultWizard'
 import { ConflictBar } from '../components/ConflictBar'
 import { ui } from '../components/ui'
@@ -141,6 +141,7 @@ const STAGE_ZH: Record<string, string> = {
   convert_failures: '转换结果',
   sensitive_enrich: '实体建链',
   gen_moc: '索引重建',
+  build_cards: '实体建卡',
   archive: '归档',
   spawn: '引擎启动',
   done: '完成',
@@ -1150,6 +1151,8 @@ function NoteView({
   const emptyBody = note.body.trim().length === 0
   const shownBody = formatNoteBody(note.body)
   const oversize = shownBody.length > RENDER_CAP
+  // 嵌图引用是**相对这篇笔记**写的，换算成库根相对要靠它（见 components/Markdown.tsx）
+  const baseDir = path.split('/').slice(0, -1).join('/')
 
   return (
     <div className="flex h-full flex-col">
@@ -1250,11 +1253,13 @@ function NoteView({
                 该笔记只有属性、没有正文（模板类文件常见）。点右上角「编辑」可添加内容。
               </div>
             ) : oversize ? (
-              <FastMarkdown body={shownBody} onLink={handleLink} />
+              <FastMarkdown body={shownBody} onLink={handleLink} baseDir={baseDir} />
             ) : (
               <article className="md-article">
                 <ReactMarkdown
-                  urlTransform={(url) => url}
+                  // 两条渲染路径（大文件走 FastMarkdown、常规走这里）必须用同一套图片改写，
+                  // 否则"图能不能看见"会取决于笔记多长
+                  urlTransform={(url) => assetUrl(url, baseDir) ?? url}
                   remarkPlugins={[
                     remarkGfm,
                     [

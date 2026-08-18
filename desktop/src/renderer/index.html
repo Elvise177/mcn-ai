@@ -3,7 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <title>mcn-ai</title>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+    <!--
+      img-src 必须显式列出来：`default-src 'self'` 会兜住 img-src，而自定义协议不算 'self'，
+      于是库内嵌图被 CSP 静默拦掉（表现是 <img> 在、naturalWidth=0，控制台才有线索）。
+      mcnai-asset: = 库内图片（main/vault/assets.ts）；data: = 输入框附件缩略图（内存态，不落库）。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' mcnai-asset: data: blob:"
+    />
   </head>
   <body>
     <div id="root"></div>
