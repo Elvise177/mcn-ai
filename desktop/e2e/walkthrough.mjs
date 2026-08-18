@@ -1386,10 +1386,12 @@ try {
     for (const c of inboxCandidates) {
       const dir = join(settings.vaultPath, c)
       if (existsSync(dir)) {
-        // 分区投递覆盖层：合成 dragover 事件触发，断言业务区+分流区渲染
+        // 分区投递覆盖层：合成 dragenter 触发（**不是 dragover**——覆盖层的显示挂在
+        // dragenter 上，dragover 只负责 preventDefault 好让 drop 能派发，见 useDragOver）
         await win.evaluate(() => {
           // 从搜索框往上冒泡，比 querySelector 撞根容器稳（根容器的 class 组合可能被其他页面命中）
           const el = document.querySelector('input[placeholder="搜索库…"]') ?? document.querySelector('main .relative.flex.h-full')
+          el?.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true }))
           el?.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true }))
         })
         await win.waitForTimeout(400)
@@ -1419,10 +1421,22 @@ try {
         if (hotStyles[0] === hotStyles[1]) throw new Error('悬停的投递区没有高亮：' + JSON.stringify(hotStyles))
         await snap('06b2-分区投递-悬停高亮', 200)
         console.log('分区投递 ✓ 静态同款 / 悬停才高亮', JSON.stringify({ idle: zoneStyles[0], hot: hotStyles[1] }))
+        /**
+         * **拖出窗口，覆盖层必须消失**（2026-08-18 真人测试反馈）。
+         *
+         * 老写法是 `onDragLeave: if (currentTarget === target) 隐藏`——覆盖层一出现，
+         * 指针就压在覆盖层的子元素上，拖出窗口时最后一次 dragleave 的 target 是那个子元素，
+         * 条件不成立，覆盖层就永远挂在屏幕上。这里刻意**从覆盖层内部的分区**发 dragleave
+         * （正是老写法漏掉的那条路径），再断言它真的没了。
+         */
         await win.evaluate(() => {
-          const el = document.querySelector('.z-30') ?? document.querySelector('main .relative.flex.h-full')
-          el?.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true }))
+          const zone = document.querySelector('.z-30 > div') ?? document.querySelector('.z-30')
+          zone?.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true }))
         })
+        await win.waitForTimeout(300)
+        if (await win.locator('.z-30').count())
+          throw new Error('文件拖出窗口后分区投递覆盖层没有消失（dragleave 判定又退回 currentTarget===target 了？）')
+        console.log('拖出窗口覆盖层消失 ✓')
 
         const sample = join(root, 'e2e', 'sample.docx')
         if (existsSync(sample)) {
@@ -1471,6 +1485,46 @@ try {
             }
             if (!live) throw new Error('投了文件之后 TaskDock 仍然没出现')
 
+            /**
+             * **关掉浮窗 → 点 Dock → 浮窗必须回来**（2026-08-18 真人测试反馈）。
+             *
+             * 放在这里是因为**此刻任务确定是活跃的**：Dock 上才有东西可点，浮窗也才会被
+             * 自动展开。放到 reload 之后不行——那时任务可能已经跑完、Dock 收起、
+             * 面板本就该是关的，断言会假红（第一版就是这么挂的）。
+             *
+             * 两件事一起验：① 跑批期间 ✕ 真能关掉（可见性以前是 `showInbox || inboxRunning`，
+             * `inboxRunning` 会立刻把面板顶回来，关闭按钮等于摆设）；② 关掉之后 Dock 是唯一
+             * 还能回到这个任务的入口，而它原来只 `setPage('vault')`——人本来就在知识库页，
+             * 于是「点了没反应」。
+             */
+            const panel = win.locator('[data-testid="inbox-panel"]')
+            await panel.waitFor({ timeout: 15000 })
+            await win.locator('[data-testid="inbox-panel-close"]').click()
+            await win.waitForTimeout(400)
+            if (await panel.count())
+              throw new Error('点了 ✕ 投递箱浮窗没关掉（跑批期间被 inboxRunning 顶回来了？）')
+            await win.locator('[data-testid="task-dock-btn"]').click()
+            await panel.waitFor({ timeout: 8000 })
+            await snap('27b-Dock唤回投递箱浮窗', 300)
+            console.log('Dock 唤回浮窗 ✓')
+
+            // 上面这几步会吃掉十几秒，本地模式一轮 pipeline 很短，等做完任务多半已经结束了。
+            // 后面 H-07/H-08/reload 那几条都要求**有一个活跃任务**，所以这里把前提重新架起来。
+            // **必须投一个新文件名**：同名文件再拷一次，chokidar 报的是 change 不是 add，
+            // 不触发 file-added，也就不会有新任务（第一版就是这么假红的）
+            // 用 copyFileSync 而不是 writeFileSync：本文件后面 1655 行有个
+            // `const { writeFileSync } = await import('fs')`，同一函数作用域里的
+            // 块级声明会把顶层那个 import 整个遮住，在它之前用就是 TDZ 报错
+            const rearm = join('/tmp', `mcnai-rearm-${Date.now()}.docx`)
+            copyFileSync(sample, rearm)
+            await win.evaluate((pth) => window.api.inbox.enqueue([pth]), rearm)
+            let live2 = false
+            for (let i = 0; i < 120 && !live2; i++) {
+              live2 = await dockOpen()
+              if (!live2) await win.waitForTimeout(500)
+            }
+            if (!live2) throw new Error('唤回断言之后重新投文件，TaskDock 没有再次出现')
+
             // 渲染层刷新后状态照样在（主进程内存是真相源，reload 只是重拉一次 snapshot）。
             // 必须趁任务刚活起来这一刻 reload——等它跑完再 reload 测的就是"收起"那条分支了
             await win.reload()
@@ -1495,6 +1549,7 @@ try {
             const tp = await dockBox.evaluate((el) => getComputedStyle(el).transitionProperty)
             if (!tp.includes('max-height')) throw new Error('TaskDock 没有接高度过渡：' + tp)
             console.log('Dock 高度过渡 ✓', tp)
+
 
             // H-07：切到对话工作台，全局条必须还在（旧代码切走就没有任何在处理中的痕迹）。
             // 注意两轮 pipeline 之间有 3 秒去抖窗口，那一刻确实没有活跃任务、Dock 本就该收起，
@@ -1568,6 +1623,29 @@ try {
             if (panelUp && (/6\/6/.test(text) || !busy)) break
             await win.waitForTimeout(300)
           }
+          /**
+           * **阶段日志必须把 message 说出来，且同一阶段不许连着堆好几行**（2026-08-18 反馈）。
+           *
+           * 用户报「右下角出现多次上云进度」。查实是呈现问题：一次整包拖入只跑一轮 pipeline、
+           * 只调一次 cloudSync（96 个文件实测 1 轮 1 次 1 条任务），但 cloudSync 分批推、
+           * 每批发一条带「20/61 篇」的事件，而日志只画阶段名、把 message 丢了 ——
+           * 屏幕上就是几行一模一样的「上云」。
+           * 本地模式没登录，cloud_sync 是 `skipped` 带 message「未登录」，正好验同一条链路。
+           */
+          const logRows = await win.evaluate(() =>
+            [...document.querySelectorAll('[data-testid="inbox-panel"] .fade-up')].map((el) =>
+              (el.textContent ?? '').replace(/\s+/g, '')
+            )
+          )
+          const cloudRow = logRows.find((t) => t.startsWith('上云'))
+          if (!cloudRow || cloudRow === '上云')
+            throw new Error(`阶段日志把 message 丢了（只剩光秃秃的阶段名）：${JSON.stringify(logRows)}`)
+          const stageName = (t) => t.replace(/[·（(].*$/, '')
+          for (let i = 1; i < logRows.length; i++) {
+            if (stageName(logRows[i]) && stageName(logRows[i]) === stageName(logRows[i - 1]))
+              throw new Error(`同一阶段连着堆了两行，没有折叠：${logRows[i - 1]} / ${logRows[i]}`)
+          }
+          console.log('阶段日志 ✓', JSON.stringify({ 上云行: cloudRow, 行数: logRows.length }))
           await snap('09-投递箱-完成后', 0)
           await win.locator('span:has-text("处理中")').waitFor({ state: 'hidden', timeout: 180000 }).catch(() => {})
           const extMd = join(settings.vaultPath, '70_外部资料', 'e2e参考书籍.md')
@@ -2714,15 +2792,32 @@ try {
       .waitFor({ state: 'detached', timeout: 8000 })
       .catch(() => {})
 
-    // dragover：工作台必须给覆盖层提示（以前拖进来什么反馈都没有，松手直接炸）
+    // dragenter：工作台必须给覆盖层提示（以前拖进来什么反馈都没有，松手直接炸）
+    // **触发的是 dragenter 不是 dragover**——覆盖层的显示挂在进出计数上，见 useDragOver
     await win.evaluate(() => {
       const dt = new DataTransfer()
-      document
-        .querySelector('main .relative.flex.h-full')
-        ?.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }))
+      const el = document.querySelector('[data-testid="workbench-root"]') ?? document.querySelector('main .relative.flex.h-full')
+      el?.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt }))
+      el?.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }))
     })
     await win.waitForTimeout(400)
     if (!(await win.locator('text=松手即入库').count())) throw new Error('工作台拖入没有覆盖层提示')
+    // 工作台这条也验一次「拖出去覆盖层要消失」——两个拖入口用的是同一个 hook，
+    // 但断言各自守各自的，别指望改一处两处都不会坏
+    await win.evaluate(() => {
+      const el = document.querySelector('[data-testid="workbench-root"]') ?? document.querySelector('main .relative.flex.h-full')
+      el?.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true }))
+    })
+    await win.waitForTimeout(300)
+    if (await win.locator('text=松手即入库').count())
+      throw new Error('工作台：文件拖出窗口后覆盖层没有消失')
+    // 验完再拖回来，后面还要真的松手投文件
+    await win.evaluate(() => {
+      const dt = new DataTransfer()
+      const el = document.querySelector('[data-testid="workbench-root"]') ?? document.querySelector('main .relative.flex.h-full')
+      el?.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    })
+    await win.waitForTimeout(200)
     await snap('24-工作台-拖入覆盖层', 200)
 
     // drop：合成一个带真实磁盘路径的 File（渲染层读的就是 File.path，和真拖同一条链路）

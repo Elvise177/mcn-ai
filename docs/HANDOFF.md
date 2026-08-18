@@ -240,6 +240,32 @@ Electron App（macOS arm64，v0.1.0）
    - 要查的话从两处入手：`settle` 只在 `close`/`error` 触发（进程还活着不该放掉 `running`），
      以及 `stop()`（换库时关 watcher 但**不杀在跑的 pipeline、也不重置 `running`**）
 
+11. **【2026-08-18 真人探索测试三条，已修】**：用户自己点出来的，都是"不崩但别扭"那一类。
+
+   | 现象 | 真因 | 修法 |
+   |---|---|---|
+   | 文件拖出窗口后分区投递覆盖层不消失 | `onDragLeave` 用 `currentTarget === target` 判定。覆盖层一出现指针就压在它的子元素上，拖出窗口时最后一次 `dragleave` 的 `target` 是子元素、不是容器，条件永不成立 | 抽出 `hooks/useDragOver.ts` 做**进出计数**（`dragenter` +1 / `dragleave` -1，归零才隐藏，下限钳 0），两个拖入口共用 |
+   | 右下角出现「多次上云」 | **呈现问题，不是真重复**（证据见下） | 阶段日志渲染 `ev.message`（原来只画阶段名，把「20/61 篇」丢了），并把**连续同阶段折成一行**就地更新 |
+   | 浮窗关掉后点 Dock 没反应 | Dock 只 `setPage('vault')`；人本来就在知识库页 = 什么都没发生。另外面板可见性是 `showInbox \|\| inboxRunning`，跑批期间点 ✕ 会被 `inboxRunning` 顶回来，"关闭"是摆设 | `lib/bus.ts` 加 `inboxPanel` 唤回通道（订阅 + pending 双路，覆盖"目标页已挂载/未挂载"）；可见性收敛到 `showInbox` 一个源 |
+
+   **「多次上云」的证据**（96 个文件一次整包拖入，隔离实例实测）：**1 轮 pipeline、1 次 `cloudSync`、1 条 inbox 任务**。
+   判据是 stages 数组被重置几次（`send('run-start')` 里会 `this.stages = []`），实测重置 0 次。
+   而 `cloudSync` 每 20 篇发一条带 `20/61 篇` 的 `stage: cloud_sync` 事件（登录态那轮实测
+   `20/61 → 40/61 → 60/61`，见 §0），面板却只画 `STAGE_ZH[stage]`＝「上云」两个字 ——
+   于是屏幕上是四行一模一样的「上云」。**流量没有浪费，也没有重复写。**
+
+   顺带加固：`dropPaths` 容忍 `dataTransfer` 为 null（合成事件会让它抛 TypeError 冒到 `window.onerror`）。
+
+   **关于云端 embedding 成本：这一批不改变任何消耗，下次对账不要期待它下降。**
+   本批只动了呈现，没动同步逻辑。而同步本来就已经是增量 + 去重的，没有可省的量：
+   - `cloudSync` 只扫 `mtimeMs > sinceMs - 60_000` 的 md，**只推本轮动过的文件**，
+     不是每轮全量重推
+   - `ingestNote` 有 `skipped` 回执，服务端按 `content_hash` / `file_path` 去重
+     （migration 011），内容没变的笔记重复入库不产生新 embedding
+   
+   所以对账时**云端消耗与本批之前持平才是正常的**；真出现明显下降或上升，说明是别的原因，
+   别记到这一批头上。
+
 ### roadmap · 商业化备忘（2026-08-18 记）
 
 - **用量页的金额对客户默认隐藏**（`showCost`，管理员区可开）。原因：现在算出来的是**成本价**，

@@ -506,11 +506,13 @@ export class InboxOrchestrator {
           else if (!r.ok) failed++
         }
         if (toPush.length > BATCH && i + BATCH < toPush.length) {
+          // 文案不再自带「上云」二字：面板会把阶段名画在前面（`上云 · 20/61 篇`），
+          // 自己再带一遍就成了「上云 · 上云中 20/61 篇」
           this.send({
             type: 'stage',
             stage: 'cloud_sync',
             status: 'ok',
-            message: `上云中 ${Math.min(i + BATCH, toPush.length)}/${toPush.length} 篇…`,
+            message: `${Math.min(i + BATCH, toPush.length)}/${toPush.length} 篇`,
           })
         }
       }
@@ -521,7 +523,7 @@ export class InboxOrchestrator {
         type: 'stage',
         stage: 'cloud_sync',
         status: failed ? 'warn' : 'ok',
-        message: `${synced} 篇上云${holdNote}${failNote}`,
+        message: `已完成 ${synced} 篇${holdNote}${failNote}`,
       })
     } catch (e) {
       this.send({ type: 'stage', stage: 'cloud_sync', status: 'error', message: String(e) })

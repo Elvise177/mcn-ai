@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Loader2, AlertCircle, CloudOff } from 'lucide-react'
 import { isActive, useAllTasks, useCloud } from '../hooks/useTasks'
 import { ui } from './ui'
+import { inboxPanel } from '../lib/bus'
 
 /**
  * 全局任务条（设计见 docs/DESIGN-task-state.md §4.1）。
@@ -11,6 +12,16 @@ import { ui } from './ui'
  *
  * 它是纯投影：所有内容来自主进程的 task registry，本组件不持有任何任务状态。
  */
+
+/**
+ * 点一条任务 = 「带我去看它」。光切页面是不够的：投递任务的详情在**投递箱浮窗**里，
+ * 而那个浮窗可能已经被用户 ✕ 掉了——人本来就在知识库页时，切页面等于什么都没发生
+ * （用户实测反馈「点了没反应」）。所以这里额外发一次唤回请求。
+ */
+const goTo = (kind: TaskKind, onOpen: (p: 'workbench' | 'vault' | 'settings') => void): void => {
+  if (kind === 'inbox' || kind === 'ingest') inboxPanel.request()
+  onOpen(PAGE_OF[kind])
+}
 
 const PAGE_OF: Record<TaskKind, 'workbench' | 'vault' | 'settings'> = {
   inbox: 'vault',
@@ -79,8 +90,8 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
           data-testid="task-dock-btn"
           onClick={() => {
             if (active.length + failed.length > 1) setExpanded((v) => !v)
-            else if (only) onOpen(PAGE_OF[only.kind])
-            else if (failed[0]) onOpen(PAGE_OF[failed[0].kind])
+            else if (only) goTo(only.kind, onOpen)
+            else if (failed[0]) goTo(failed[0].kind, onOpen)
             else onOpen('settings')
           }}
           className="w-full rounded-md border border-line bg-card px-3 py-2 text-left hover:bg-hover"
@@ -132,7 +143,7 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
                 key={t.id}
                 onClick={() => {
                   setExpanded(false)
-                  onOpen(PAGE_OF[t.kind])
+                  goTo(t.kind, onOpen)
                 }}
                 className="block w-full px-3 py-1.5 text-left text-xs hover:bg-hover"
               >

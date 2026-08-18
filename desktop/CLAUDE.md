@@ -34,6 +34,36 @@ npm run build && node e2e/walkthrough.mjs   # 截图在 e2e/shots/，AI 必须 R
   `SMOKE_CASES=single,abort,tools` 精确裁剪；能本地验的（选择器状态、分组、空态、jsonl 读取链路）
   一律用桩数据本地验，别拿 token 换确定性
 
+## 测试账号登录的前置条件（2026-08-18 核实）
+
+自己起环境测「登录 / 上云 / 云端检索」时照这个清单核对，**别把环境问题当成产品故障**。
+
+- **不需要本地 webpage dev server**。登录直连 Supabase
+  （`https://yqozqfrmdddmfrpavrsn.supabase.co`），key 下发打的是 `store.apiBaseUrl`，
+  出厂值就是生产 `https://www.makeupai.top`。（`e2e/login-provision.mjs` 的文件头
+  原来写着「前置：dev server 在 localhost:3000」，**那句是错的**，已更正——
+  代码里从来没有把 apiBaseUrl 指到本地的动作。）
+- **Supabase 免费版闲置 7 天会自动暂停**，暂停后域名直接 NXDOMAIN，应用报的是
+  **网络问题**而不是密码错（见 HANDOFF §3 bug#2）。先自查：
+
+  ```bash
+  curl -sI --max-time 8 https://yqozqfrmdddmfrpavrsn.supabase.co | head -1
+  ```
+
+  能回 HTTP 状态行就是醒着的（根路径 404 属正常）。不通就去 Dashboard → Restore project，
+  域名先回、服务后起，全程 5–15 分钟，中途 Cloudflare 521 属正常。
+- **别开错实例**。`/tmp/mcnai-e2e-offline` 那份 userData 的 `apiBaseUrl` 是
+  `http://127.0.0.1:9`——那是离线降级走查**故意**配的黑洞地址，用它登录必然报网络不可达。
+  确认当前实例打到哪：
+
+  ```bash
+  python3 -c "import json;print(json.load(open('/Users/\$USER/Library/Application Support/mcn-ai-desktop/config.json')).get('apiBaseUrl'))"
+  ```
+
+- 登录成败在主日志里有痕：成功会落一条 `[secrets] encryptedSession 已加密落盘`，
+  失败分类（`network` / `credential` / `timeout`）也各有对应文案。日志在
+  `~/Library/Application Support/mcn-ai-desktop/logs/main.log`
+
 ## 常用命令
 
 - 开发：`npm run dev`　类型检查：`npm run typecheck`　打包：`npm run dist`

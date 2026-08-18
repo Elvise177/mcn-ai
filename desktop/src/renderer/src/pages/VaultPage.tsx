@@ -8,12 +8,13 @@ import { VaultWizard } from '../components/VaultWizard'
 import { ConflictBar } from '../components/ConflictBar'
 import { ui } from '../components/ui'
 import { X, Inbox, MoveUpLeft, MoreHorizontal, Loader2, FileWarning, RotateCcw } from 'lucide-react'
-import { pendingNote } from '../lib/bus'
+import { pendingNote, inboxPanel } from '../lib/bus'
 import { GRAPH_GROUP_TOKENS, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
 import { errText } from '../lib/err'
 import { enqueueMessage } from '../lib/enqueue'
 import { useTask } from '../hooks/useTasks'
+import { useDragOver } from '../hooks/useDragOver'
 
 const colorOf = (group: string): string => {
   let h = 0
@@ -185,6 +186,24 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
       ? [...((e as { failed?: string[] }).failed ?? []), ...((e as { unsupported?: string[] }).unsupported ?? [])]
       : []
   )
+  /**
+   * **连续的同一阶段折成一行，并把 message 显示出来**（2026-08-18 真人测试反馈）。
+   *
+   * 用户报「右下角出现多次上云进度」。查实是**呈现问题不是真重复**：一次整包拖入
+   * 只跑一轮 pipeline、只调一次 `cloudSync`（96 个文件实测 1 轮 1 次 1 条任务）。
+   * 但 `cloudSync` 是分批推的，每批发一条 `stage: cloud_sync` 事件带
+   * 「上云中 20/61 篇…」，而这里**只画 `STAGE_ZH[stage]`、把 message 丢了** ——
+   * 于是屏幕上是四行一模一样的「上云」，看着就像同步了四遍。
+   */
+  const rows = events.reduce<InboxEvent[]>((acc, ev) => {
+    const prev = acc[acc.length - 1]
+    if (prev && prev.type === 'stage' && ev.type === 'stage' && prev.stage === ev.stage) {
+      acc[acc.length - 1] = ev // 同阶段的后续事件就地更新，不再往下堆
+      return acc
+    }
+    acc.push(ev)
+    return acc
+  }, [])
   const { done, total, label } = task?.progress ?? { done: 0, total: 6, label: '' }
   // 取消是用户主动的操作，不该看起来像出错：中性灰，不是红（设计 §5.1）
   const canceled = task?.status === 'canceled'
@@ -201,7 +220,10 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [events])
   return (
-    <div className="slide-in-right absolute bottom-4 right-4 z-20 w-80 rounded-xl border border-line bg-card shadow-pop">
+    <div
+      data-testid="inbox-panel"
+      className="slide-in-right absolute bottom-4 right-4 z-20 w-80 rounded-xl border border-line bg-card shadow-pop"
+    >
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
         <div className="text-md font-medium">
           投递箱 {running && <span className="text-xs text-accent">处理中…</span>}
@@ -227,7 +249,7 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
               立即处理
             </button>
           )}
-          <button onClick={onClose} className="text-muted hover:text-accent">
+          <button data-testid="inbox-panel-close" onClick={onClose} className="text-muted hover:text-accent">
             ✕
           </button>
         </div>
@@ -269,12 +291,12 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
         </div>
       )}
       <div ref={logRef} className="max-h-64 overflow-auto px-4 py-2">
-        {events.length === 0 ? (
+        {rows.length === 0 ? (
           <div className="py-3 text-sm text-muted">
             把文件拖进窗口，或在 Finder 里丢进投递箱目录，自动转换/打标/建链
           </div>
         ) : (
-          events.map((ev, i) => (
+          rows.map((ev, i) => (
             <div key={i} className="fade-up flex items-center gap-2 py-1 text-sm">
               <span className={`h-2 w-2 shrink-0 rounded-full ${ev.type === 'file-added' ? 'bg-accent' : dot(ev.status)}`} />
               {ev.type === 'file-added' ? (
@@ -284,8 +306,14 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
                   {ev.stage?.startsWith('route_')
                     ? `外部资料转换 · ${ev.stage.slice(6)}`
                     : (STAGE_ZH[ev.stage ?? ''] ?? ev.stage)}
+                  {/* 带进度的阶段（上云分批）要把数字说出来，否则连着几行都是光秃秃的「上云」 */}
+                  {ev.status === 'ok' && ev.message && (
+                    <span className="text-muted"> · {ev.message}</span>
+                  )}
                   {ev.status === 'skipped' && (
-                    <span className="text-muted">（{ev.stage === 'convert' ? '本批已在分流完成' : '跳过'}）</span>
+                    <span className="text-muted">
+                      （{ev.stage === 'convert' ? '本批已在分流完成' : (ev.message ?? '跳过')}）
+                    </span>
                   )}
                   {ev.status === 'error' && <span className="text-danger"> 失败：{ev.message}</span>}
                   {/* A-4：转换失败与格式不支持过去只写进 convert_fail.log，界面六阶段全绿、
@@ -377,14 +405,28 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   })
   const [showInbox, setShowInbox] = useState(false)
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [dragOver, setDragOver] = useState(false)
   const [hotZone, setHotZone] = useState<string | null>(null)
+  // 进出计数判定，别用 `currentTarget === target`（拖出窗口时覆盖层消不掉，见 useDragOver）
+  const drag = useDragOver(() => setHotZone(null))
 
   // 从 Finder 直接丢进投递箱目录时没人开过面板，跑完那一刻面板会"啪"地消失、
   // 用户根本看不到结果。开跑就把面板钉住，结束后由上面的 4 秒计时器收起
   useEffect(() => {
     if (inboxRunning) setShowInbox(true)
   }, [inboxRunning])
+
+  /**
+   * Dock 唤回：浮窗被 ✕ 掉之后，Dock 那条迷你指示是唯一还能回到这个任务的入口。
+   * 订阅（本页已挂载）＋ 挂载时 consume（从别的页面点过来）两条路都要接，
+   * 只接前者的话「请求发生在订阅之前」那一路会丢。
+   */
+  useEffect(() => {
+    if (inboxPanel.consume()) setShowInbox(true)
+    return inboxPanel.subscribe(() => {
+      inboxPanel.consume()
+      setShowInbox(true)
+    })
+  }, [])
 
   const setGraphVisible = (v: boolean): void => {
     localStorage.setItem('vault.showGraph', v ? '1' : '0')
@@ -568,16 +610,17 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     void window.api.routes.get().then(setRoutes)
   }, [])
 
+  // dataTransfer 可能是 null（合成事件、或某些平台的异常 drop）——
+  // 直接展开会抛 TypeError 冒到 window.onerror，用户看不到但日志里全是它
   const dropPaths = (e: React.DragEvent): string[] =>
-    [...e.dataTransfer.files]
+    [...(e.dataTransfer?.files ?? [])]
       .map((f) => (f as File & { path?: string }).path)
       .filter((p): p is string => !!p)
 
   const doEnqueue = async (e: React.DragEvent, subdir?: string): Promise<void> => {
     e.preventDefault()
     e.stopPropagation()
-    setDragOver(false)
-    setHotZone(null)
+    drag.reset()
     const paths = dropPaths(e)
     if (!paths.length) return
     setShowInbox(true)
@@ -593,20 +636,12 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
 
   return (
     <div
+      data-testid="vault-root"
       className="relative flex h-full"
-      onDragOver={(e) => {
-        e.preventDefault()
-        setDragOver(true)
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) {
-          setDragOver(false)
-          setHotZone(null)
-        }
-      }}
+      {...drag.handlers}
       onDrop={(e) => void doEnqueue(e)}
     >
-      {dragOver && (
+      {drag.over && (
         // 静态时两个投递区一模一样（中性白底灰虚线），只有文件悬在哪个区上方，
         // 哪个区才高亮——之前粉底那块会被当成"已选中"，误导用户
         <div className="absolute inset-0 z-30 flex gap-3 bg-overlay p-6">
@@ -636,7 +671,11 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
           ))}
         </div>
       )}
-      {(showInbox || inboxRunning) && (
+      {/* 可见性只认 `showInbox` 一个源。以前是 `showInbox || inboxRunning`，
+          于是跑批期间点 ✕ 关不掉（`inboxRunning` 立刻把它顶回来），
+          「关闭」按钮成了摆设。开跑自动展开由上面那个 effect 负责，
+          关掉之后想再看，走 Dock 唤回 */}
+      {showInbox && (
         <InboxPanel task={inboxTask} running={inboxRunning} onClose={() => setShowInbox(false)} />
       )}
       {/* 分区树（宽度可拖，右侧分隔线兼作分栏线） */}

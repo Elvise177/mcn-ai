@@ -7,6 +7,7 @@ import { CHIPS } from '../config/chips'
 import { greetingLine } from '../lib/profile'
 import { errText } from '../lib/err'
 import { enqueueMessage } from '../lib/enqueue'
+import { useDragOver } from '../hooks/useDragOver'
 import { useTask } from '../hooks/useTasks'
 import { TierSelector } from '../components/TierSelector'
 
@@ -164,12 +165,13 @@ export default function Workbench({
 
   // 拖文件进工作台页：以前没人拦，Electron 直接导航到 file:// 把整个应用替换掉。
   // 现在走和知识库页同一条链路（inbox.enqueue），拖入时给覆盖层告诉用户会发生什么
-  const [dragOver, setDragOver] = useState(false)
+  // 与知识库页同一套进出计数判定（见 useDragOver）：老写法拖出窗口时覆盖层消不掉
+  const drag = useDragOver()
   const onDrop = async (e: React.DragEvent): Promise<void> => {
     e.preventDefault()
     e.stopPropagation()
-    setDragOver(false)
-    const paths = [...e.dataTransfer.files]
+    drag.reset()
+    const paths = [...(e.dataTransfer?.files ?? [])]
       .map((f) => (f as File & { path?: string }).path)
       .filter((p): p is string => !!p)
     if (!paths.length) return
@@ -186,17 +188,12 @@ export default function Workbench({
 
   return (
     <div
+      data-testid="workbench-root"
       className="relative flex h-full"
-      onDragOver={(e) => {
-        e.preventDefault()
-        setDragOver(true)
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragOver(false)
-      }}
+      {...drag.handlers}
       onDrop={(e) => void onDrop(e)}
     >
-      {dragOver && (
+      {drag.over && (
         <div className="absolute inset-0 z-30 flex items-center justify-center bg-overlay p-6">
           <div className="flex w-full max-w-md flex-col items-center rounded-xl border-2 border-dashed border-accent bg-card px-8 py-10 text-center">
             <Inbox size={28} className="mb-3 text-accent" />

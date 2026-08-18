@@ -1,7 +1,11 @@
 /**
  * 「登录即用」端到端验收：全新用户（零 key 零配置）→ GUI 登录 → key 自动下发 →
  * 不碰任何高级设置直接对话可用。
- * 前置：webpage dev server 在 localhost:3000（含 CLIENT_*_API_KEY env）
+ * 前置：**不需要本地 dev server**。登录直连 Supabase，key 下发打的是
+ *   `store.apiBaseUrl`（出厂值就是生产 `https://www.makeupai.top`），本脚本不改它。
+ *   （这里原来写着「前置：webpage dev server 在 localhost:3000」——**是错的**，
+ *   代码里从来没有把 apiBaseUrl 指到本地的动作。2026-08-18 核实后更正。）
+ *   真要打本地，得自己先 `settings.setApiBase('http://localhost:3000')`。
  * 运行：node e2e/login-provision.mjs
  */
 import { _electron as electron } from 'playwright-core'
