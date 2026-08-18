@@ -863,6 +863,17 @@ try {
     await snap('01c2-输入框折行自动长高', 300)
     await chatInput.fill('灰太太最近的数据怎么样？')
     if (CHAT) {
+      // 爆炸半径守卫（T-02 那单加的）：`result` 分支的改动只该影响**失败**那条路。
+      // 这里挂一个流式事件收集器，用来证明成功路径与工具调用路径原样还在——
+      // 这一问是库内问题，系统提示词第 1 条要求先 search_knowledge，所以必然有工具事件
+      await win.evaluate(() => {
+        window.__streamKinds = {}
+        window.__streamTools = []
+        window.api.chat.onStream((p) => {
+          window.__streamKinds[p.kind] = (window.__streamKinds[p.kind] ?? 0) + 1
+          if (p.kind === 'tool' && p.tool) window.__streamTools.push(p.tool)
+        })
+      })
       await chatInput.press('Enter')
       // 流式中：等第一段正文出来再截，光标才有东西可跟
       await win.locator('.streaming-body, .thinking-dots').first().waitFor({ timeout: 60000 }).catch(() => {})
@@ -933,6 +944,24 @@ try {
       await snap('01e-工作台-回答完成', 1200)
       const answered = await win.locator('.md-article').count()
       if (!answered) throw new Error('E2E_CHAT：没有拿到任何回答正文')
+
+      // ---- 爆炸半径：成功路径（is_error=false）与工具调用路径必须零影响 ----
+      const stream = await win.evaluate(() => ({ kinds: window.__streamKinds, tools: window.__streamTools }))
+      if (!stream.kinds.assistant) throw new Error('成功那一轮没有 assistant 事件：' + JSON.stringify(stream.kinds))
+      if (stream.kinds.error) throw new Error('成功那一轮竟然也发了 error 事件：' + JSON.stringify(stream.kinds))
+      if (!stream.tools.length)
+        throw new Error('这一问没有触发任何工具调用，工具链路无从验证：' + JSON.stringify(stream.kinds))
+      const okAnswer = await win.evaluate(async () => {
+        const c = (await window.api.chat.list())[0]
+        const a = c.messages.filter((m) => m.role === 'assistant')
+        return { n: a.length, err: a.some((m) => m.error), len: a[a.length - 1]?.text.length ?? 0 }
+      })
+      if (okAnswer.err || !okAnswer.len)
+        throw new Error('正常回答被判成了错误或正文为空：' + JSON.stringify(okAnswer))
+      console.log(
+        '爆炸半径守卫 ✓',
+        JSON.stringify({ 事件: stream.kinds, 工具: [...new Set(stream.tools)], 回答: okAnswer })
+      )
 
       // ---- 用量记账的写入链路（只有真实调用才跑得到）：一轮对话必须落一条字段齐全的记录 ----
       {
@@ -1132,6 +1161,31 @@ try {
       await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: ERR_WAIT })
       const errText1 = await win.locator('.md-article').last().innerText()
       if (!errText1.includes('⚠️')) throw new Error(`错误没有落成气泡：「${errText1}」`)
+
+      // ---- T-02：一次失败**有且只有一条**错误气泡，且是中文 ----
+      // 修之前上游 401 会出两条：先一条 `Failed to authenticate. API Error: 401 …`
+      // （`subtype:'success'` + `is_error:true`，被当成 AI 的正常回答画出来），再一条 ⚠️。
+      // 两种模式都要守：本地模式走预检 bail，CHAT 模式走 401 桩——正是 T-02 的原型场景。
+      // 多等一拍再数：抛出来的那条 ⚠️ 比 result 晚到，只数一次可能刚好卡在中间
+      await win.waitForTimeout(1500)
+      const t02 = await win.evaluate(async () => {
+        const c = (await window.api.chat.list())[0]
+        return {
+          msgs: c.messages.length,
+          assistants: c.messages.filter((m) => m.role === 'assistant').map((m) => ({ err: !!m.error, text: m.text })),
+        }
+      })
+      if (t02.assistants.length !== 1 || t02.msgs !== 2)
+        throw new Error(
+          `一次失败应当只出一条错误气泡（T-02）：${JSON.stringify({ ...t02, assistants: t02.assistants.map((a) => ({ ...a, text: a.text.slice(0, 90) })) })}`
+        )
+      if (!t02.assistants[0].err)
+        throw new Error(`那一条没被标成错误气泡（拿不到「重试」）：${t02.assistants[0].text.slice(0, 90)}`)
+      // 中文化：上游英文原文不许出现在界面上（"AI"这类两字母缩写不算，所以门槛设 5 个字母）
+      const leaked = t02.assistants[0].text.match(/[A-Za-z]{5,}/g)
+      if (leaked)
+        throw new Error(`错误气泡里漏出了上游英文原文（T-02）：${leaked.join('/')} ←「${t02.assistants[0].text.slice(0, 120)}」`)
+      console.log('T-02 一次失败一条中文气泡 ✓', JSON.stringify({ 条数: t02.msgs, 文案: t02.assistants[0].text.slice(0, 40) }))
       // 预检失败的错误是**同步**发回来的，抢在 React 提交用户那条消息之前——
       // 旧代码那一下会把刚发出去的提问整条盖掉（历史里只剩一条 ⚠️，重试也就无从谈起）
       const userBubbles = await win.evaluate(

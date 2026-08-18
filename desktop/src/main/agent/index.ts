@@ -486,6 +486,26 @@ export class AgentManager {
             errorResult = errs.join('; ') || `出错：${message.subtype}`
             continue
           }
+          const res = message as { is_error?: boolean; api_error_status?: number | null }
+          /**
+           * T-02：**`subtype:'success'` 但 `is_error:true`** —— 上游 401 / 403 / 额度不足
+           * 这类失败长的就是这个样子，`result` 字段里装的是**英文原文**
+           * （`Failed to authenticate. API Error: 401 …`）。旧代码把它当正常回答画进对话，
+           * 紧接着 for-await 又抛出、再落一条 ⚠️：同一次失败说两遍，第一条还是纯英文
+           * （截图 41c/41d/45d 里看得很清楚）。现在与 `subtype !== 'success'` 同等对待——
+           * 扣住不发，最终走 `kind:'error'`（过 zhError 出中文 + 气泡里有「重试」），
+           * **英文原文只进日志**。
+           *
+           * 判据**只认 `is_error`，不认 `api_error_status`**：后者在记账那边的语义是
+           * "存疑就别计费"（宁可少记一条，代价为零），搬到显示上却会把一条**真回答**
+           * 判成错误、连正文一起丢掉——两边的容错方向正好相反，不能图省事合成一个条件。
+           */
+          if (res.is_error) {
+            const raw = (message.result ?? '').trim()
+            log('error', 'agent', `上游返回错误结果（原文只进日志，界面走中文映射）：${raw.slice(0, 500)}`)
+            errorResult = raw || '出错：上游返回了一个错误结果'
+            continue
+          }
           const text = message.result
           // 服务端实际用的模型：对不上就是被端点静默换掉了（诊断日志留一行 + 记进用量）
           const modelUsage = (message as { modelUsage?: Record<string, unknown> }).modelUsage ?? {}
@@ -510,8 +530,9 @@ export class AgentManager {
           // **`subtype === 'success'` 一条守不住**（B-2 补丁，2026-08-18）：SDK 的
           // `SDKResultSuccess` 自带 `is_error` 与 `api_error_status` 字段——上游报 403 时它照样
           // 发 `subtype: 'success'`，只是 `is_error: true`、token 全 0。实测中转站余额耗尽那轮，
-          // 8 个失败请求全被记进了 jsonl。所以还要看 `is_error`，并且要求这一轮真的产生过 token
-          const res = message as { is_error?: boolean; api_error_status?: number | null }
+          // 8 个失败请求全被记进了 jsonl。所以还要看 `is_error`，并且要求这一轮真的产生过 token。
+          // （T-02 之后 `is_error` 在这里恒为 false——上面已经把它挡掉了。条件保留不删：
+          //  这是记账自己的判据，不该依赖上游某个分支的存在顺序。）
           const hasTokens = tokensOf({ usage: (message as { usage?: unknown }).usage, modelUsage }).output > 0
           if (message.subtype === 'success' && !res.is_error && !res.api_error_status && hasTokens) {
             appendUsage({
