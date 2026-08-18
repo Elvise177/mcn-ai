@@ -6,3 +6,10 @@ release/
 # 冻结版 pipeline 二进制不进仓库（96MB）：在 pkb-pipeline 仓库 pyinstaller 后 cp -R dist/mcn-ingest resources/pipeline
 resources/pipeline/
 e2e/*.zip
+
+# 仓库根下的散落构建产物：electron-vite 的输出全在 out/，desktop/ 根下出现 index.js
+# 一定是老构建体系或误跑命令留下的（2026-08-18 清掉过一个 27KB 的主进程陈旧包：
+# 零 git 历史、零引用、现行配置也不会生成它）。锚定到 desktop/ 根，不影响 src 下的同名文件
+/index.js
+/preload.js
+/renderer.js
