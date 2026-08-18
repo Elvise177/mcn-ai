@@ -31,7 +31,15 @@ const LIB = '80_资料库'
 async function note(
   root: string,
   rel: string,
-  fm: { talent?: string[]; product?: string[]; partner?: string[]; sensitive?: boolean; contract?: boolean }
+  fm: {
+    talent?: string[]
+    product?: string[]
+    partner?: string[]
+    sensitive?: boolean
+    contract?: boolean
+    /** 自定义正文——验"实体抽不出来但正文里提了"那条路（反向扫描） */
+    body?: string
+  }
 ): Promise<void> {
   const abs = join(root, LIB, rel)
   await fs.mkdir(join(abs, '..'), { recursive: true })
@@ -45,7 +53,7 @@ async function note(
     ...(fm.contract ? ['is_contract: true'] : []),
     '---',
     '',
-    '正文若干。',
+    fm.body ?? '正文若干。',
   ]
   await fs.writeFile(abs, lines.join('\n'), 'utf-8')
 }
@@ -100,6 +108,18 @@ async function main(): Promise<void> {
   await note(root, '达人信息表.md', { talent: ['只在敏感表里的人'], sensitive: true })
   await note(root, '目标管理总表.md', { talent: ['只在敏感表里的人'], sensitive: true })
 
+  /**
+   * 合同枢纽的真实形态：敏感文档走规则打标，规则层认不出自由文本 PII 块里的达人，
+   * 于是 entities 是空的，但**正文里提了 82 次**（2026-08-18 全量重跑实测）。
+   * 只按 entities 建链的话这份合同一条达人链都没有，图谱上不成其为枢纽。
+   */
+  await note(root, '年框-实体抽不出来.md', {
+    partner: ['霞飞'],
+    sensitive: true,
+    contract: true,
+    body: '达人信息：抖音名：灰太太 抖音号：xxx；抖音名：皮蛋 抖音号：yyy。主推霞飞双层高光粉。',
+  })
+
   const st = await buildEntityCards(root, LIB)
 
   console.log('\n【2】归一与阈值')
@@ -133,6 +153,17 @@ async function main(): Promise<void> {
     check(`合同连到${kind}卡`, contract.includes(`[[30_实体/${kind}/${name}|`), contract.split('## 🔗 关联')[1])
   }
   check('建卡器报出了补写的双链条数', st.links > 0, String(st.links))
+
+  console.log('\n【4b】反向正文扫描（合同枢纽的命根）')
+  {
+    const c = await fs.readFile(join(root, LIB, '年框-实体抽不出来.md'), 'utf-8')
+    check('entities 为空但正文提到 → 照样连上达人卡', c.includes('30_实体/达人/灰太太|'), c.split('## 🔗 关联')[1])
+    check('产品也连上（长名优先，不会被「霞飞」吃掉）', c.includes('30_实体/产品/霞飞双层高光粉|'))
+    check('建卡器报出回扫补的提及数', st.scanLinks > 0, String(st.scanLinks))
+    // 回扫只补"提及"，不该让一个蹭到的字符串够格建卡
+    check('回扫不参与建卡阈值：只在正文出现过的名字不成卡',
+      (await readCard(root, 'talent', '只出现一次的人')) === null)
+  }
 
   console.log('\n【5】增量：重复入库不重建')
   const st2 = await buildEntityCards(root, LIB)

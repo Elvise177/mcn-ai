@@ -229,6 +229,34 @@ const frontmatter = (p) => {
 const byStem = new Map()
 for (const [rel, cats] of expected) byStem.set(basename(rel).replace(/\.[^.]+$/, ''), cats)
 
+/**
+ * 实体卡名不得与源文件同名（A-3，2026-08-18）。
+ *
+ * **为什么这条要排在落位比对之前**：下面那段是按 stem 找源文件来比 category 的，
+ * 一张卡如果恰好叫得跟某个源文件一样，就会被**当成源文件**参与比对、category 必然对不上
+ * → 落位一致率跌破 100% → 整条验收红在"落位"上，而真因是重名。报错方向完全指错。
+ * 立案时核过：旧库 179 张卡与 Maggie 源树 stem 零撞车，所以这里是**防回归**不是修 bug。
+ */
+{
+  const cardDirs = ['30_实体/达人', '30_实体/产品', '30_实体/合作方']
+  const clashes = []
+  for (const d of cardDirs) {
+    const abs = join(VAULT, d)
+    if (!existsSync(abs)) continue
+    for (const f of readdirSync(abs)) {
+      const stem = f.replace(/\.md$/, '')
+      if (byStem.has(stem)) clashes.push(`${d}/${f}`)
+    }
+  }
+  const cardCount = cardDirs.reduce(
+    (n, d) => n + (existsSync(join(VAULT, d)) ? readdirSync(join(VAULT, d)).length : 0),
+    0
+  )
+  say(`实体卡 ${cardCount} 张（零 LLM 这轮只有规则级：文件名挖出来的合作方）`)
+  if (clashes.length)
+    fail(`实体卡名与源文件同名，会污染下面的落位断言：${clashes.join(' | ')}`)
+}
+
 let hit = 0
 const misses = []
 let skipped = 0
