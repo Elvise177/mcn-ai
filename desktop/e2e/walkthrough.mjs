@@ -29,6 +29,37 @@ if (!process.env.E2E_VAULT) {
   if (existsSync(src)) {
     rmSync(vaultCopy, { recursive: true, force: true })
     cpSync(src, vaultCopy, { recursive: true })
+    /**
+     * **给旧 checkpoint 补上当前 schema_rev**（2026-08-18 加，A-3 逼出来的）。
+     *
+     * `03_tag_llm` 的断点续跑从「只看 path」改成了「看 (path, rev)」——没有 rev 的旧记录
+     * 一律判为过期、重新打标。那是**给真实用户设计的**（改了打标产出结构就该重跑一次），
+     * 但走查库是 maggie-vault 的副本，它带着一份 119 条的旧格式 checkpoint，
+     * 于是**每跑一轮走查都要重新打标约 100 篇**：慢到阶段卡在 tag_llm 好几分钟、
+     * 每轮真烧钱、而且这笔钱在用量页上还看不见（§3-8 pipeline 打标不入账）。
+     *
+     * 这些笔记本来就打过标、内容一个字没变，测试夹具没必要每轮重烧一遍。
+     * 补 rev 只影响走查副本，真实用户那次一次性重打标照常发生。
+     */
+    for (const lib of ['80_Library', '80_资料库']) {
+      const ck = join(vaultCopy, lib, '.checkpoint.jsonl')
+      if (!existsSync(ck)) continue
+      const REV = 1 // 与 pkb-pipeline 的 03_tag_llm.SCHEMA_REV 对齐；那边 +1 时这里跟着改
+      const lines = readFileSync(ck, 'utf-8').split('\n').filter(Boolean)
+      let patched = 0
+      const out = lines.map((l) => {
+        try {
+          const rec = JSON.parse(l)
+          if (rec.guard || rec.rev !== undefined) return l
+          patched++
+          return JSON.stringify({ ...rec, rev: REV })
+        } catch {
+          return l
+        }
+      })
+      writeFileSync(ck, out.join('\n') + '\n')
+      if (patched) console.log(`走查库 ${lib}/.checkpoint.jsonl 补 rev：${patched}/${lines.length} 条（省掉一轮重打标）`)
+    }
   }
 }
 
@@ -178,7 +209,16 @@ const waitForPipelinePid = async (page, timeoutMs = 90000) => {
  * 点下去按钮已经变回「立即处理」了（实测踩过）。
  * 空闲要连续 4.5 秒才算数——两轮之间有 3 秒去抖窗口。
  */
-const waitInboxIdle = async (page, timeoutMs = 300000) => {
+/**
+ * 等投递箱彻底闲下来（连续 4.5 秒无活跃任务，跨过 3 秒去抖窗口）。
+ *
+ * **上限 5 分钟 → 10 分钟**（2026-08-18，A-3 之后）：实体建卡会改写上百篇笔记的
+ * `## 🔗 关联` 段，这些笔记的 mtime 随之变化，于是 `cloudSync` 的"本轮变更"集合
+ * 从几篇涨到上百篇（实测这一轮 **上云·20/125篇**），一轮跑完要好几分钟。
+ * 这是**实体首次铺开的一次性代价**，不是每轮都有：链接内容没变就不落盘，
+ * 下一轮触及的笔记数会掉回个位数。
+ */
+const waitInboxIdle = async (page, timeoutMs = 600000) => {
   const t0 = Date.now()
   let quietSince = 0
   while (Date.now() - t0 < timeoutMs) {
