@@ -148,8 +148,40 @@ check(
   zh('Grep', { pattern: '灰太太', path: '40_带货/产品' }, { done: true, count: 11, unit: 'match' }) ===
     '核对了产品里的「灰太太」，命中 11 处'
 )
-check('验证性扫描（进行中）', zh('Glob', { pattern: '*.md' }, { verify: true }) === '正在确认库中没有相关记录')
-check('验证性扫描（完成且真没有）', zh('Glob', { pattern: '*.md' }, { verify: true, done: true, count: 0 }) === '已确认库中没有相关记录')
+// 真人对照截图指出（2026-08-18）：三次扫的是不同的东西，却都显示成一模一样的
+// 「已确认库中没有相关记录」，连着三条像复读机。确认文案必须带上"确认的是哪儿"
+check(
+  '验证性扫描（进行中，说清扫的是文件名）',
+  zh('Glob', { pattern: '霍格沃茨' }, { verify: true }) === '正在确认文件名里有没有「霍格沃茨」',
+  zh('Glob', { pattern: '霍格沃茨' }, { verify: true })
+)
+check(
+  '验证性扫描（完成，文件名）',
+  zh('Glob', { pattern: '霍格沃茨' }, { verify: true, done: true, count: 0 }) === '已确认文件名里没有「霍格沃茨」',
+  zh('Glob', { pattern: '霍格沃茨' }, { verify: true, done: true, count: 0 })
+)
+check(
+  '验证性扫描（完成，正文）',
+  zh('Grep', { pattern: '霍格沃茨' }, { verify: true, done: true, count: 0 }) === '已确认正文里没有「霍格沃茨」',
+  zh('Grep', { pattern: '霍格沃茨' }, { verify: true, done: true, count: 0 })
+)
+check(
+  '同一个词、两种扫法，文案必须不同（这就是复读机那条的判据）',
+  zh('Grep', { pattern: '霍格沃茨' }, { verify: true, done: true, count: 0 }) !==
+    zh('Glob', { pattern: '霍格沃茨' }, { verify: true, done: true, count: 0 })
+)
+check(
+  '验证性扫描带分区范围',
+  zh('Grep', { pattern: '霍格沃茨', path: '20_公司管理' }, { verify: true, done: true, count: 0 }) ===
+    '已确认 20_公司管理 的正文里没有「霍格沃茨」',
+  zh('Grep', { pattern: '霍格沃茨', path: '20_公司管理' }, { verify: true, done: true, count: 0 })
+)
+check(
+  '没有关键词时的兜底（文件名说"匹配"、正文说"相关记录"）',
+  zh('Glob', {}, { verify: true, done: true, count: 0 }) === '已确认文件名里没有匹配' &&
+    zh('Grep', {}, { verify: true, done: true, count: 0 }) === '已确认正文里没有相关记录',
+  zh('Glob', {}, { verify: true, done: true, count: 0 }) + ' / ' + zh('Grep', {}, { verify: true, done: true, count: 0 })
+)
 check(
   '验证性扫描但真扫到了 → 回到核对口径',
   zh('Grep', { pattern: '达人' }, { verify: true, done: true, count: 2, unit: 'file' }) === '核对了 2 份含「达人」的笔记'

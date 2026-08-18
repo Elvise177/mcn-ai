@@ -168,8 +168,8 @@ export const STEP_MAP: Record<string, Phraser> = {
     return { kind: 'read', text: c.done ? `阅读了${what}` : `正在阅读${what}` }
   },
 
-  Grep: (a, c) => scanPhrase(a, c),
-  Glob: (a, c) => scanPhrase(a, c),
+  Grep: (a, c) => scanPhrase('Grep', a, c),
+  Glob: (a, c) => scanPhrase('Glob', a, c),
 
   // pipeline / 产物类命令：命令行本身对用户毫无意义，只说在干什么
   Bash: (_a, c) => ({ kind: 'file', text: c.done ? '处理完文件' : '正在处理文件' }),
@@ -184,7 +184,7 @@ export const STEP_MAP: Record<string, Phraser> = {
 /** 未映射的工具：说得笼统，但**绝不露工具原名** */
 export const FALLBACK: Phraser = (_a, c) => ({ kind: 'other', text: c.done ? '已处理' : '正在处理' })
 
-function scanPhrase(a: Record<string, string>, c: StepCtx): StepPhrase {
+function scanPhrase(tool: string, a: Record<string, string>, c: StepCtx): StepPhrase {
   const { text: target, where, kw, note } = scanTarget(a)
   /**
    * 完成态：量词跟着单位走——「份」是笔记，「处」是行内命中。
@@ -198,11 +198,22 @@ function scanPhrase(a: Record<string, string>, c: StepCtx): StepPhrase {
     }
     return `核对了 ${c.count} 份${target}`
   }
-  // 验证性扫描：检索已经 0 命中，这一遍是在"确认库里真的没有"（系统提示词第 4 条）。
-  // 说成"正在逐份核对"会让人以为还在找资料，其实结论多半是"没有"
+  /**
+   * 验证性扫描：检索已经 0 命中，这一遍是在"确认库里真的没有"（系统提示词第 4 条）。
+   * 说成"正在逐份核对"会让人以为还在找资料，其实结论多半是"没有"。
+   *
+   * **必须带上确认目标**（真人对照截图指出，2026-08-18）：三次扫的是不同的东西
+   * （Grep 翻正文、Glob 比文件名、换个词再扫一遍），却都显示成一模一样的
+   * 「已确认库中没有相关记录」，连着三条读起来像复读机，也看不出它到底查过哪些地方。
+   */
   if (c.verify) {
-    if (!c.done) return { kind: 'verify', text: '正在确认库中没有相关记录' }
-    if (!c.count) return { kind: 'verify', text: '已确认库中没有相关记录' }
+    const field = tool === 'Glob' ? '文件名' : '正文'
+    // 指到某一篇/某个分区时把范围也说出来；整库扫就不必画蛇添足说"库的"
+    // 分区名前后留空格：「已确认20_公司管理 的正文里…」挤在一起不好读
+    const scope = note ? where : where && where !== '库' ? ` ${where} 的` : ''
+    const what = kw ? `「${kw}」` : tool === 'Glob' ? '匹配' : '相关记录'
+    if (!c.done) return { kind: 'verify', text: `正在确认${scope}${field}里有没有${what}` }
+    if (!c.count) return { kind: 'verify', text: `已确认${scope}${field}里没有${what}` }
     return { kind: 'scan', text: doneText() }
   }
   if (!c.done) return { kind: 'scan', text: note ? `正在逐行核对${target}` : `正在逐份核对${target}` }
