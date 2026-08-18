@@ -10,6 +10,7 @@ const api = {
     setDingtalk: (cfg: { webhook: string; secret: string; notifyInbox: boolean; notifyArtifact: boolean }) =>
       ipcRenderer.invoke('settings:setDingtalk', cfg),
     setArtifactAutoIngest: (v: boolean) => ipcRenderer.invoke('settings:setArtifactAutoIngest', v),
+    setShowCost: (v: boolean) => ipcRenderer.invoke('settings:setShowCost', v),
     setSensitiveMode: (allowAi: boolean, allowCloud: boolean) =>
       ipcRenderer.invoke('settings:setSensitiveMode', allowAi, allowCloud),
   },

@@ -47,6 +47,7 @@ interface DesktopSettings {
   dingtalkNotifyInbox: boolean
   dingtalkNotifyArtifact: boolean
   artifactAutoIngest: boolean
+  showCost: boolean
   sensitiveAllowAi: boolean
   sensitiveAllowCloud: boolean
 }
@@ -168,10 +169,25 @@ interface Conversation {
   tier?: TierId
 }
 
-/** 各档美元单价 + 汇率（运维配置，只在管理员区可见可改） */
+/** 单价 + 汇率（运维配置，只在管理员区可见可改） */
 interface UsagePricing {
-  usd: Record<TierId, { in: number; out: number }>
+  /** 按**线路**分表：同一模型走不同线路价格可能差好几倍（B-2） */
+  routes: Record<
+    string,
+    {
+      models: Record<string, { in: number; out: number; cacheRead?: number }>
+      default: { in: number; out: number }
+      /** 缓存读的价格倍率（相对 in）。官方 1/30，中转站按模型不同（opus 0.1、deepseek 全价） */
+      cacheRead: number
+      cacheWrite: number
+      /** 单价的币种，缺省 USD。DeepSeek 官方原生人民币计费，配 CNY 后不过汇率 */
+      currency?: 'USD' | 'CNY'
+    }
+  >
+  /** 美元 → 人民币，**只作用于 currency 为 USD 的线路** */
   usdCny: number
+  /** 升级前按档位配的单价，留档不参与计算 */
+  legacyTierUsd?: Record<string, { in: number; out: number }>
 }
 
 /** 用量汇总（口径说明：tokens 含输入与输出，不同线路统计口径可能有差异；费用为估算值） */
@@ -189,6 +205,8 @@ interface UsageSummary {
     label: string
     count: number
     input: number
+    /** 缓存读 token：按线路的折扣率单独计价，不是全价输入（B-2） */
+    cacheRead: number
     output: number
     total: number
     costCny: number
@@ -207,6 +225,8 @@ interface AgentStreamPayload {
   models?: string[]
   /** 这一轮用的档位；出错时据此给「切换到标准模式重试」的出口 */
   tier?: TierId
+  /** B-6：回答里没有依据的引用（库里没有，或本轮从没读过） */
+  unverifiedCitations?: string[]
 }
 
 interface ArtifactInfo {
@@ -250,6 +270,7 @@ interface Window {
         notifyArtifact: boolean
       }) => Promise<{ ok: boolean }>
       setArtifactAutoIngest: (v: boolean) => Promise<{ ok: boolean }>
+      setShowCost: (v: boolean) => Promise<{ ok: boolean }>
       setSensitiveMode: (allowAi: boolean, allowCloud: boolean) => Promise<{ ok: boolean }>
     }
     ai: {

@@ -6,7 +6,8 @@ import { app, type BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { agentEnv } from '../ai/provider'
 import { resolveTierForRequest, normalizeTier, DEFAULT_TIER, type TierId } from '../ai/tiers'
-import { appendUsage, type UsageTaskType } from '../usage'
+import { appendUsage, tokensOf, type UsageTaskType } from '../usage'
+import { routeOf } from '../usage/pricing'
 import { vaultManager } from '../vault'
 import { searchCloud } from '../knowledge/client'
 import { pipelineBin } from '../lib/pipeline'
@@ -26,6 +27,12 @@ export interface AgentStreamPayload {
   models?: string[]
   /** 这一轮用的档位；出错时渲染层据此给「切换到标准模式重试」的出口 */
   tier?: TierId
+  /**
+   * B-6：回答里**没有依据**的引用。分两种，都在这里：
+   * 库里根本没有这篇（纯编造），或库里有但这一轮从没读过它（张冠李戴）。
+   * 提示词只要求"标注来源"，没有任何机制保证标的是对的——这就是那个机制。
+   */
+  unverifiedCitations?: string[]
 }
 
 /** SDK 的 CLI 是平台二进制；打包后 asar 内路径无法 spawn（ENOTDIR），显式指到真实位置 */
@@ -140,6 +147,7 @@ export class AgentManager {
 
 规则：
 1. 回答任何与用户业务/资料相关的问题前，必须先用 search_knowledge 检索库；回答中的每个关键结论句末标注来源，格式 [[笔记名]]。不许编造。
+1b. **只许引用你这一轮真正看过的文件**：检索命中并读过、或用 Read 打开过的。没读过就别标它的名字——哪怕你觉得内容对得上。结论出自哪一篇就标哪一篇，不要把 A 的内容标成 B 的来源。检索结果里只看到标题没看到内容的，要么先 Read 再引，要么不引。
 2. **检索词写成 2-4 个空格分开的短关键词，不要把整句话丢进去**。检索器是关键词匹配，整句查询（如「公司今年的年度目标是什么」）会因为夹带虚词而命中不到；正确写法是「年度目标」或「年度目标 进展」。空结果时**换更短的词**再试，不要换同义词反复兜圈子。
 3. **顺序不能反：任何与库内资料相关的问题，第一个动作必须是 search_knowledge**，不许一上来就 Grep/Glob/Read 扫文件系统。文件系统工具只在两种情况下用：① 检索已经无结果；② 检索命中之后去读那几篇笔记、或需要跨多篇枚举比对。
 4. **检索返回空 ≠ 库里没有**。断言"库里没有"之前，必须先用 Grep/Glob 直接扫一遍库（工作目录即库根，Grep 找内容、Glob 找文件名），扫完仍无才能说没有。需要读全文时用 Read。
@@ -197,6 +205,13 @@ export class AgentManager {
 
     // 这一轮真的调过哪些工具 → 决定用量记录里的任务类型（做 PPT / 做文档 / 纯对话）
     const toolsUsed = new Set<string>()
+    /**
+     * B-6：这一轮**真正被摆到模型面前**的笔记路径。来源两处：
+     * `search_knowledge` 返回的命中（我们自己的工具，直接记）、以及 `Read` 的入参。
+     * 收尾时拿它校验回答里的每一条 `[[…]]`——引用了没看过的东西就是没有依据
+     */
+    const surfaced = new Set<string>()
+    const noteKey = (p: string): string => p.replace(/\.md$/i, '').toLowerCase()
     const startedAt = Date.now()
 
     // draft 上移主进程：切走再切回来能补齐这段时间流出的字（H-08 的对话版），
@@ -238,6 +253,7 @@ export class AgentManager {
                 return { content: [{ type: 'text', text }] }
               }
               const { hits, fuzzy } = await vaultManager.search(q)
+              for (const h of hits) surfaced.add(noteKey(h.path))
               if (!hits.length) return { content: [{ type: 'text', text: '（无命中）' }] }
               const list = hits
                 .slice(0, 6)
@@ -373,6 +389,19 @@ export class AgentManager {
           }
           continue
         }
+        // 非流式的 assistant 消息带着 tool_use 的**完整入参**——流式那条只给工具名。
+        // Read 读了哪个文件只能从这里拿到（B-6 的第二个来源）
+        if (message.type === 'assistant') {
+          const blocks = (message as { message?: { content?: unknown[] } }).message?.content ?? []
+          for (const b of blocks as Array<{ type?: string; name?: string; input?: Record<string, unknown> }>) {
+            if (b?.type !== 'tool_use') continue
+            const fp = b.input?.file_path ?? b.input?.path
+            if (typeof fp === 'string' && fp) {
+              surfaced.add(noteKey(fp.startsWith(root) ? fp.slice(root.length).replace(/^\/+/, '') : fp))
+            }
+          }
+          continue
+        }
         if (message.type === 'result') {
           const text = message.subtype === 'success' ? message.result : `出错：${message.subtype}`
           // 服务端实际用的模型：对不上就是被端点静默换掉了（诊断日志留一行 + 记进用量）
@@ -393,13 +422,21 @@ export class AgentManager {
           const costUsd = 'total_cost_usd' in message ? message.total_cost_usd : undefined
           // 用量记账：**只记跑成功的那一轮**。失败的轮次（鉴权失败、线路挂了）token 通常是 0，
           // 记进去只会让「本月对话 N 次」把失败也算成用量——用户看这个数是为了估消耗，不是查故障。
-          // 失败在 Dock 与诊断日志里各有出口，不靠这里。**不挑字段、原样存**，归一化留给汇总侧
-          if (message.subtype === 'success') {
+          // 失败在 Dock 与诊断日志里各有出口，不靠这里。**不挑字段、原样存**，归一化留给汇总侧。
+          //
+          // **`subtype === 'success'` 一条守不住**（B-2 补丁，2026-08-18）：SDK 的
+          // `SDKResultSuccess` 自带 `is_error` 与 `api_error_status` 字段——上游报 403 时它照样
+          // 发 `subtype: 'success'`，只是 `is_error: true`、token 全 0。实测中转站余额耗尽那轮，
+          // 8 个失败请求全被记进了 jsonl。所以还要看 `is_error`，并且要求这一轮真的产生过 token
+          const res = message as { is_error?: boolean; api_error_status?: number | null }
+          const hasTokens = tokensOf({ usage: (message as { usage?: unknown }).usage, modelUsage }).output > 0
+          if (message.subtype === 'success' && !res.is_error && !res.api_error_status && hasTokens) {
             appendUsage({
               ts: Date.now(),
               sessionId,
               taskType: this.taskTypeOf(toolsUsed),
               tier,
+              route: routeOf(provider.baseUrl),
               expected_model: provider.model,
               resolved_model: resolved,
               models,
@@ -412,11 +449,24 @@ export class AgentManager {
               costUsd: costUsd ?? null,
             })
           }
+          // B-6：校验回答里的每一条 `[[…]]`。两种没有依据的情况都算：
+          //   ① 库里根本没有这篇  ② 库里有，但这一轮从没被检索到也没被读过
+          // **只报不改**：不自动删引用——模型有可能是从 MOC 的列表里看到的标题，
+          // 误删会把对的也删掉；把可疑的指出来，让人自己判断
+          const cited = [...new Set([...text.matchAll(/\[\[([^\]\[]+?)\]\]/g)].map((m) => m[1].split('|')[0].split('#')[0].trim()))]
+          const unverified = cited.filter((c) => {
+            const resolved = vaultManager.resolveLink(c)
+            return !resolved || !surfaced.has(noteKey(resolved))
+          })
+          if (unverified.length) {
+            log('warn', 'agent', `回答引用了没有依据的笔记：${unverified.join('、')}（本轮看过 ${surfaced.size} 篇）`)
+          }
           // 正文已经作为一条完整消息落进对话，草稿使命结束
           tasks.patch(taskId, { draft: '', toolLine: undefined, sdkSessionId: message.session_id } as Partial<AgentTask>)
           this.emit({
             sessionId,
             kind: 'assistant',
+            unverifiedCitations: unverified.length ? unverified : undefined,
             text,
             sdkSessionId: message.session_id,
             costUsd,

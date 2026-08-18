@@ -42,11 +42,23 @@ const costTokens = (cny: number, tokens: number): string =>
   tokens > 0 ? `约 ${money(cny)} · ${fmt(tokens)} tokens` : '—'
 
 export default function UsagePage({ onBack }: { onBack: () => void }) {
+  // 金额默认不给客户看：现在算的是**成本价**，摆出来等于把进货价摊开，
+  // 而商业化定价还没定。计价能力完整保留（jsonl / usage-report 照常），
+  // 管理员区可以打开（settings.showCost）
+  const [showCost, setShowCost] = useState(false)
   const [data, setData] = useState<UsageSummary | null>(null)
   const [loading, setLoading] = useState(true)
 
+  /**
+   * 每次刷新都把 `showCost` 一起重新读一遍。
+   *
+   * 这里漏过一次：`showCost` 只有 `useState(false)`，从来没读过设置——
+   * 管理员区那个开关写进了配置，用量页却永远拿不到，金额被永久隐藏。
+   * 类型检查抓不到（状态本来就是 boolean），走查断言才抓得到，所以两件事都放在 `load` 里。
+   */
   const load = (): void => {
     setLoading(true)
+    void window.api.settings.get().then((s) => setShowCost(!!s.showCost))
     void window.api.usage
       .summary()
       .then(setData)
@@ -114,11 +126,13 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                 <div className="mt-1 text-3xl font-semibold">{fmt(data.artifactCount)}</div>
                 <div className="text-sm text-muted">个（PPT / 文档）</div>
               </div>
+              {showCost && (
               <div data-testid="usage-cost" className="rounded-xl border border-line bg-card p-6">
                 <div className="text-sm text-muted">本月估算花费</div>
                 <div className="mt-1 text-3xl font-semibold">约 {money(data.costCny)}</div>
-                <div className="text-sm text-muted">估算值</div>
+                <div className="text-sm text-muted">估算值（成本价）</div>
               </div>
+              )}
             </div>
 
             {/* 最近 14 天柱状图：纯 CSS 柱条，不为一张小图引一整个图表库 */}
@@ -153,14 +167,14 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
             <div className="mb-6 max-w-3xl rounded-xl border border-line bg-card p-6">
               <div className="mb-1 text-md font-medium">按模式对比</div>
               <div className="mb-4 text-sm leading-5 text-muted">
-                同样一次提问，增强模式的花费远高于标准模式；这里把两边的次数、tokens 与估算花费并排放，方便判断值不值。
+                同样一次提问，增强模式的消耗远高于标准模式；这里把两边的次数与 tokens 并排放，方便判断值不值。
               </div>
               <div data-testid="usage-by-tier" className="grid grid-cols-2 gap-4">
                 {data.byTier.map((t) => (
                   <div key={t.tier} data-testid={`usage-tier-${t.tier}`} className="rounded-lg bg-bg p-4">
                     <div className="text-base font-medium">{t.label}</div>
                     {/* 次数 / tokens / 花费 三列并排：一眼就能比出"同样几次，钱差多少" */}
-                    <div className="mt-3 grid grid-cols-3 gap-2">
+                    <div className={`mt-3 grid gap-2 ${showCost ? 'grid-cols-3' : 'grid-cols-2'}`}>
                       <div>
                         <div className="text-xl font-semibold">{fmt(t.count)}</div>
                         <div className="text-xs text-muted">次</div>
@@ -169,13 +183,17 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                         <div className="text-xl font-semibold">{t.total > 0 ? fmt(t.total) : '—'}</div>
                         <div className="text-xs text-muted">tokens</div>
                       </div>
-                      <div>
-                        <div className="text-xl font-semibold">约 {money(t.costCny)}</div>
-                        <div className="text-xs text-muted">估算花费</div>
-                      </div>
+                      {showCost && (
+                        <div>
+                          <div className="text-xl font-semibold">约 {money(t.costCny)}</div>
+                          <div className="text-xs text-muted">估算花费</div>
+                        </div>
+                      )}
                     </div>
+                    {/* 缓存读单列出来：它在总量里常占大头，但计价按线路折扣率单独算，
+                        不说明的话「tokens 很多但花费不高」看着像算错了（B-2） */}
                     <div className="mt-3 border-t border-line pt-2 text-sm text-muted">
-                      输入 {fmt(t.input)} · 输出 {fmt(t.output)}
+                      输入 {fmt(t.input)} · 缓存读 {fmt(t.cacheRead)} · 输出 {fmt(t.output)}
                     </div>
                   </div>
                 ))}
@@ -190,7 +208,7 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                   <tr className="bg-table-head text-sm text-muted">
                     <th className="rounded-l-md px-3 py-2 text-left font-normal">类型</th>
                     <th className="px-3 py-2 text-right font-normal">次数</th>
-                    <th className="px-3 py-2 text-right font-normal">花费 · tokens</th>
+                    <th className="px-3 py-2 text-right font-normal">{showCost ? '花费 · tokens' : 'tokens'}</th>
                     <th className="rounded-r-md px-3 py-2 text-right font-normal">耗时中位数</th>
                   </tr>
                 </thead>
@@ -199,22 +217,38 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                     <tr key={r.type} className="border-b border-line last:border-0">
                       <td className="px-3 py-2">{r.label}</td>
                       <td className="px-3 py-2 text-right">{fmt(r.count)}</td>
-                      <td className="px-3 py-2 text-right">{costTokens(r.costCny, r.tokens)}</td>
+                      <td className="px-3 py-2 text-right">
+                        {showCost ? costTokens(r.costCny, r.tokens) : r.tokens > 0 ? `${fmt(r.tokens)} tokens` : '—'}
+                      </td>
                       <td className="px-3 py-2 text-right">{r.medianMs > 0 ? `${(r.medianMs / 1000).toFixed(1)}s` : '—'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
               <div data-testid="usage-token-note" className="mt-3 text-sm leading-5 text-muted">
-                tokens 含输入与输出，不同线路统计口径可能有差异；入库打标由后台程序调用，多数情况下拿不到
-                token 数，只记次数（显示为「—」）。
+                tokens 含输入、缓存读与输出；入库打标由后台程序调用，拿不到 token 数，只记次数（显示为「—」）。
               </div>
             </div>
 
             {/* 全页脚注：别让人拿这个数去对账 */}
-            <div data-testid="usage-cost-note" className="mb-6 max-w-3xl text-sm leading-5 text-muted">
-              费用为估算值，以实际账单为准。
-            </div>
+            {showCost && (
+              <div data-testid="usage-cost-note" className="mb-6 max-w-3xl text-sm leading-5 text-muted">
+                费用为估算值（成本价，非客户报价），以实际账单为准。
+                <span data-testid="usage-cache-note">
+                  重复内容命中缓存后按折扣价计费（折扣按模型不同），所以 tokens 多不等于花费高。
+                </span>
+                单价按实际线路取——同一个模型走不同线路可能差好几倍。
+                {/* 这条得写明白：拿不到 token 就没法计价，这笔钱确实不在上面那个数里面。
+                    实测过一天：入库打标那条线的花费能盖过对话，只看上面的数会严重低估 */}
+                <span data-testid="usage-scope-note" className="mt-1 block">
+                  上面的花费<b>只含对话与做文档</b>；入库打标拿不到 token，没有计入——
+                  批量入库当月，实际账单会明显高于这里的估算。
+                </span>
+                <span data-testid="usage-offpeak-note" className="mt-1 block">
+                  DeepSeek 官方存在分时计价（同一模型不同时段单价实测差一倍），这里按固定单价估，两个方向都会有偏差。
+                </span>
+              </div>
+            )}
           </>
         )
       )}

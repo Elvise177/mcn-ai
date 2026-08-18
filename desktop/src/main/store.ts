@@ -52,6 +52,15 @@ interface StoreSchema {
    *   允许 AI 打标           = true  / false
    *   与普通文件相同          = true  / true
    */
+  /**
+   * 用量页是否显示金额（2026-08-18 起**默认关闭**）。
+   *
+   * 现在显示的是**成本价**——把它摆给客户看，等于把我们的进货价摊开；
+   * 而商业化定价还没定，页面上先只留「次数 / 档位对比 / token 数」这些量。
+   * 计价能力本身完整保留：jsonl 照常记、`usage-report.mjs` 照常出成本表（那是给我们自己看的），
+   * 管理员区可以打开这个开关看金额。将来按谈定的客户价出账时再考虑对客户开放。
+   */
+  showCost: boolean
   sensitiveAllowAi: boolean
   sensitiveAllowCloud: boolean
   /** 密钥指纹用的随机盐（不是秘密，见 secrets.ts） */
@@ -75,6 +84,7 @@ export const store = new Store<StoreSchema>({
     dingtalkNotifyArtifact: true,
     bizSyncEnabled: false,
     artifactAutoIngest: false,
+    showCost: false,
     sensitiveAllowAi: false,
     sensitiveAllowCloud: false,
   },

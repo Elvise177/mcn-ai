@@ -9,7 +9,7 @@ import { VaultWizard } from './components/VaultWizard'
 import logo from './assets/logo.png'
 import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
-import { errText } from './lib/err'
+import { errText, zhError } from './lib/err'
 import { startTaskSync, useTask } from './hooks/useTasks'
 import { TaskDock } from './components/TaskDock'
 import { OfflineBar } from './components/OfflineBar'
@@ -110,11 +110,18 @@ export default function App() {
     })
     const offStream = window.api.chat.onStream((p) => {
       if (p.kind === 'assistant' && p.text != null) {
-        appendMessage(p.sessionId, { role: 'assistant', text: p.text }, p.sdkSessionId)
+        // B-6：引用了这一轮没看过的笔记就在气泡下面挂一行——**只提示不删**，
+        // 模型有可能是从 MOC 的列表里看到的标题，误删会把对的也删掉
+        const note = p.unverifiedCitations?.length
+          ? `\n\n> ⚠️ 以下来源本轮并未真正读取，请自行核对：${p.unverifiedCitations.map((c) => `[[${c}]]`).join('、')}`
+          : ''
+        appendMessage(p.sessionId, { role: 'assistant', text: p.text + note }, p.sdkSessionId)
       } else if (p.kind === 'error') {
         // error:true → 气泡里挂「重试」（M-11）。以前出错只留一段 ⚠️ 文字，
-        // 用户要重试只能把刚才那段话重新打一遍
-        appendMessage(p.sessionId, { role: 'assistant', text: `⚠️ ${p.text}`, error: true })
+        // 用户要重试只能把刚才那段话重新打一遍。
+        // 文案过 zhError：上游的英文原文（如 403 balance insufficient）直接抛给客户
+        // 会把排查方向带偏（B-5/T-02）
+        appendMessage(p.sessionId, { role: 'assistant', text: `⚠️ ${zhError(String(p.text ?? ''))}`, error: true })
       }
     })
     return () => {
@@ -780,6 +787,41 @@ function TierConfigRow({ tier, onChanged }: { tier: AiTier; onChanged: () => voi
  * 线路加价、官方调价、汇率变动都在这儿改，不用发版；`scripts/usage-report.mjs`
  * 读的是同一份落盘配置，不会出现"页面一个价、脚本另一个价"。
  */
+/**
+ * 用量页要不要给客户看金额（2026-08-18 起默认关闭）。
+ *
+ * 现在算出来的是**成本价**——摆给客户看等于把进货价摊开，而商业化定价还没定。
+ * 计价能力本身完整保留：jsonl 照常记、`usage-report.mjs` 照常出成本表（给我们自己看）。
+ * 将来按谈定的客户价出账时，再考虑对客户开放（见 HANDOFF roadmap 的商业化备忘）。
+ */
+function ShowCostToggle() {
+  const [on, setOn] = useState(false)
+  useEffect(() => {
+    void window.api.settings.get().then((s) => setOn(!!s.showCost))
+  }, [])
+  return (
+    <label className="flex cursor-pointer items-start gap-2 border-b border-line pb-2 text-md">
+      <input
+        type="checkbox"
+        data-testid="show-cost-toggle"
+        checked={on}
+        onChange={(e) => {
+          setOn(e.target.checked)
+          void window.api.settings.setShowCost(e.target.checked)
+        }}
+        className="mt-1 accent-accent"
+      />
+      <span>
+        在用量页显示金额
+        <span className="block text-sm leading-5 text-muted">
+          默认关闭。现在显示的是**成本价**，不是客户报价——按量计费定下来之前不要开给客户看。
+          关闭只影响用量页，用量记录与开发者脚本照常记完整成本。
+        </span>
+      </span>
+    </label>
+  )
+}
+
 function PricingRow({ tiers }: { tiers: AiTier[] }) {
   const [p, setP] = useState<UsagePricing | null>(null)
   useEffect(() => {
@@ -795,47 +837,101 @@ function PricingRow({ tiers }: { tiers: AiTier[] }) {
     value: number,
     onSave: (v: number) => void,
     width = 'w-24'
-  ): ReactNode => (
-    <input
-      data-testid={testId}
-      defaultValue={value}
-      key={`${testId}:${value}`}
-      onBlur={(e) => {
-        const v = Number(e.target.value)
-        if (Number.isFinite(v) && v >= 0) onSave(v)
-      }}
-      className={`${width} rounded-md border border-line bg-bg px-2 py-1 text-right font-mono text-sm outline-none focus:border-accent`}
-    />
-  )
+  ): ReactNode => {
+    /**
+     * 缓存读倍率是分数（官方线路 = 1/30 = 0.0333…），原样铺进输入框会被框宽截成
+     * 「0.0333:」这种看着像坏了的字符串。所以显示端截到 5 位小数。
+     * 但**截过的值不能回写**——运维只是路过点了一下别的地方，倍率就被悄悄改掉了。
+     * 所以失焦时先跟原值比，差在显示精度以内就当没动过。
+     */
+    const shown = Number(value.toFixed(5))
+    return (
+      <input
+        data-testid={testId}
+        defaultValue={shown}
+        key={`${testId}:${value}`}
+        onBlur={(e) => {
+          const v = Number(e.target.value)
+          if (!Number.isFinite(v) || v < 0) return
+          if (Math.abs(v - value) < 1e-5) return
+          onSave(v)
+        }}
+        className={`${width} rounded-md border border-line bg-bg px-2 py-1 text-right font-mono text-sm outline-none focus:border-accent`}
+      />
+    )
+  }
 
   if (!p) return null
+  const ROUTE_ZH: Record<string, string> = {
+    deepseek: 'DeepSeek 官方',
+    aihubmix: 'aihubmix 中转站',
+    custom: '自定义线路',
+  }
   return (
-    <div data-testid="pricing-config" className="space-y-2 rounded-lg bg-bg p-4">
+    <div data-testid="pricing-config" className="space-y-3 rounded-lg bg-bg p-4">
       <div className="text-base font-medium">计价（估算用）</div>
       <div className="text-sm leading-5 text-muted">
-        每百万 token 的美元单价，按档位配；用量页显示的人民币 = 单价 × 用量 × 汇率。与线路的计费页核对后再改。
+        每百万 token 的单价，按线路配——同一个模型走不同线路价格可能差好几倍
+        （实测 deepseek-v4-pro：官方 ¥4.5，中转站 $1.69 ≈ ¥12.2）。
+        「缓存读」是缓存命中部分的价格倍率。
+        <span className="block">
+          注意币种跟着线路走：DeepSeek 官方按人民币计费，填人民币、不过汇率；中转站按美元计费。
+        </span>
       </div>
-      {(['standard', 'enhanced'] as TierId[]).map((id) => (
-        <div key={id} className="flex items-center gap-2 text-md">
-          <span className="w-20 shrink-0 text-muted">
-            {tiers.find((t) => t.id === id)?.label.replace(/（.*?）/g, '') ?? id}
-          </span>
-          <span className="text-sm text-muted">输入 $</span>
-          {numField(`price-in-${id}`, p.usd[id].in, (v) =>
-            void save({ ...p, usd: { ...p.usd, [id]: { ...p.usd[id], in: v } } })
-          )}
-          <span className="text-sm text-muted">输出 $</span>
-          {numField(`price-out-${id}`, p.usd[id].out, (v) =>
-            void save({ ...p, usd: { ...p.usd, [id]: { ...p.usd[id], out: v } } })
-          )}
+      {Object.entries(p.routes ?? {}).map(([route, r]) => {
+        const cny = r.currency === 'CNY'
+        const sym = cny ? '¥' : '$'
+        return (
+        <div key={route} className="space-y-1 border-t border-line pt-2" data-testid={`pricing-route-${route}`}>
+          <div className="text-sm font-medium">
+            {ROUTE_ZH[route] ?? route}
+            <span data-testid={`price-currency-${route}`} className="ml-2 font-normal text-muted">
+              {cny ? '人民币计价' : '美元计价，按汇率折算'}
+            </span>
+          </div>
+          {/*
+            标签和输入框必须**成组换行**：三组挤不下时，光靠 flex-wrap 会把「缓存读 ×」
+            留在上一行末尾、输入框掉到下一行，看着像两个不相干的控件。
+            （加宽缓存读那格装下 0.03333 之后就撞上了这个，截图里一眼看出来的）
+          */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-md">
+            <span className="w-16 shrink-0 text-sm text-muted">默认价</span>
+            <span className="flex items-center gap-2">
+              <span className="text-sm text-muted">输入 {sym}</span>
+              {numField(`price-in-${route}`, r.default.in, (v) =>
+                void save({ ...p, routes: { ...p.routes, [route]: { ...r, default: { ...r.default, in: v } } } })
+              )}
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="text-sm text-muted">输出 {sym}</span>
+              {numField(`price-out-${route}`, r.default.out, (v) =>
+                void save({ ...p, routes: { ...p.routes, [route]: { ...r, default: { ...r.default, out: v } } } })
+              )}
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="text-sm text-muted">缓存读 ×</span>
+              {/* w-16 装不下 0.03333（官方线路是 1/30），截图里显示成「0.0333:」像是坏了 */}
+              {numField(`price-cacheread-${route}`, r.cacheRead, (v) =>
+                void save({ ...p, routes: { ...p.routes, [route]: { ...r, cacheRead: v } } }),
+                'w-20'
+              )}
+            </span>
+          </div>
         </div>
-      ))}
-      <div className="flex items-center gap-2 text-md">
-        <span className="w-20 shrink-0 text-muted">汇率</span>
+        )
+      })}
+      <div className="flex items-center gap-2 border-t border-line pt-2 text-md">
+        <span className="w-16 shrink-0 text-sm text-muted">汇率</span>
         <span className="text-sm text-muted">1 USD =</span>
         {numField('price-usdcny', p.usdCny, (v) => void save({ ...p, usdCny: v }), 'w-20')}
-        <span className="text-sm text-muted">CNY</span>
+        <span className="text-sm text-muted">CNY　（只作用于美元计价的线路）</span>
       </div>
+      {p.legacyTierUsd && (
+        <div data-testid="pricing-legacy" className="border-t border-line pt-2 text-sm text-muted">
+          升级前按档位配的单价已留档（不参与计算）：
+          {Object.entries(p.legacyTierUsd).map(([k, v]) => ` ${k} $${v.in}/$${v.out}`).join('　')}
+        </div>
+      )}
     </div>
   )
 }

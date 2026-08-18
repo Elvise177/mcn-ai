@@ -379,16 +379,39 @@ export class InboxOrchestrator {
       const held = allowCloud ? [] : changed.filter(isSensitive)
       const toPush = allowCloud ? changed : changed.filter((r) => !isSensitive(r))
 
+      // A-7：**全量同步，不再截断**。旧实现是 `changed.slice(0, 50)`——92 篇的批量导入
+      // 只推前 50 篇，另外 42 篇永远不上云且不提示；而问库在登录态下走的是云端语义检索，
+      // 没上云的那些在对话里等于不存在，界面上却看得见摸得着。
+      // 改成分批推进 + 进度可见：每批之间发一次 stage 事件，长队列不再像卡死
+      const BATCH = 20
       let synced = 0
-      for (const rel of toPush.slice(0, 50)) {
-        const r = await ingestNote(rel)
-        if (r.ok && !r.skipped) synced++
+      let failed = 0
+      for (let i = 0; i < toPush.length; i += BATCH) {
+        if (this.canceledBy) break // 用户停了这一轮就别继续推
+        const batch = toPush.slice(i, i + BATCH)
+        for (const rel of batch) {
+          const r = await ingestNote(rel)
+          if (r.ok && !r.skipped) synced++
+          else if (!r.ok) failed++
+        }
+        if (toPush.length > BATCH && i + BATCH < toPush.length) {
+          this.send({
+            type: 'stage',
+            stage: 'cloud_sync',
+            status: 'ok',
+            message: `上云中 ${Math.min(i + BATCH, toPush.length)}/${toPush.length} 篇…`,
+          })
+        }
       }
       // 「N 篇未同步」单说会让人以为同步坏了、去查网络——而那 M 篇是按他自己的设置刻意不传的
       const holdNote = held.length ? `，其中 ${held.length} 篇为敏感文件，按设置仅存本地` : ''
-      const truncated = Math.max(0, toPush.length - 50)
-      const truncNote = truncated ? `，另有 ${truncated} 篇待同步（单轮上限 50）` : ''
-      this.send({ type: 'stage', stage: 'cloud_sync', status: 'ok', message: `${synced} 篇上云${holdNote}${truncNote}` })
+      const failNote = failed ? `，${failed} 篇失败（已进重试队列）` : ''
+      this.send({
+        type: 'stage',
+        stage: 'cloud_sync',
+        status: failed ? 'warn' : 'ok',
+        message: `${synced} 篇上云${holdNote}${failNote}`,
+      })
     } catch (e) {
       this.send({ type: 'stage', stage: 'cloud_sync', status: 'error', message: String(e) })
     }

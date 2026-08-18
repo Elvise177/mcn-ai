@@ -46,6 +46,7 @@ export function registerIpc(): void {
     aiReady: describeTier('standard').hasKey,
     keyWritePending: isSecretPending(describeTier('standard').keyField),
     apiBaseUrl: store.get('apiBaseUrl'),
+    showCost: store.get('showCost'),
     sensitiveAllowAi: store.get('sensitiveAllowAi'),
     sensitiveAllowCloud: store.get('sensitiveAllowCloud'),
     dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
@@ -62,6 +63,11 @@ export function registerIpc(): void {
 
   // A-8 三态：界面三档 → 两个独立布尔。**不追溯已入库的笔记**（PLAN §5f-3），
   // 只影响之后进投递箱的文件
+  ipcMain.handle('settings:setShowCost', (_e, v: boolean) => {
+    store.set('showCost', !!v)
+    return { ok: true }
+  })
+
   ipcMain.handle('settings:setSensitiveMode', (_e, allowAi: boolean, allowCloud: boolean) => {
     store.set('sensitiveAllowAi', !!allowAi || !!allowCloud) // 允许上云必然也允许打标
     store.set('sensitiveAllowCloud', !!allowCloud)
@@ -121,7 +127,7 @@ export function registerIpc(): void {
   ipcMain.handle('usage:months', () => listMonths())
   // 单价与汇率是运维配置：只有管理员区调它，普通用户看到的永远是算好的人民币
   ipcMain.handle('usage:pricing', () => getPricing())
-  ipcMain.handle('usage:setPricing', (_e, p: { usd?: unknown; usdCny?: number }) =>
+  ipcMain.handle('usage:setPricing', (_e, p: { routes?: unknown; usdCny?: number }) =>
     setPricing(p as Parameters<typeof setPricing>[0])
   )
 

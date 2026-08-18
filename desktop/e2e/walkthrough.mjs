@@ -601,14 +601,35 @@ await assertStandardRoute(win, '走查主实例')
     ['哪位达人最适合带霞飞的高光粉', '>0'],
     ['灰太太', '>0'], // 精确查询不许退化
     ['收支利润表', '>0'],
-    ['完美日记', '=0'], // 库里没有这个品牌
-    ['我们和完美日记的合作条款是什么', '=0'],
+    ['完美日记', '=0'], // 库里没有这个品牌——**品牌名本身必须零命中**
   ]
   const bad = []
   for (const [q, expect] of CASES) {
     const r = await win.evaluate((x) => window.api.vault.search(x), q)
     const ok = expect === '>0' ? r.total > 0 : r.total === 0
     if (!ok) bad.push(`「${q}」期望 ${expect}，实际 total=${r.total}${r.fuzzy ? '（模糊）' : ''}`)
+  }
+
+  /**
+   * 整句陷阱题的判据**不是「零命中」**——那是第一版写错的。
+   * 「我们和完美日记的合作条款是什么」里除了不存在的品牌名，还含着库里真实存在的
+   * 「合作条款」，检索器给它一条模糊命中是**对的**。92 篇的小库里恰好没这个词，
+   * 所以当时通过了；换到 372 篇的真实库就暴露了断言写歪。
+   *
+   * 真正要守的是：**张冠李戴的原料不许被捞出来**——库里那两篇品牌年框合作，
+   * 一旦出现在「完美日记」的检索结果里，模型就有机会把它们的条款安到完美日记头上。
+   */
+  {
+    const q = '我们和完美日记的合作条款是什么'
+    const r = await win.evaluate((x) => window.api.vault.search(x), q)
+    const hit = (r.hits ?? []).map((h) => h.path)
+    const contaminated = hit.filter((p) => /年框合作/.test(p))
+    if (contaminated.length) {
+      bad.push(`「${q}」把品牌年框合作捞了出来（张冠李戴的原料）：${contaminated.join('、')}`)
+    }
+    if (!r.fuzzy && r.total > 0) {
+      bad.push(`「${q}」返回了**精确**命中 ${r.total} 条——库里没有这个品牌，精确命中说明闸门失效`)
+    }
   }
   if (bad.length) throw new Error('B-1 检索回归失败：\n  ' + bad.join('\n  '))
   console.log(`B-1 检索回归 ✓ ${CASES.length} 条全过`)
@@ -775,18 +796,44 @@ try {
     const n = await win.locator('[data-testid="toast"]').count()
     if (n !== 3) throw new Error(`连点 5 次后 toast 没有限流到 3 条：${n}`)
     await snap('40c-toast-最多三条', 100)
-    // 悬停暂停：默认 3.2 秒，悬停 5 秒后被悬停的那条必须还在（不暂停的话早没了）
-    await win.locator('[data-testid="toast"]').first().hover()
+    /**
+     * 「悬停暂停」和「点击关闭」拆成两段互不依赖的验证，各自用一条**新发的** toast。
+     *
+     * 这一步反复假红过两次，两次都是断言自己的竞态，不是产品的问题：
+     *  · 第一次：拿 `.first()`（最老那条）去比 3.2 秒倒计时——它的寿命被前面 5 连点和截图
+     *    耗掉一大截，等于跟自己的倒计时赛跑；判据还只看总数，别的 toast 也能满足
+     *  · 第二次：悬停验完之后接着点同一条。可中间隔着一张截图，鼠标一离开倒计时就恢复，
+     *    等点它的时候人早没了（`Element is not attached to the DOM`）
+     * 所以现在每段都从「发一条新的」开始，谁也不指望上一段留下的元素还活着。
+     */
+    const emitToast = async () => {
+      await win.click('button[title="添加附件（即将支持）"]')
+      await win.waitForTimeout(150)
+      const h = await win.locator('[data-testid="toast"]').last().elementHandle()
+      if (!h) throw new Error('补发的 toast 没出现，拿不到句柄')
+      return h
+    }
+    const alive = (h) => h.evaluate((el) => el.isConnected).catch(() => false)
+
+    // 段一 · 悬停暂停：默认 3.2 秒，悬停 5 秒后这一条必须还在
+    const hovered = await emitToast()
+    await hovered.hover()
     await win.waitForTimeout(5000)
+    if (!(await alive(hovered)))
+      throw new Error('悬停 5 秒后被悬停的那条 toast 仍自己消失了（倒计时没暂停）')
     const stay = await win.locator('[data-testid="toast"]').count()
-    if (stay < 1) throw new Error('悬停 5 秒后 toast 还是自己消失了（倒计时没暂停）')
     await snapHover('40d-toast-悬停暂停倒计时')
-    // 点击关闭：点一下立刻少一条
-    await win.locator('[data-testid="toast"]').first().click()
+
+    // 段二 · 点击关闭：另发一条，点下去必须立刻从 DOM 上消失（不依赖段一那条还在不在）
+    const clicked = await emitToast()
+    await clicked.click()
     await win.waitForTimeout(250)
+    if (await alive(clicked)) throw new Error('点击没有关掉 toast')
     const after = await win.locator('[data-testid="toast"]').count()
-    if (after !== stay - 1) throw new Error(`点击没有关掉 toast：${stay} → ${after}`)
-    console.log('L-03 toast ✓', JSON.stringify({ 连点5次同屏: n, 悬停5秒后: stay, 点击后: after }))
+    console.log(
+      'L-03 toast ✓',
+      JSON.stringify({ 连点5次同屏: n, 悬停5秒后仍在: stay, 点击关闭后同屏: after })
+    )
     await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
   }
 
@@ -1295,7 +1342,11 @@ try {
 
   // ---- H-11 第三态：有词但零命中 → 「没找到「X」」+ 清空按钮，绝不能画成整棵文件树 ----
   {
-    const nonsense = 'zzz这个词库里一定没有zzz'
+    // **必须是真·生造词**：原来用的 'zzz这个词库里一定没有zzz' 是常用词拼的句子
+    // （这个/词库/一定/没有），B-1 的模糊回退会正常地捞到东西，零命中态就永远测不到。
+    // 也别用「霍格沃茨」这类真实存在的专名——哪天库里进了本小说它就撞了。
+    // 生僻字组合才是稳的：真实语料里不会出现，也不会哪天变成真词
+    const nonsense = 'zzqx月半仚'
     const leavesBefore = await win.locator('[data-testid="tree-col"] button.block.truncate').count()
     await win.fill('input[placeholder="搜索库…"]', nonsense)
     await win.locator('[data-testid="search-empty"]').waitFor({ timeout: 15000 })
@@ -2068,14 +2119,39 @@ try {
       throw new Error('管理员区没有计价配置')
     const rate = await win.locator('[data-testid="price-usdcny"]').inputValue()
     if (Number(rate) !== 7.2) throw new Error(`默认汇率不是 7.2：${rate}`)
-    const enhIn = await win.locator('[data-testid="price-in-enhanced"]').inputValue()
-    const enhOut = await win.locator('[data-testid="price-out-enhanced"]').inputValue()
-    if (Number(enhIn) !== 15 || Number(enhOut) !== 75)
-      throw new Error(`增强档默认单价不对：${enhIn}/${enhOut}`)
+    /**
+     * B-2 起计价**按线路**配，不再按档位：钱是按线路收的，同一个 deepseek-v4-pro
+     * 在官方 ¥4.5、在中转站 $1.69≈¥12.2，差 2.7 倍。所以这里断言的是线路而不是档位。
+     *
+     * 单价必须逐个钉死数值，不能只断言"存在"：这几个数是从真实账单抄来的，
+     * 被顺手改回估值也不会有任何报错——只会让用量页安静地少算一半的钱。
+     */
+    const dsIn = await win.locator('[data-testid="price-in-deepseek"]').inputValue()
+    const dsOut = await win.locator('[data-testid="price-out-deepseek"]').inputValue()
+    const dsCache = await win.locator('[data-testid="price-cacheread-deepseek"]').inputValue()
+    if (Number(dsIn) !== 4.5 || Number(dsOut) !== 13.5 || Math.abs(Number(dsCache) - 1 / 30) > 1e-4)
+      throw new Error(`DeepSeek 官方线路默认价不对：输入 ${dsIn} / 输出 ${dsOut} / 缓存读倍率 ${dsCache}`)
+    const ahIn = await win.locator('[data-testid="price-in-aihubmix"]').inputValue()
+    const ahCache = await win.locator('[data-testid="price-cacheread-aihubmix"]').inputValue()
+    if (Number(ahIn) !== 5 || Number(ahCache) !== 1)
+      throw new Error(`aihubmix 线路默认价不对：输入 ${ahIn} / 缓存读倍率 ${ahCache}`)
+    // 币种跟着线路走：官方原生人民币不过汇率，中转站按美元折算。
+    // 这条错了不会崩，只会让官方线路的估算整体差 7 倍——必须断言到界面上看得见的那句话
+    const dsCur = await win.locator('[data-testid="price-currency-deepseek"]').innerText()
+    const ahCur = await win.locator('[data-testid="price-currency-aihubmix"]').innerText()
+    if (!dsCur.includes('人民币') || !ahCur.includes('美元'))
+      throw new Error(`线路币种标注不对：deepseek「${dsCur}」aihubmix「${ahCur}」`)
     // 落盘之后脚本才读得到同一份（usage-report.mjs 的单一真相源）
     const onDisk = await win.evaluate(() => window.api.usage.pricing())
-    if (onDisk.usdCny !== 7.2 || onDisk.usd.enhanced.in !== 15)
+    if (onDisk.usdCny !== 7.2 || onDisk.routes?.deepseek?.default?.in !== 4.5)
       throw new Error('计价配置没有落盘：' + JSON.stringify(onDisk))
+    if (onDisk.routes.deepseek.currency !== 'CNY' || onDisk.routes.aihubmix.currency !== 'USD')
+      throw new Error('线路币种没落盘：' + JSON.stringify(onDisk.routes.deepseek.currency))
+    // 出厂价版本号：错价靠它才能盖过老机器上的存档（见 pricing.ts 的 PRICING_REV）
+    if (onDisk.rev !== 3) throw new Error(`计价配置版本不对：${onDisk.rev}`)
+    // 缓存读倍率必须分线路存——两条线合成一个数就等于把 B-2 的核心抹掉了
+    if (onDisk.routes.deepseek.cacheRead === onDisk.routes.aihubmix.cacheRead)
+      throw new Error('两条线路的缓存读倍率相同，按线路分表没生效')
     await win.locator('[data-testid="pricing-config"]').scrollIntoViewIfNeeded()
     await snap('10i-管理员区-计价配置', 300)
     console.log('计价配置 ✓', JSON.stringify(onDisk))
@@ -2176,8 +2252,11 @@ try {
     const usageDir = join(userData, 'usage')
     mkdirSync(usageDir, { recursive: true })
     const stub = [
-      { ts: Date.now() - 86400000, sessionId: 'e2e-1', taskType: 'chat', tier: 'standard', expected_model: 'deepseek-v4-pro', resolved_model: 'deepseek-v4-pro', models: ['deepseek-v4-pro'], degraded: false, durationMs: 4200, usage: { usage: { input_tokens: 900, output_tokens: 300 }, modelUsage: { 'deepseek-v4-pro': { inputTokens: 900, outputTokens: 300 } } } },
-      { ts: Date.now() - 3600000, sessionId: 'e2e-2', taskType: 'make-ppt', tier: 'enhanced', expected_model: 'claude-opus-5', resolved_model: 'claude-opus-5', models: ['claude-opus-5'], degraded: false, durationMs: 52000, usage: { usage: { input_tokens: 22000, output_tokens: 4000 }, modelUsage: { 'claude-opus-5': { inputTokens: 22000, outputTokens: 4000 } } } },
+      // B-2 起记录带 `route`：钱按线路收，同一模型在官方与中转站差 6 倍
+      { ts: Date.now() - 86400000, sessionId: 'e2e-1', taskType: 'chat', tier: 'standard', route: 'deepseek', expected_model: 'deepseek-v4-pro', resolved_model: 'deepseek-v4-pro', models: ['deepseek-v4-pro'], degraded: false, durationMs: 4200, usage: { usage: { input_tokens: 900, output_tokens: 300 }, modelUsage: { 'deepseek-v4-pro': { inputTokens: 900, outputTokens: 300 } } } },
+      // 增强档带 100000 缓存读：B-2 的核心（缓存按模型倍率折价）此前完全没被走查覆盖，
+      // 不给缓存 token 的话，把倍率改成 1 或 0.1 这条断言都发现不了
+      { ts: Date.now() - 3600000, sessionId: 'e2e-2', taskType: 'make-ppt', tier: 'enhanced', route: 'aihubmix', expected_model: 'claude-opus-5', resolved_model: 'claude-opus-5', models: ['claude-opus-5'], degraded: false, durationMs: 52000, usage: { usage: { input_tokens: 22000, cache_read_input_tokens: 100000, output_tokens: 4000 }, modelUsage: { 'claude-opus-5': { inputTokens: 22000, cacheReadInputTokens: 100000, outputTokens: 4000 } } } },
       { ts: Date.now() - 600000, sessionId: 'e2e-3', taskType: 'ingest-tag', tier: null, expected_model: 'deepseek-v4-flash', resolved_model: null, durationMs: 91000, usage: null, calls: 1 },
     ]
     const before = await win.evaluate(() => window.api.usage.summary())
@@ -2203,40 +2282,85 @@ try {
     for (const [id, name] of [
       ['usage-chat-count', '本月对话大数字'],
       ['usage-artifact-count', '本月产物大数字'],
-      ['usage-cost', '本月估算花费大数字'],
       ['usage-daily', '最近 14 天柱状图'],
       ['usage-by-tier', '按档位对比区'],
       ['usage-by-type', '按任务类型表'],
       ['usage-token-note', 'tokens 口径脚注'],
-      ['usage-cost-note', '费用估算脚注'],
+      // usage-cost / usage-cost-note 默认**不该存在**：金额对客户隐藏（2026-08-18），
+      // 它们只在管理员区打开开关后出现，验在下面那段
     ]) {
       if (!(await win.locator(`[data-testid="${id}"]`).count())) throw new Error(`用量页缺少${name}`)
     }
 
-    // ---- 人民币化：页面上的钱一律是 ¥，且看不到任何美元单价 ----
+    // ---- 金额对客户隐藏；管理员开关打开后按成本价正确显示 ----
     {
-      const costText = (await win.locator('[data-testid="usage-cost"]').innerText()).trim()
-      if (!/约\s*¥/.test(costText)) throw new Error(`本月估算花费不是「约 ¥…」：「${costText}」`)
-      // 桩数据：增强档 22000/4000 tokens × ($15/$75 per 1M) × 7.2 ≈ ¥4.54，标准档几乎为 0
+      /**
+       * **金额默认不给客户看**（2026-08-18）：页面算的是成本价，摆出来等于把进货价摊开，
+       * 而商业化定价还没定。所以普通模式下整页不许出现任何 ¥ 金额；
+       * 计价能力本身没删，管理员区那颗开关打开后金额要能正确显示。
+       */
+      const noMoneyText = (await win.locator('main').innerText()).replace(/\s+/g, ' ')
+      if (/¥/.test(noMoneyText))
+        throw new Error(`普通模式的用量页出现了金额：「${noMoneyText.slice(0, 200)}」`)
+      if (await win.locator('[data-testid="usage-cost"]').count())
+        throw new Error('普通模式仍然渲染了「本月估算花费」卡片')
+      // 量还得在：次数与 tokens 是客户判断消耗的依据，不能跟着金额一起藏掉
       const enhCost = (await win.locator('[data-testid="usage-tier-enhanced"]').innerText()).replace(/\s+/g, ' ')
-      const m = enhCost.match(/¥([\d.]+)/)
-      if (!m) throw new Error(`增强档没有显示人民币花费：「${enhCost}」`)
-      const cny = Number(m[1])
-      if (!(cny > 3 && cny < 6)) throw new Error(`增强档花费换算不对（期望 ¥4.5 上下）：¥${cny}`)
-      // 三列并排：次数 / tokens / 估算花费
-      for (const col of ['次', 'tokens', '估算花费']) {
-        if (!enhCost.includes(col)) throw new Error(`档位对比区缺「${col}」列：「${enhCost}」`)
+      for (const col of ['次', 'tokens', '缓存读']) {
+        if (!enhCost.includes(col)) throw new Error(`档位对比区缺「${col}」：「${enhCost}」`)
       }
-      // 类型表的 tokens 列改成「约 ¥X.XX · N tokens」，人民币在前
+      console.log('用量页金额默认隐藏 ✓', JSON.stringify({ 档位对比: enhCost.slice(0, 80) }))
+
+      /**
+       * 打开管理员区的开关后，金额要按**成本价**正确显示。
+       * 桩数据：增强档走 aihubmix 的 claude-opus-5（$5/$25，**缓存读倍率 0.1**）
+       *   纯 input 22000 × 5    = 0.110
+       *   缓存读 100000 × 5 ×0.1 = 0.050
+       *   output  4000 × 25     = 0.100
+       *   合计 $0.26 × 7.2 ≈ **¥1.87**
+       * 单价与倍率都来自 2026-08-18 的 aihubmix 账单反解（B-2）：旧值 $15/$75 是 Anthropic
+       * 官方标价而我们走中转站；缓存倍率**按模型**——同线路上 opus 打 0.1、deepseek 不打折。
+       * 倍率若被误设回 1.0，这里会算出 ¥4.46，被下面的区间挡住。
+       */
+      await win.evaluate(() => window.api.settings.setShowCost(true))
+      await win.click('text=刷新')
+      await win.waitForTimeout(600)
+      const withCost = (await win.locator('[data-testid="usage-tier-enhanced"]').innerText()).replace(/\s+/g, ' ')
+      const m = withCost.match(/¥([\d.]+)/)
+      if (!m) throw new Error(`开关打开后仍未显示金额：「${withCost}」`)
+      const cny = Number(m[1])
+      if (!(cny > 1.6 && cny < 2.2))
+        throw new Error(`增强档花费换算不对（期望 ¥1.87 上下；¥4.4 左右说明缓存倍率没生效）：¥${cny}`)
+      console.log('管理员开关打开后金额 ✓', JSON.stringify({ 增强档: `¥${cny}` }))
+      /**
+       * 金额旁边这两句话是**对账查出来的**，不是凑文案：
+       *  · 入库打标拿不到 token 就没计价——实测一天，账单上 flash 有 27.8 万 input，
+       *    账本里只有 4,302，98.7% 的打标花费不在这个数里。不写明白，用户会拿它当总花费。
+       *  · 官方分时计价，同一模型不同时段单价实测差一倍，固定单价估不准。
+       * 两句都删得掉、删了也不会报错，所以在这里钉死。
+       */
+      const costNote = (await win.locator('[data-testid="usage-cost-note"]').innerText()).replace(/\s+/g, '')
+      if (!/入库打标.*没有计入|没有计入/.test(costNote))
+        throw new Error(`费用脚注没说明"打标不计入"：「${costNote}」`)
+      if (!/分时计价/.test(costNote)) throw new Error(`费用脚注没说明分时计价：「${costNote}」`)
+      if (/\*\*/.test(costNote)) throw new Error(`费用脚注里有没渲染的 Markdown 星号：「${costNote}」`)
+      // 开金额是运维态，那两条「不含打标 / 分时有偏差」的说明只在这个态下才出现，
+      // 单独留一张截图给人工验收——默认态那两张（47b/47c）里根本看不到它们
+      await win.locator('[data-testid="usage-cost-note"]').scrollIntoViewIfNeeded()
+      await snap('47d-用量页-管理员开金额与口径说明', 400)
+      await win.evaluate(() => window.api.settings.setShowCost(false))
+      await win.click('text=刷新')
+      await win.waitForTimeout(400)
+      // 关掉之后类型表只剩 tokens，不带金额
       const typeText = (await win.locator('[data-testid="usage-by-type"]').innerText()).replace(/\s+/g, ' ')
-      if (!/约 ¥[\d.<]+ · [\d,]+ tokens/.test(typeText))
-        throw new Error(`类型表没有「约 ¥X.XX · N tokens」格式：「${typeText}」`)
+      if (/¥/.test(typeText)) throw new Error(`关掉开关后类型表仍有金额：「${typeText}」`)
+      if (!/[\d,]+ tokens/.test(typeText)) throw new Error(`类型表没有 tokens 列：「${typeText}」`)
       // 整页不许出现美元单价（那是管理员区的事）
       const pageText = await win.evaluate(() => document.querySelector('main')?.innerText ?? '')
       if (/\$\d/.test(pageText)) throw new Error('用量页出现了美元单价（应当只在管理员区）')
-      const costNote = await win.locator('[data-testid="usage-cost-note"]').innerText()
-      if (!/估算值.*实际账单/.test(costNote)) throw new Error(`费用脚注不对：「${costNote}」`)
-      console.log('用量页人民币化 ✓', JSON.stringify({ 本月花费: costText, 增强档: `¥${cny}` }))
+      if (await win.locator('[data-testid="usage-cost-note"]').count())
+        throw new Error('关掉开关后费用脚注仍在（脚注只在显示金额时才该出现）')
+      console.log('用量页金额开关 ✓', JSON.stringify({ 默认: '无金额', 开关打开后增强档: `¥${cny}` }))
     }
     const bars = await win.locator('[data-testid="usage-daily"] > div').count()
     if (bars !== 14) throw new Error(`柱状图不是 14 根柱子：${bars}`)
@@ -2252,8 +2376,10 @@ try {
     })
     if (barBox.有记录的天数 < 1) throw new Error('桩数据没落到最近 14 天里')
     if (barBox.最高柱 < 20) throw new Error(`柱状图渲染出来是平的（最高柱 ${barBox.最高柱}px）`)
-    const note = await win.locator('[data-testid="usage-token-note"]').innerText()
-    if (!/口径/.test(note)) throw new Error(`tokens 脚注没说清口径：「${note}」`)
+    const note = (await win.locator('[data-testid="usage-token-note"]').innerText()).replace(/\s+/g, '')
+    // tokens 含哪几项、以及打标为什么显示「—」，两件事都得写出来
+    if (!/缓存读/.test(note) || !/只记次数/.test(note))
+      throw new Error(`tokens 脚注没说清口径：「${note}」`)
     // 配额进度条本期是隐藏的占位（将来按量计费启用）
     if (await win.locator('[data-testid="usage-quota"]').count())
       throw new Error('配额进度条本期不该显示（只是预留组件位）')

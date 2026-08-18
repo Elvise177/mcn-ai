@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, appendFileSync, readdirSync } from
 import { join } from 'path'
 import { log } from '../lib/logger'
 import { TIER_PRESETS, type TierId } from '../ai/tiers'
-import { costCny, getPricing } from './pricing'
+import { costCny, getPricing, routeOf, type TokenCounts } from './pricing'
 
 /**
  * 用量记录（按月分文件的 JSONL）。
@@ -34,6 +34,11 @@ export interface UsageRecord {
   taskType: UsageTaskType
   /** 入库打标不经档位层，记 null */
   tier: TierId | null
+  /**
+   * 这一轮真正打到哪条线路（`api.deepseek.com` / `aihubmix.com` …）。
+   * **计价按它取单价，不按档位**——同一个 deepseek-v4-pro 在官方与中转站差 6 倍（B-2）
+   */
+  route?: string | null
   /** 期望模型（档位钉死的那个） */
   expected_model: string | null
   /** 服务端实际用的模型（result.modelUsage 的第一个 key），拿不到记 null */
@@ -111,7 +116,11 @@ export function listMonths(): string[] {
 
 // ---- 归一化（只在汇总侧发生） ----
 
-const INPUT_KEYS = /^(input_tokens|inputTokens|prompt_tokens|promptTokens|cache_creation_input_tokens|cacheCreationInputTokens|cache_read_input_tokens|cacheReadInputTokens)$/
+// B-2：缓存 token **必须分开**。旧实现把 cache_read/cache_creation 一起并进 input 按基础价算，
+// 实测一轮 10 题问库高估 3.1 倍（¥153.83 vs 真实约 ¥49.79），缓存命中越高的档位高估越狠
+const INPUT_KEYS = /^(input_tokens|inputTokens|prompt_tokens|promptTokens)$/
+const CACHE_READ_KEYS = /^(cache_read_input_tokens|cacheReadInputTokens)$/
+const CACHE_WRITE_KEYS = /^(cache_creation_input_tokens|cacheCreationInputTokens)$/
 const OUTPUT_KEYS = /^(output_tokens|outputTokens|completion_tokens|completionTokens)$/
 
 /**
@@ -120,7 +129,7 @@ const OUTPUT_KEYS = /^(output_tokens|outputTokens|completion_tokens|completionTo
  * 关键一步是**先选子树**：我们把 `{ usage, modelUsage }` 整个存了下来，两边说的是同一批
  * token，直接递归求和会翻倍。modelUsage 更细（能看出轻量模型被用了多少），优先用它。
  */
-export function tokensOf(raw: unknown): { input: number; output: number } {
+export function tokensOf(raw: unknown): TokenCounts {
   let node: unknown = raw
   if (node && typeof node === 'object' && !Array.isArray(node)) {
     const o = node as Record<string, unknown>
@@ -128,18 +137,22 @@ export function tokensOf(raw: unknown): { input: number; output: number } {
     else if (o.usage && typeof o.usage === 'object') node = o.usage
   }
   let input = 0
+  let cacheRead = 0
+  let cacheWrite = 0
   let output = 0
   const walk = (v: unknown, depth: number): void => {
     if (!v || typeof v !== 'object' || depth > 4) return
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
       if (typeof val === 'number') {
         if (INPUT_KEYS.test(k)) input += val
+        else if (CACHE_READ_KEYS.test(k)) cacheRead += val
+        else if (CACHE_WRITE_KEYS.test(k)) cacheWrite += val
         else if (OUTPUT_KEYS.test(k)) output += val
       } else walk(val, depth + 1)
     }
   }
   walk(node, 0)
-  return { input, output }
+  return { input, cacheRead, cacheWrite, output }
 }
 
 const median = (xs: number[]): number => {
@@ -167,6 +180,8 @@ export interface UsageSummary {
     label: string
     count: number
     input: number
+    /** 缓存读（按线路的折扣率计价，不再当成全价输入）*/
+    cacheRead: number
     output: number
     total: number
     costCny: number
@@ -194,28 +209,29 @@ export function summarize(month = currentMonth()): UsageSummary {
   // 单价/汇率读一次就够（getPricing 顺带把默认值补齐落盘，脚本侧靠这一份）
   const pricing = getPricing()
   /** 一条记录的花费：按它自己的档位算，不同档位单价差几十倍，不能混一个均价 */
-  const recCost = (r: UsageRecord): number => {
-    const t = tokensOf(r.usage)
-    return costCny(r.tier, t.input, t.output, pricing)
-  }
+  const recCost = (r: UsageRecord): number =>
+    costCny(r.route, r.resolved_model ?? r.expected_model, tokensOf(r.usage), pricing)
 
   const byTier = (['standard', 'enhanced'] as TierId[]).map((tier) => {
     const rs = recs.filter((r) => r.tier === tier)
-    let input = 0
-    let output = 0
+    const sum: TokenCounts = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
     for (const r of rs) {
       const t = tokensOf(r.usage)
-      input += t.input
-      output += t.output
+      sum.input += t.input
+      sum.cacheRead += t.cacheRead
+      sum.cacheWrite += t.cacheWrite
+      sum.output += t.output
     }
     return {
       tier,
       label: TIER_PRESETS[tier].label,
       count: rs.length,
-      input,
-      output,
-      total: input + output,
-      costCny: costCny(tier, input, output, pricing),
+      input: sum.input,
+      cacheRead: sum.cacheRead,
+      output: sum.output,
+      total: sum.input + sum.cacheRead + sum.cacheWrite + sum.output,
+      // 逐条算再相加：同一档位里可能混着不同线路（老用户迁移期），一把均价会算错
+      costCny: rs.reduce((n, r) => n + recCost(r), 0),
     }
   })
 
@@ -224,7 +240,7 @@ export function summarize(month = currentMonth()): UsageSummary {
       const rs = recs.filter((r) => r.taskType === type)
       const tokens = rs.reduce((n, r) => {
         const t = tokensOf(r.usage)
-        return n + t.input + t.output
+        return n + t.input + t.cacheRead + t.cacheWrite + t.output
       }, 0)
       return {
         type,
