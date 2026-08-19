@@ -51,6 +51,8 @@ export function registerIpc(): void {
     showCost: store.get('showCost'),
     sensitiveAllowAi: store.get('sensitiveAllowAi'),
     sensitiveAllowCloud: store.get('sensitiveAllowCloud'),
+    /** 第一版检索口径（'local' | 'cloud'，出厂 local）。只读暴露，供走查断言与诊断报告 */
+    searchBackend: store.get('searchBackend'),
     dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
     dingtalkSecret: store.get('dingtalkSecret') ?? '',
     dingtalkNotifyInbox: store.get('dingtalkNotifyInbox'),

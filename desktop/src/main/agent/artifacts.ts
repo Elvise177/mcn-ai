@@ -46,6 +46,12 @@ export class ArtifactsWatcher {
     this.win = win
   }
 
+  /** 退出前显式关掉 watcher（见 index.ts 的 before-quit：Electron 43 起不关就退不掉） */
+  async stop(): Promise<void> {
+    await this.watcher?.close()
+    this.watcher = null
+  }
+
   async configure(vaultRoot: string): Promise<void> {
     await this.watcher?.close()
     this.dir = join(vaultRoot, '90_产物')

@@ -63,6 +63,24 @@ interface StoreSchema {
   showCost: boolean
   sensitiveAllowAi: boolean
   sensitiveAllowCloud: boolean
+  /**
+   * `search_knowledge` 走哪条检索（2026-08-19 裁决：**第一版本地优先**）。
+   *
+   * `'local'`（默认）= 本地全文检索。**它是唯一会把「文件路径」交给模型的分支**，
+   * 模型据此可以直接 Read，不用从正文摘录里猜路径。
+   * `'cloud'` = 云端三层语义检索。能力更强，但当前 `match_knowledge_chunks` 的
+   * `returns table` 里**没有 file_path**（列在 migration 011 就加了、切片也一直在写，
+   * 只是 RPC 没把它 select 出来），于是模型只拿得到正文片段：
+   *   猜路径 → Read 失败 → 再猜 → 再失败 → 只好 Grep 找 → 才读得到。
+   * 步骤流上就是连着两条「（这一步没成功）」，且拖慢整轮（HANDOFF §3-13）。
+   *
+   * **云同步没有关**：入库照常上云、embedding 照常写——只是"查"暂时不走它。
+   * 云端 RPC 修好后把这个值改成 `'cloud'` 即刻切回，数据是全的，不用补录。
+   *
+   * 切法（改完立刻生效，不用重启）：
+   *   ~/Library/Application Support/mcn-ai-desktop/config.json 里加 `"searchBackend": "cloud"`
+   */
+  searchBackend: 'local' | 'cloud'
   /** 密钥指纹用的随机盐（不是秘密，见 secrets.ts） */
   secretSalt?: string
   encryptedApiKeyFp?: string
@@ -87,6 +105,7 @@ export const store = new Store<StoreSchema>({
     showCost: false,
     sensitiveAllowAi: false,
     sensitiveAllowCloud: false,
+    searchBackend: 'local',
   },
 })
 

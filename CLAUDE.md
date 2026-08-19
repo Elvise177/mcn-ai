@@ -14,7 +14,10 @@
 ## 禁令
 
 - 禁止触碰 `~/Documents/AI/omg-dingtalk-automation`（独立交付项目，不属于本仓库）
-- Electron 版本锁死 **30.5.1**：任何依赖升级（含根目录 npm update / lockfile 变动）都不得连带升级它。原因：macOS XProtect 误杀 31+，开发者签名公证完成前不解锁
+- ~~Electron 版本锁死 **30.5.1**~~ **已解锁（2026-08-19）**：锁死的条件是"开发者签名公证完成前"，
+  签名与公证已接通（`docs/RELEASE.md` 发版手册），XProtect 误杀的根治路径走完，现为 **Electron 43.4.1**。
+  升级时抓到并修掉两条回归，改这一层前先看：`before-quit` 必须显式关 chokidar watcher（不关退不掉进程）、
+  `vault/searcher.ts` 的索引就绪闸门（开库瞬间的查询不许回 0 条）
 - 钉钉自动化相关代码（webpage/app/api/v1/automation/dingtalk、vercel.json 的 crons）
   涉及 OMG 客户在线业务，任何改动必须先向我确认，不得顺手清理
 

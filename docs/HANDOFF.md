@@ -110,9 +110,21 @@ E2E_CHAT 那 20 张旧配色基线**本轮已自然刷新，该条已知状态�
    **已知风险点**：美国曾有 `Samepage.io`（团队协作产品，Kerio 出品）——同名同类，
    海外扩张或应用商店上架时可能撞。国内注册可行性要专业检索，不要凭搜索引擎结论下判断。
    在检索出结果之前，**不要把 SamePage 印到对外物料/合同上**（界面用没问题，改名成本已经付过一次）。
-4. **苹果证书四合一**：开发者签名 + 公证 → 同时解锁 Electron 升级、去掉右键打开、消除 supabase-js 的 Node 20 警告、XProtect 误杀根治
-5. **网关**：key 不再下发客户端（§3「未解决/未做」有完整方案）
-6. **大头（Maggie）切官方直连**：她那台被 `migrateTiers` 指在中转站上，成本是官方的 2.7 倍
+4. ~~**苹果证书四合一**~~ ✅ **2026-08-19 完成**：Developer ID 签名 + 公证（`.app` 与 `.dmg` 都签都公证都订票）
+   → 客户双击直接开、不用右键、不用 `xattr`；Electron 锁一并解到 **43.4.1**（Node 24，supabase-js 的
+   Node 20 弃用警告随之消失）；XProtect 误杀的根治路径走完。发版手册见 `docs/RELEASE.md`，
+   升级抓到的两条回归见 §4-2
+5. **发版后第一优先：把大头升级到含 A-8 的版本**（指引 `docs/RELEASE.md` §0），
+   顺带把她的标准档从中转站切回官方直连（成本 2.7 倍）
+6. **云端语义检索修复单**（§3-13 裁决之后的收尾）：`match_knowledge_chunks` 的
+   `returns table` 加 `file_path` → webpage `KnowledgeMatch` → 桌面端 `CloudMatch` 与格式串，
+   顺带补相关度阈值 / 相近结果警示。做完把 `searchBackend` 从 `local` 切回 `cloud`。
+   **数据不用补录**（列早就有、切片一直在写）。**排在第 5 条之后**
+7. **自动更新源接真实地址**：当前是占位（`.invalid`），拿到阿里云 OSS 地址后按
+   `docs/RELEASE.md` §C 切换；客户增多后升级为私有 bucket 或网关鉴权
+8. **M-29 冷调用复测**：签名后要在**重启机器之后第一件事**跑 `e2e/probe-safestorage.mjs`
+   才量得到真冷态（本轮 securityd 缓存已烘热，新旧包都 0ms，**没测出结论**）
+9. **网关**：key 不再下发客户端（§3「未解决/未做」有完整方案）
 
 ---
 
@@ -147,7 +159,7 @@ Electron App（macOS arm64，v0.1.0）
 
 | 层 | 选型 | 备注 |
 |---|---|---|
-| 壳 | Electron **30.5.1（锁死）** + electron-vite + electron-builder | 见决策 §4-2，勿升级到 31+ |
+| 壳 | Electron **43.4.1**（Node 24.18.1 / Chromium 150）+ electron-vite + electron-builder | 2026-08-19 从锁死的 30.5.1 升上来，解锁条件（签名公证）已达成，见决策 §4-2 |
 | 前端 | React 18 / TypeScript / Tailwind | 聊天组件从 webpage 直搬 |
 | Agent | Claude Agent SDK（主进程直跑） | `ELECTRON_RUN_AS_NODE=1` + `options.executable=process.execPath` + SDK asarUnpack |
 | LLM 接入 | **会话级档位**（`src/main/ai/tiers.ts`）：标准=DeepSeek 官方 `deepseek-v4-pro/flash`，增强=aihubmix `claude-opus-5`；模型串**显式下发**，映射（地址/模型/key）在设置页管理员区可改 | 见 §4-17/§4-23；key 用 safeStorage 加密存储（读写规则见 §4-18），网关是 P1（§4-3） |
@@ -607,7 +619,42 @@ Electron App（macOS arm64，v0.1.0）
      模型看不出这是谁的数据。而且**云端分支没有"相近结果"警示**——本地分支模糊回退时会明说
      「（精确检索无命中，以下是相近结果，可能与问题无关）」（B-1 特意加的），云端这条完全没有
 
-   **结论（待拍板，三选一或组合）**：
+   ---
+
+   ### ✅ 已裁决（2026-08-19）：**第一版检索口径 = 本地，云端语义检索本版不启用**
+
+   **做法**：`search_knowledge` 在登录态下也走**本地全文检索**那一支——因为它是唯一
+   把 `(相对路径)` 交给模型的分支，拿到路径就能直接 Read。云端那一支**代码一行不删**，
+   靠一个配置开关切换。
+
+   | 项 | 内容 |
+   |---|---|
+   | **开关** | `store.ts` 的 `searchBackend: 'local' \| 'cloud'`，**出厂 `local`** |
+   | **切回怎么做** | `~/Library/Application Support/mcn-ai-desktop/config.json` 里加 `"searchBackend": "cloud"`。**改完立刻生效，不用重启**（每次调用现读） |
+   | **闸门在哪** | `agent/index.ts` 的 `store.get('searchBackend') === 'cloud' ? await searchCloud(q) : null` —— 一行，好查好改 |
+   | **云同步没关** | **上云与 embedding 照常跑**，只是"查"暂时不走它。云端修好后切回来即刻有完整数据，**不用补录** |
+   | **工具描述** | 已改成与实际一致的本地措辞（原文写着"返回最相关的笔记路径与片段"，那句只对本地分支成立） |
+   | **引用校验** | 本地分支 `for (const h of hits) surfaced.add(noteKey(h.path))` 对全部命中登记，**本来就对**，本次只做确认 |
+
+   **这一版顺手解掉的**：上面 ①②③ 三个问题在本地口径下都不存在——本地分支有分词与三道闸模糊回退（①）、
+   给 `[[标题]] (路径)`（②）、模糊回退时明说「以下是相近结果」（③）。
+
+   **云端修复单的工期依据（2026-08-19 只读查证，别再查一遍）**：
+
+   | 查证项 | 结果 |
+   |---|---|
+   | `knowledge_chunks.file_path` 列 | ✅ **存在**（`011_desktop_sync.sql`，切片一直在写这个字段） |
+   | `match_knowledge_chunks` RPC 的 `returns table` | ❌ **不含 file_path**（当前版 `012_fix_ranking.sql`：id / content / source_type / metadata / similarity / visibility） |
+   | `webpage` 的 `KnowledgeMatch` 接口 | ❌ 跟着 RPC，也没有（`lib/knowledge/search.ts`） |
+   | 桌面端 `CloudMatch` 接口 | ❌ 同上（`knowledge/client.ts`） |
+
+   所以云端修复 = **一条新 migration（RPC 的 returns table 加 `file_path`，select 出来）
+   + webpage 的 `KnowledgeMatch` + 桌面端 `CloudMatch` 与格式串**，顺带把相关度阈值/相近结果警示一起做掉。
+   **数据不用补录**——列早就有。**排期：大头升级之后**。
+
+   ---
+
+   **原先的三选一（留档，说明为什么选了现在这条）**：
    - **主修「工具返回」（推荐，P0）**：服务端 search 把 `file_path` 一起 select 出来（migration 011
      已经有这个字段）→ 云端结果带笔记名可引用；加相关度阈值或对齐本地分支加「以下是相近结果」警示；
      切片带上笔记标题/表头。**这条要 webpage 侧一起改，跨仓库**
@@ -748,7 +795,31 @@ Electron App（macOS arm64，v0.1.0）
 ## 4. 重要技术决策及原因
 
 1. **Electron 而非 Tauri**：Claude Agent SDK 是 Node 库，Electron 主进程可直跑，Tauri 需要额外进程桥接。Agent SDK 打包冒烟是 M0 第一天做的（风险前置）
-2. **Electron 锁 30.5.1**：macOS XProtect 会误杀 Electron 31+ 的应用（客户机实测），降到 30 规避。**根治路径 = 买开发者签名做公证**，在那之前不升级。连带效应：内置 Node 停在 20（见 bug#3）
+2. ~~**Electron 锁 30.5.1**~~ → **2026-08-19 已解锁到 43.4.1**。
+   原决策：macOS XProtect 会误杀 Electron 31+ 的应用（客户机实测），降到 30 规避，
+   **根治路径 = 买开发者签名做公证**，在那之前不升级。那条路已经走完（见 `docs/RELEASE.md` 发版手册），
+   所以锁一并解掉。连带好处：内置 Node 20 → **24.18.1**，bug#3 那条 supabase-js 的弃用警告随之消失。
+
+   **跨 13 个大版本抓到两条真回归，都修在产品层，改这一层前必读**：
+
+   ① **`before-quit` 必须显式关 chokidar watcher，否则进程退不掉。**
+   打开过知识库的实例（vault / 投递箱 / 产物三个 watcher）调 `app.quit()` 会挂住，进程一直活着。
+   Electron 30 上不关也能退。二分证据：不开库秒退（157ms）／开一个空库必挂（10s 超时进程仍活）；
+   与 `window-all-closed` **无关**——最小 Electron 应用复刻同样的 macOS「关窗不退出」行为照样秒退。
+   表现是走查在第 3 个实例处永久卡死，**没有任何报错**，只是不动了。
+
+   ② **`vault/searcher.ts` 的索引就绪闸门：开库瞬间的查询不许回 0 条。**
+   `open()` 的顺序是**先置 root → await 扫全库 → 最后才 rebuild 索引**，中间那段
+   「库已打开、索引还空着」的窗口里查询会被 worker 拿空索引秒回 0，界面照三态画成
+   「没找到「X」」——**产品在说谎**，正踩在 §2-19 规则 10b 那条规矩上。
+   **这不是 Electron 的 bug，是它把一个一直都在的窗口撑开了**：30 上扫得快、走查从没撞上，
+   43 上每轮必现（前 1~2 条查询归零，且失败条数不稳定——这个"总是最前面几条"的形状
+   正是判定它是时序而非引擎故障的依据）。修法是 `search()` 等 `rebuild()` 投出去
+   （worker 消息保序），`close()` 里 `reset()` 就绪位防换库串味，`vaultManager.search()`
+   加空库短路。走查里有**索引就绪哨兵**（B-1 最前面、不等任何东西地搜一次）守住。
+
+   顺带把 `playwright-core` 升到 1.62.1（**不是它的锅**——1.61.1 与 1.62.1 表现一致，
+   排查过程里试过，既然装了就留着）。
 3. **MVP 直连 inferera 中转站，网关放 P1**：快速验证优先（用户核心决策哲学），key 泄漏风险用低配额 key + safeStorage 缓解
 4. **私人知识层走 webpage API 而非客户端直调 RPC**：RPC 是 security definer，`p_user_id` 必须由服务端从 Bearer token 解出才可信；embedding key 也不能下发客户端。这是 M4 的安全边界设计
 5. **pipeline 用 PyInstaller onedir（非 onefile）冻结**：onefile 启动解压慢且易触发杀软；PDF/xlsx/pptx 三条转换路径先冒烟再集成；07/08 脚本的目录写死改为读 layout.json 参数化（默认=Maggie 结构保回归）

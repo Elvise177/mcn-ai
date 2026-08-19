@@ -107,6 +107,8 @@ export class VaultManager {
     this.notes.clear()
     this.dirs.clear()
     this.root = null
+    // 换库时把索引就绪位清掉：新库还没建好索引之前，不许拿旧库的结果糊弄
+    this.searcher.reset()
   }
 
   /** 按相对路径取一篇笔记（cloudSync 判 `sensitive` 用；不另建索引，直接读内存里那份） */
@@ -123,6 +125,8 @@ export class VaultManager {
   }
 
   search(q: string): Promise<SearchResult> {
+    // 没开库就没什么可等的，直接回空（否则会在 searcher 的就绪闸门上白等）
+    if (!this.root) return Promise.resolve({ hits: [], total: 0 })
     return this.searcher.search(q)
   }
 

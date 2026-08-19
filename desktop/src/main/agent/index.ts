@@ -10,6 +10,7 @@ import { appendUsage, tokensOf, type UsageTaskType } from '../usage'
 import { routeOf } from '../usage/pricing'
 import { vaultManager } from '../vault'
 import { searchCloud } from '../knowledge/client'
+import { store } from '../store'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { tasks } from '../tasks/registry'
@@ -413,11 +414,21 @@ export class AgentManager {
         tools: [
           tool(
             'search_knowledge',
-            '检索用户的个人知识库（标题/正文/标签），返回最相关的笔记路径与片段',
+            '检索用户本地知识库的全文（标题/正文/标签），返回命中笔记的**相对路径**与片段——拿到路径就能直接 Read',
             { query: z.string().describe('检索词，中文') },
             async ({ query: q }) => {
-              // 登录后走云端三层检索（平台爆款/公司共享/个人层，带语义与加权）；未登录回退本地全文
-              const cloud = await searchCloud(q)
+              /**
+               * **第一版：本地优先**（2026-08-19 裁决，开关见 `store.ts` 的 `searchBackend`）。
+               *
+               * 云端三层语义检索能力更强，但 `match_knowledge_chunks` 的 returns table
+               * 里没有 `file_path`（列早就有、切片一直在写，只是 RPC 没 select 出来），
+               * 模型只拿得到正文片段 → 猜路径 → Read 失败 → 再 Grep 找。
+               * 本地这一支给的是 `[[标题]] (相对路径)`，模型可以直接 Read。
+               *
+               * **云端代码一行不删**：把 config 里的 `searchBackend` 改成 `'cloud'` 就切回去，
+               * 上云与 embedding 照常在跑，切回来即刻有完整数据可查。
+               */
+              const cloud = store.get('searchBackend') === 'cloud' ? await searchCloud(q) : null
               if (cloud && cloud.length) {
                 const LAYER: Record<string, string> = { platform: '平台', org: '公司', private: '我的' }
                 const text = cloud

@@ -50,6 +50,8 @@ interface DesktopSettings {
   showCost: boolean
   sensitiveAllowAi: boolean
   sensitiveAllowCloud: boolean
+  /** 第一版检索口径（'local' | 'cloud'，出厂 local）；见 store.ts 的 searchBackend */
+  searchBackend?: 'local' | 'cloud'
 }
 
 type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'

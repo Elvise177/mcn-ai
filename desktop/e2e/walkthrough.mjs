@@ -669,6 +669,35 @@ await assertStandardRoute(win, '走查主实例')
     ['完美日记', '=0'], // 库里没有这个品牌——**品牌名本身必须零命中**
   ]
   const bad = []
+
+  /**
+   * **第一版检索口径 = 本地**（2026-08-19 裁决）。
+   * 出厂值必须是 `local`——云端那一支不给 file_path，模型只能猜路径（HANDOFF §3-13）。
+   * 这条断言零成本，守的是"别有人顺手把默认值改回 cloud"。
+   * **注意它验不到什么**：登录态下真的没走云端，靠的是 `agent/index.ts` 里那一道
+   * `store.get('searchBackend') === 'cloud'` 闸门，本地模式走查跑不到登录态，**未经真实调用验证**。
+   */
+  {
+    const backend = await win.evaluate(() => window.api.settings.get().then((s) => s.searchBackend ?? '(未暴露)'))
+    if (backend !== 'local') bad.push(`检索口径出厂值应为 local，实得 ${backend}`)
+  }
+
+  /**
+   * **索引就绪哨兵**（2026-08-19，Electron 30 → 43 升级时暴露）。
+   *
+   * `vaultManager.open()` 是先置 root、再 await 扫全库、最后才 rebuild 索引，
+   * 中间那段「库已打开、索引还空着」的窗口里，查询会被 worker 秒回 0 条，
+   * 界面照三态画成「没找到「X」」——产品在说谎。
+   * Electron 30 上扫得快、走查从没撞上；43 上每轮必现（前 1~2 条查询归零）。
+   *
+   * 这一条**故意放在整个 B-1 的最前面、且不等任何东西**：它就是要打在那个窗口里。
+   * 修法在 `vault/searcher.ts` 的就绪闸门（search 等索引建好），不是在走查里多睡两秒。
+   */
+  {
+    const r = await win.evaluate(() => window.api.vault.search('灰太太'))
+    if (!(r.total > 0)) bad.push(`索引就绪哨兵：开库后立刻检索「灰太太」回了 ${r.total} 条（就绪闸门失效）`)
+  }
+
   for (const [q, expect] of CASES) {
     const r = await win.evaluate((x) => window.api.vault.search(x), q)
     const ok = expect === '>0' ? r.total > 0 : r.total === 0
@@ -1463,17 +1492,26 @@ try {
     /**
      * 边等边采样，而不是干等 5 秒。
      *
-     * **根因没查清，如实记**：这条断言在 2026-08-18 品牌二期这几轮里偶发红
-     * （同一段代码前后两轮绿、第三轮红），而单独写探针连跑 5 轮**一次都没复现**。
-     * 已经排除的：`:hover` 没命中（现在先确认命中才开始计时）、鼠标落点偏移、
-     * toast 被别的元素顶掉。所以这里改成每 250ms 取一次 `isConnected` + `:hover`，
-     * 死了就把整条时间线摆出来——"暂停失效"和"鼠标半路掉了"长得一模一样，
-     * 没有时间线只能靠猜，为这个已经白跑过一轮 16 分钟的走查。
+     * **2026-08-19：根因基本查清了，改法也跟着变了。**
+     *
+     * 老记录：这条在 2026-08-18 那几轮偶发红（同一段代码前后两轮绿、第三轮红），
+     * 单独探针连跑 5 轮一次都没复现，当时只能记「根因没查清」。
+     *
+     * 这次的时间线给出了**判据性证据**：`2ms hov=1 | 255ms hov=1 | 508ms hov=0 | …一路 0`。
+     *   · 若是**产品的暂停逻辑坏了** → `hov` 会一直是 1，元素却消失
+     *   · 实际是 **`hov` 先掉到 0 且再没回来**，之后倒计时才恢复
+     * → **是悬停被夺走，产品行为是对的**。走查开的是真实屏幕窗口，
+     * 真实鼠标划过会发出真的 mouseover/mouseout，把 Playwright 的合成 hover 顶掉；
+     * "单独探针复现不了"也对得上——探针跑得快、又常在没人碰电脑的时候跑。
+     *
+     * 所以改成**每次采样前把鼠标按回去**：断言语义不变（悬停期间倒计时必须暂停），
+     * 只是不再假设一次 hover 能站住 5 秒。时间线仍然打印——它是这次能定性的唯一依据。
      */
     const tl = []
     const t0 = Date.now()
     let dead = false
     for (let i = 0; i < 20 && !dead; i++) {
+      await hovered.hover({ force: true }).catch(() => {}) // 鼠标按回去：真实指针会把合成 hover 顶掉
       const st = await hovered
         .evaluate((el) => ({ conn: el.isConnected, hov: el.matches(':hover') }))
         .catch(() => ({ conn: false, hov: false }))
@@ -4122,8 +4160,22 @@ try {
   // ---- H-03 删除对话：二次确认（带对话标题）+ 删除后 toast，与笔记删除同一套标准 ----
   {
     const row = win.locator('aside div.group').filter({ hasText: 'e2e 历史会话一' }).first()
-    await row.hover() // ✕ 是 group-hover 才出的
-    await row.locator('button[title="删除对话"]').click()
+    const delBtn = row.locator('button[title="删除对话"]')
+    /**
+     * ✕ 是 `group-hover:block` 才出的，**hover 一次不一定站得住**：
+     * 上一步的 `snap()` 会把 `:hover` 清掉（§4-15），页面淡入期间元素还在动，
+     * 于是偶发地 hover 完按钮仍是 `display:none`，click 就在"等它可见"上耗到 30 秒超时
+     * （2026-08-19 撞到一次；同一份代码前两轮都过，属走查侧偶发）。
+     * **断言没有放松**——仍然要求 hover 之后按钮真的可见才点，只是允许多试几次。
+     */
+    let hovered = false
+    for (let i = 0; i < 10 && !hovered; i++) {
+      await row.hover({ force: true }).catch(() => {})
+      await win.waitForTimeout(200)
+      hovered = await delBtn.isVisible().catch(() => false)
+    }
+    if (!hovered) throw new Error('侧栏会话 hover 后「删除对话」按钮始终不可见（group-hover 失效？）')
+    await delBtn.click()
     await win.locator('text=确认删除这个对话？').waitFor({ timeout: 5000 })
     const delMsg = await win.locator('.whitespace-pre-line').first().innerText()
     if (!delMsg.includes('e2e 历史会话一')) throw new Error(`删除对话确认没显示标题：「${delMsg}」`)

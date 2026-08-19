@@ -145,6 +145,15 @@ app.on('window-all-closed', () => {
  */
 let quitting = false
 app.on('before-quit', (e) => {
+  // 文件监听必须显式关掉，否则**进程退不掉**。
+  // Electron 30 上不关也能退，30 → 43 之后不行了：打开过知识库（= 起了 vault/投递箱/产物
+  // 三个 chokidar watcher）的实例调 app.quit() 会挂住，进程一直活着。
+  // 二分确认过：不开库秒退、开空库必挂；与 window-all-closed 无关（最小 Electron 应用
+  // 复刻同样的 macOS 行为照样秒退）。关掉 watcher 之后恢复正常。
+  void vaultManager.close()
+  void inboxOrchestrator.stop()
+  void artifactsWatcher.stop()
+
   if (quitting || !inboxOrchestrator.hasChild()) return
   quitting = true
   e.preventDefault()
