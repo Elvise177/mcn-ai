@@ -16,8 +16,17 @@ export interface VaultTreeNode {
   children?: VaultTreeNode[]
 }
 
+/**
+ * 图谱节点的角色（品牌二期配色的唯一依据）。渲染层只按它取色，不再按 doc_type 哈希——
+ * 哈希取色的结果是"每个节点都在抢颜色"，373 个节点铺开就是一锅五彩粥。
+ *   talent/product/partner  三类实体卡：各有一支颜色，色相互相拉开
+ *   hub                     枢纽（MOC / 主题索引 / 合同）：深炭 + 尺寸稍大，用重量区分不用颜色
+ *   doc                     普通文档（占 80%+）：统一暖灰，安静地当背景组织
+ */
+export type GraphNodeKind = 'talent' | 'product' | 'partner' | 'hub' | 'doc'
+
 export interface GraphData {
-  nodes: { id: string; name: string; group: string; val: number }[]
+  nodes: { id: string; name: string; group: string; kind: GraphNodeKind; val: number }[]
   links: { source: string; target: string }[]
 }
 

@@ -9,6 +9,7 @@ module.exports = {
         bg: 'var(--color-bg)',
         sidebar: 'var(--color-sidebar)',
         card: 'var(--color-card)',
+        surface: 'var(--color-surface)',
         line: 'var(--color-border)',
         ink: 'var(--color-ink)',
         'ink-soft': 'var(--color-ink-soft)',
@@ -17,17 +18,25 @@ module.exports = {
         hover: 'var(--color-hover)',
         'hover-strong': 'var(--color-hover-strong)',
         overlay: 'var(--color-overlay)',
+        // 「面」用 --color-accent（品牌橙足量），Tailwind 的 text-* 走 --color-accent-ink（压深到 AA）。
+        // textColor 里的 accent 覆盖了这里的同名值，见下面的 textColor 段
         accent: 'var(--color-accent)',
         'accent-soft': 'var(--color-accent-soft)',
         'accent-line': 'var(--color-accent-line)',
         'on-solid': 'var(--color-on-solid)',
         danger: 'var(--color-danger)',
+        'danger-soft': 'var(--color-danger-soft)',
         ok: 'var(--color-ok)',
         warning: 'var(--color-warning)',
         'warning-soft': 'var(--color-warning-soft)',
         warn: 'var(--color-warn)',
         'warn-soft': 'var(--color-warn-soft)',
         'warn-line': 'var(--color-warn-line)',
+        'gold-ink': 'var(--color-gold-ink)',
+        'gold-soft': 'var(--color-gold-soft)',
+        'gold-line': 'var(--color-gold-line)',
+        'tier-standard': 'var(--color-tier-standard)',
+        'tier-enhanced': 'var(--color-tier-enhanced)',
         'file-ppt': 'var(--color-file-ppt)',
         'file-doc': 'var(--color-file-doc)',
         'file-xls': 'var(--color-file-xls)',
@@ -37,9 +46,15 @@ module.exports = {
         'table-head': 'var(--color-table-head)',
         'divider-hover': 'var(--color-divider-hover)',
       },
+      textColor: {
+        // text-accent 单独指向 accent-ink：#E8590C 当正文只有 3.4:1，压深到 #C2500C 才够 AA。
+        // 深色侧栏里两者都被改写成提亮橙（见 theme.css 的 .sidebar-dark），行为一致
+        accent: 'var(--color-accent-ink)',
+      },
       fontFamily: {
         sans: 'var(--font-sans)',
         serif: 'var(--font-serif)',
+        brand: 'var(--font-brand)',
         mono: 'var(--font-mono)',
       },
       fontSize: {
@@ -73,6 +88,7 @@ module.exports = {
         tree: 'var(--size-tree)',
         input: 'var(--size-input)',
         modal: 'var(--size-modal)',
+        toast: 'var(--size-toast)',  // max-w-toast：宽度上限，不是固定宽
         'modal-wide': 'var(--size-modal-wide)',
         'graph-panel': 'var(--size-graph-panel)',
         'home-top': 'var(--home-top)',

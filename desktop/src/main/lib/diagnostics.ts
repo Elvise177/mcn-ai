@@ -18,7 +18,7 @@ function redact(text: string): string {
 /** 一键诊断报告 → 桌面（脱敏后的环境信息 + 配置状态 + 最近日志），用户直接发给客服 */
 export async function exportDiagnostics(): Promise<string> {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')
-  const out = join(app.getPath('desktop'), `mcn-ai诊断_${stamp}.txt`)
+  const out = join(app.getPath('desktop'), `SamePage诊断_${stamp}.txt`)
 
   let recentLog = '(无日志)'
   try {
@@ -28,7 +28,7 @@ export async function exportDiagnostics(): Promise<string> {
     /* noop */
   }
 
-  const report = `mcn-ai 诊断报告  ${new Date().toLocaleString('zh-CN')}
+  const report = `SamePage 诊断报告  ${new Date().toLocaleString('zh-CN')}
 ==================================================
 应用版本: ${app.getVersion()}
 系统: ${process.platform} ${process.arch} / Electron ${process.versions.electron} / Node ${process.versions.node}

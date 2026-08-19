@@ -7,7 +7,13 @@
  */
 
 /** 提示语 + toast 类型。一个都没进来时用 error 色——那是个需要用户改做法的结果，不是普通回执 */
-export function enqueueMessage(r: EnqueueResult): { text: string; type: 'ok' | 'error' } {
+/**
+ * 拖入结果 → 一条提示。
+ * **「未发现可入库的文件」归琥珀（warn）不归红（error）**：用户没做错什么、系统也没坏，
+ * 只是这一拖没有可处理的东西——报红会让人以为出故障了（品牌二期语义色裁决，
+ * 见 docs/DESIGN-color-semantics.md）。真正的失败（enqueue 抛错）仍然是红。
+ */
+export function enqueueMessage(r: EnqueueResult): { text: string; type: 'ok' | 'warn' } {
   const notes: string[] = []
   if (r.skippedUnsupported > 0) notes.push(`已跳过 ${r.skippedUnsupported} 个不支持的格式`)
   // 隐藏文件/空文件只在「它是唯一原因」时才提——平时提了只是噪音
@@ -19,7 +25,7 @@ export function enqueueMessage(r: EnqueueResult): { text: string; type: 'ok' | '
   const tail = notes.length ? `（${notes.join('；')}）` : ''
   return r.added > 0
     ? { text: `已送入投递箱 ${r.added} 个文件${tail}，可在「个人知识库」看处理进度`, type: 'ok' }
-    : { text: `未发现可入库的文件${tail}`, type: 'error' }
+    : { text: `未发现可入库的文件${tail}`, type: 'warn' }
 }
 
 /** 支持的格式，给空态提示用（真相源见 `main/inbox/orchestrator.ts` 的 `SUPPORTED_EXT`） */

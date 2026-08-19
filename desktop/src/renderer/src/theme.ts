@@ -18,15 +18,28 @@ export function tokenPx(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback
 }
 
-/** 关系图分组配色（按分组名 hash 取色）——暖调谱系，数值在 styles/theme.css */
-export const GRAPH_GROUP_TOKENS = [
-  '--color-group-1',
-  '--color-group-2',
-  '--color-group-3',
-  '--color-group-4',
-  '--color-group-5',
-  '--color-group-6',
-  '--color-group-7',
+/**
+ * 关系图节点配色：**按角色取色，不按分组哈希**（2026-08-18 重做）。
+ * 旧版是 `hash(doc_type) % 7` 取七支暖色——结果是每个节点都在抢颜色，
+ * 整图看着就是一锅粥。现在的原则是"多数安静、少数发声"：
+ * 普通文档统一暖灰当背景，只有三类实体卡有颜色，枢纽用深炭 + 尺寸表达。
+ * 角色由主进程算好（`vault/graph.ts` 的 `kindOf`），渲染层不猜。
+ */
+export const GRAPH_KIND_TOKEN: Record<string, string> = {
+  talent: '--color-graph-talent',
+  product: '--color-graph-product',
+  partner: '--color-graph-partner',
+  hub: '--color-graph-hub',
+  doc: '--color-graph-node',
+}
+
+/** 图例（画在图谱角落）：顺序即视觉重要性，文案不许让用户猜颜色的含义 */
+export const GRAPH_LEGEND: { kind: string; label: string }[] = [
+  { kind: 'talent', label: '达人' },
+  { kind: 'product', label: '产品' },
+  { kind: 'partner', label: '合作方' },
+  { kind: 'hub', label: '枢纽' },
+  { kind: 'doc', label: '文档' },
 ]
 
 /** 产物文件类型 → 图标色 token（ppt/docx/xlsx/pdf 各自区分） */

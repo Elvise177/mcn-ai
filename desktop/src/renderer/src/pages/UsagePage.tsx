@@ -21,7 +21,7 @@ function QuotaBar({ used, total }: { used: number; total: number }) {
           {used} / {total}
         </span>
       </div>
-      <div className="h-2 overflow-hidden rounded-full bg-sidebar">
+      <div className="h-2 overflow-hidden rounded-full bg-surface">
         <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
       </div>
     </div>
@@ -141,18 +141,34 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
               {/* 柱区与日期轴**分成两行**：柱子的百分比高度要有一个"确定高度"的父级才算得出来。
                   一开始把日期塞进同一列里，那一列在 `items-end` 的行里高度由内容决定（= 只有日期
                   那行字那么高），于是所有柱子都算成 0——页面上是一整片空白（走查截图抓到的） */}
+              {/* 同柱堆叠：下段标准档（浅橙）、上段增强档（深橙）。
+                  只画总次数的话，"20 次全标准"和"20 次里 5 次增强"长得一模一样，
+                  而两者的钱差一个数量级——这张图的意义就在这个差别上 */}
               <div data-testid="usage-daily" className="flex h-28 gap-1.5">
-                {data.daily.map((d) => (
-                  <div key={d.date} className="flex min-w-0 flex-1 flex-col justify-end">
-                    <div
-                      data-count={d.count}
-                      title={`${d.date}：${d.count} 次`}
-                      className={`w-full rounded-sm ${d.count > 0 ? 'bg-accent' : 'bg-sidebar'}`}
-                      // 0 也留一点底座：整行空白会让人以为图没渲染出来
-                      style={{ height: `${d.count > 0 ? Math.max(8, (d.count / maxDaily) * 100) : 4}%` }}
-                    />
-                  </div>
-                ))}
+                {data.daily.map((d) => {
+                  const h = d.count > 0 ? Math.max(8, (d.count / maxDaily) * 100) : 4
+                  const enhPct = d.count > 0 ? d.enhanced / d.count : 0
+                  return (
+                    <div key={d.date} className="flex min-w-0 flex-1 flex-col justify-end">
+                      <div
+                        data-count={d.count}
+                        data-standard={d.standard}
+                        data-enhanced={d.enhanced}
+                        title={`${d.date}：${d.count} 次（标准 ${d.standard} · 增强 ${d.enhanced}）`}
+                        // 0 也留一点底座：整行空白会让人以为图没渲染出来
+                        className={`flex w-full flex-col overflow-hidden rounded-sm ${d.count > 0 ? '' : 'bg-surface'}`}
+                        style={{ height: `${h}%` }}
+                      >
+                        {d.enhanced > 0 && (
+                          <div data-seg="enhanced" className="w-full bg-tier-enhanced" style={{ height: `${enhPct * 100}%` }} />
+                        )}
+                        {d.standard > 0 && (
+                          <div data-seg="standard" className="w-full flex-1 bg-tier-standard" />
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
               <div className="mt-1.5 flex gap-1.5">
                 {data.daily.map((d) => (
@@ -160,6 +176,15 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                     {shortDay(d.date)}
                   </div>
                 ))}
+              </div>
+              {/* 两色图例：柱子分段了就必须说清哪段是什么，否则用户只会觉得"颜色深浅是随机的" */}
+              <div data-testid="usage-daily-legend" className="mt-3 flex items-center gap-4 text-2xs text-muted">
+                <span data-legend="standard" className="flex items-center gap-1.5">
+                  <i className="inline-block h-2.5 w-2.5 rounded-sm bg-tier-standard" /> 标准模式
+                </span>
+                <span data-legend="enhanced" className="flex items-center gap-1.5">
+                  <i className="inline-block h-2.5 w-2.5 rounded-sm bg-tier-enhanced" /> 增强模式
+                </span>
               </div>
             </div>
 

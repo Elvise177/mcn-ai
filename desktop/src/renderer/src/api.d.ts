@@ -225,7 +225,8 @@ interface UsageSummary {
   costCny: number
   totalCount: number
   empty: boolean
-  daily: Array<{ date: string; count: number }>
+  /** 最近 14 天，按天次数 + 按档位分段（同柱堆叠用；老记录无 tier → 计入 standard） */
+  daily: Array<{ date: string; count: number; standard: number; enhanced: number }>
   byTier: Array<{
     tier: TierId
     label: string

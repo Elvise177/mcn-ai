@@ -172,8 +172,14 @@ export interface UsageSummary {
   costCny: number
   totalCount: number
   empty: boolean
-  /** 最近 14 天（含今天），按天使用次数 */
-  daily: Array<{ date: string; count: number }>
+  /**
+   * 最近 14 天（含今天），按天使用次数 —— **按档位分段**（页面画成同柱堆叠）。
+   * 分段的意义不在好看：一天 20 次全是标准档、和 20 次里有 5 次增强档，
+   * 花的钱差一个数量级，只画总次数看不出这件事。
+   * 老记录没有 `tier` 字段（档位层是 2026-08-17 才上的）→ 计入 standard，
+   * 那时候只有一条线路，归到标准档是符合事实的。
+   */
+  daily: Array<{ date: string; count: number; standard: number; enhanced: number }>
   /** 按档位的花费对比（成本透明化核心：次数 / tokens / ¥花费 三列并排） */
   byTier: Array<{
     tier: TierId
@@ -255,10 +261,12 @@ export function summarize(month = currentMonth()): UsageSummary {
 
   // 最近 14 天：日期轴要连续（没记录的那天也得有一根 0 高的柱子，否则时间被压缩看不出趋势）
   const recent = readRecentDays(14)
-  const daily: Array<{ date: string; count: number }> = []
+  const daily: UsageSummary['daily'] = []
   for (let i = 13; i >= 0; i--) {
     const date = ymd(Date.now() - i * 86_400_000).day
-    daily.push({ date, count: recent.filter((r) => ymd(r.ts).day === date).length })
+    const day = recent.filter((r) => ymd(r.ts).day === date)
+    const enhanced = day.filter((r) => r.tier === 'enhanced').length
+    daily.push({ date, count: day.length, standard: day.length - enhanced, enhanced })
   }
 
   return {

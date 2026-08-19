@@ -263,7 +263,7 @@ export default function Workbench({
                 {messages.map((m, i) =>
                   m.role === 'user' ? (
                     <div key={i} className="flex justify-end">
-                      <div className="max-w-[80%] rounded-xl bg-sidebar px-4 py-2.5 text-md">
+                      <div className="max-w-[80%] rounded-xl bg-surface px-4 py-2.5 text-md">
                         {!!m.attachments?.length && (
                           <div data-testid="bubble-attachments" className="mb-2 flex flex-wrap gap-2">
                             {m.attachments.map((a, k) =>
@@ -289,13 +289,24 @@ export default function Workbench({
                     </div>
                   ) : (
                     <div key={i} className="group flex gap-3">
-                      <span className="mt-2 h-2.5 w-2.5 shrink-0 rounded-full bg-accent" />
+                      {/* 出错那条的圆点走红：语义色留给"持续存在的状态"，一条错误回答
+                          会一直留在历史里，值得占着颜色（瞬时 toast 才是炭黑+图标） */}
+                      <span
+                        className={`mt-2 h-2.5 w-2.5 shrink-0 rounded-full ${m.error ? 'bg-danger' : 'bg-accent'}`}
+                      />
                       <div className="min-w-0 flex-1">
                         {/* 这一条回答是怎么来的：折叠成一行摘要贴在正文上面，点开看明细 */}
                         {stepFor.has(i) && (
                           <StepStream sessionId={conv.id} group={stepFor.get(i)!} medians={medians} />
                         )}
-                        <FastMarkdown body={m.text} onLink={handleLink} />
+                        {/* 错误气泡：左侧红边 + 淡红底。翻历史时一眼能认出"这轮没成"，
+                            而不是靠正文开头那个 ⚠️ 字符 */}
+                        <div
+                          data-testid={m.error ? 'error-bubble' : undefined}
+                          className={m.error ? 'rounded-r-md border-l-2 border-danger bg-danger-soft py-1.5 pl-3 pr-2' : undefined}
+                        >
+                          <FastMarkdown body={m.text} onLink={handleLink} />
+                        </div>
                         <div className="mt-1 flex items-center gap-2">
                           {/* 错误气泡里的「重试」常驻（不是 hover 才出）：这是用户此刻唯一想点的东西。
                               前面没有可复用的提问时不给按钮——按了什么都不会发生的按钮比没有更糟 */}
@@ -737,7 +748,7 @@ function ArtifactPanel({ homeEmpty, onOpenNote }: { homeEmpty: boolean; onOpenNo
               )}
             </div>
             {preview?.path === a.path && (
-              <div className="ml-6 mt-2 max-h-60 overflow-auto rounded-md bg-sidebar p-2 text-sm">
+              <div className="ml-6 mt-2 max-h-60 overflow-auto rounded-md bg-surface p-2 text-sm">
                 <FastMarkdown body={preview.text} onLink={() => void 0} />
               </div>
             )}

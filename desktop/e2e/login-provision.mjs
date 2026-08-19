@@ -48,6 +48,27 @@ try {
   // 1. 启动登录门上真实登录（Claude Desktop 式首屏）
   await win.waitForSelector('input[placeholder="邮箱"]', { timeout: 10000 }).catch(() => fail('登录门未出现'))
   await win.screenshot({ path: join(shots, '00b-登录门.png') })
+  // 登录页动过（粉花换成对齐线 logo + SamePage 字标），这一屏必须自带断言，
+  // 否则 00b 的基线只会告诉我们"长这样"，不会告诉我们"换对了没有"
+  {
+    const brand = await win.evaluate(() => {
+      const svg = document.querySelector('[data-testid="brand-logo"]')
+      const bar = svg?.querySelector('[data-testid="brand-logo-bar"]')
+      return {
+        has: !!svg,
+        size: svg ? Math.round(svg.getBoundingClientRect().width) : 0,
+        lines: svg ? svg.querySelectorAll('line').length : 0,
+        barColor: bar ? getComputedStyle(bar).stroke : '',
+        name: [...document.querySelectorAll('div')].some((d) => d.textContent.trim() === 'SamePage'),
+        oldBrand: /mcn[-\s]?ai|拉齐/i.test(document.body.innerText || ''),
+      }
+    })
+    if (!brand.has || brand.lines !== 4) await fail('登录页 logo 不对：' + JSON.stringify(brand))
+    if (brand.size < 48) await fail(`登录页 logo 只有 ${brand.size}px，不是大尺寸落点`)
+    if (!brand.name) await fail('登录页没有 SamePage 字标')
+    if (brand.oldBrand) await fail('登录页仍出现旧名（mcn-ai／拉齐）')
+    console.log('✅ 登录页品牌 ✓', JSON.stringify(brand))
+  }
   await win.fill('input[placeholder="邮箱"]', 'mcnai-test-a@example.com')
   await win.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
   const tLogin = Date.now()

@@ -6,7 +6,7 @@ import UsagePage from './pages/UsagePage'
 import LoginGate from './pages/LoginGate'
 import { ui } from './components/ui'
 import { VaultWizard } from './components/VaultWizard'
-import logo from './assets/logo.png'
+import Logo from './components/Logo'
 import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
 import { errText, zhError } from './lib/err'
@@ -289,7 +289,7 @@ export default function App() {
   if (account === null) {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-bg">
-        <img src={logo} alt="" className="fade-up h-16 w-16" draggable={false} />
+        <Logo size={64} className="fade-up text-ink" />
         <div className="thinking-dots mt-6"><span /><span /><span /></div>
       </div>
     )
@@ -309,7 +309,7 @@ export default function App() {
   if (vaultState === 'loading') {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-bg">
-        <img src={logo} alt="" className="fade-up h-16 w-16" draggable={false} />
+        <Logo size={64} className="fade-up text-ink" />
         <div className="thinking-dots mt-6"><span /><span /><span /></div>
       </div>
     )
@@ -330,12 +330,19 @@ export default function App() {
 
   return (
     <div className="flex h-full">
-      <aside className="flex w-sidebar shrink-0 flex-col border-r border-line bg-sidebar">
+      {/* sidebar-dark：容器上就地改写同名 design token，里面的组件（导航/最近对话/
+          TaskDock/身份行）一行都不用改就整体走深色体系，见 theme.css 那段注释 */}
+      <aside className="sidebar-dark flex w-sidebar shrink-0 flex-col border-r border-line bg-sidebar text-ink">
         <div className="titlebar-drag px-5 pb-4 pt-10">
-          <div className="text-xl font-semibold">mcn-ai</div>
+          <div className="flex items-center gap-2">
+            <Logo size={20} className="shrink-0" />
+            {/* 主名是拉丁字符：走 --font-brand（系统英文字面），中文栈渲染拉丁
+                字重偏轻、字距偏松，跟下面的中文副标搭不上 */}
+            <div className="font-brand text-xl font-semibold tracking-tight">SamePage</div>
+          </div>
           <div className="mt-0.5 text-xs text-muted">AI 工作操作台</div>
         </div>
-        {/* 主色降级：新对话改描边样式，粉色只留给发送键/光标/选中态这类小面积点缀 */}
+        {/* 主色降级仍然成立：新对话是描边样式，橙只留给发送键/进度/选中态这类小面积点缀 */}
         <button
           onClick={() => {
             setActive(newConv())
@@ -1191,12 +1198,14 @@ function SettingsPage({
           setTaps(n)
           if (n >= TAPS_TO_UNLOCK) {
             onUnlockAdmin()
-            ui.toast('已进入运维配置模式（重启应用后自动退出）')
+            // 归**信息**类（中性炭黑），不用绿也不用橙：解锁是"告知发生了什么"，
+            // 不是"任务成功"，更不是"进行中"（品牌二期语义色裁决，见 docs/DESIGN-color-semantics.md）
+            ui.toast('已进入运维配置模式（重启应用后自动退出）', 'info')
           }
         }}
         className="max-w-xl cursor-default select-none pb-6 text-xs text-muted-soft"
       >
-        mcn-ai {APP_VERSION}
+        SamePage {APP_VERSION}
         {adminUnlocked && ' · 运维配置已解锁'}
       </div>
     </div>

@@ -226,7 +226,7 @@ export class AgentManager {
     const root = vaultManager.currentRoot
     const tree = vaultManager.tree()
     const dirs = tree.filter((n) => n.children).map((n) => n.name).join('、')
-    return `你是 mcn-ai——MCN 公司与带货达人的 AI 工作台，工作语言中文。
+    return `你是 SamePage——MCN 公司与带货达人的 AI 工作台，工作语言中文。
 用户的个人知识库在 ${root ?? '(未打开)'}，顶层分区：${dirs || '(空库)'}。
 
 规则：

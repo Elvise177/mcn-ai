@@ -4,11 +4,18 @@
  * canvas 等需要 JS 取值的场景走 src/theme.ts 的 token() 读取同一份变量）。
  */
 :root {
-  /* ===== 颜色：底色系（Claude Desktop 式暖米白） ===== */
-  --color-bg: #faf9f5;
-  --color-sidebar: #f0eee6;
+  /* ===== 颜色：底色系（暖白纸面 + 炭黑侧栏，2026-08-18 品牌二期） ===== */
+  /* 内容区是"纸"：比上一版米白更中性、去黄一档，让信号橙不至于泡在黄底里发闷 */
+  --color-bg: #faf9f6;
+  /* 侧栏是"壳"：炭黑。壳内的文字/描边/hover 全部由 .sidebar-dark 就地改写同名 token，
+     组件里一个类名都不用动（Tailwind 语义类读的就是这些变量） */
+  --color-sidebar: #211f1c;
   --color-card: #ffffff;
-  --color-border: #e4e0d4;
+  /* 纸面上的"下沉面"：用户气泡、代码块、空态框、图表槽底这类比纸略深一档的底。
+     以前这些地方复用的是 --color-sidebar（那时侧栏也是浅灰），侧栏改炭黑后必须分家，
+     否则对话气泡和代码块会整块变黑 */
+  --color-surface: #f2efe9;
+  --color-border: #e6e2da;
   --color-ink: #3d392f;
   --color-ink-soft: rgba(61, 57, 47, 0.72);
   --color-muted: #8c8678;
@@ -18,26 +25,44 @@
   --color-hover-strong: rgba(0, 0, 0, 0.06);
   --color-overlay: rgba(0, 0, 0, 0.25);
 
-  /* ===== 颜色：品牌强调色（降级后只做小面积点缀：发送键/光标/选中态/进度） ===== */
-  --color-accent: #e25484;
-  --color-accent-soft: #fbecf3;
-  --color-accent-line: rgba(226, 84, 132, 0.45);
+  /* ===== 颜色：品牌强调色 —— 信号橙（对齐线母题的那根基准线） =====
+     两个槽位是有意分开的：
+       --color-accent      面（发送键/进度条/选中底/图谱高亮）用足量品牌橙
+       --color-accent-ink  字（Tailwind 的 text-accent 映到它）压深一档
+     原因：#E8590C 当正文色压在纸面上只有 3.40:1，达不到 WCAG AA 4.5；
+     压到 #C2500C 是 4.5:1，肉眼仍是同一支橙。改这两个值前先跑一遍对比度。 */
+  --color-accent: #e8590c;
+  --color-accent-ink: #c2500c;
+  --color-accent-soft: #fdefe4;
+  --color-accent-line: rgba(232, 89, 12, 0.45);
   /* 落在强调色/深色实心块上的文字 */
   --color-on-solid: #ffffff;
+  /* logo 基准线：浅底用品牌橙，深色侧栏里换成提亮橙（见 .sidebar-dark） */
+  --color-logo-bar: var(--color-accent);
 
   /* ===== 颜色：状态 ===== */
   --color-danger: #dc4c4c;
+  /* 错误气泡的淡红底（持续状态才配语义底色，瞬时 toast 一律炭黑+图标） */
+  --color-danger-soft: #fdeceb;
   --color-ok: #2f9e6e;
   /* 警示（A-4 的「转换失败/格式不支持」）：比 danger 轻一档——这不是系统出错，
-     是有几个文件没处理成，用户需要知道但不必惊慌 */
-  --color-warning: #b8761f;
-  --color-warning-soft: #fdf6e8;
-  /* 提醒（云端离线条）：取暖调赭黄，与关系图 group-3 同一支，别引入蓝灰系的"系统提示"感 */
-  --color-warn: #a8762f;
-  --color-warn-soft: #f8f1e2;
+     是有几个文件没处理成，用户需要知道但不必惊慌。
+     **金琥珀** #d97706（2026-08-18 三期改）：旧的 #b8761f 压在暖白纸面上发芥末，
+     尤其整条铺底时最明显。现在琥珀**只用于 toast 图标与持续状态条**，不再整条铺深色 */
+  --color-warning: #d97706;
+  --color-warning-soft: #fdf3e3;
+  /* 持续状态条（编辑冲突条）：浅金底 + 深字，不用实心深底——
+     一条常驻在正文上方的横幅铺深色，眼睛会一直被它拽走 */
+  --color-gold-ink: #92610e;
+  --color-gold-soft: #fdf3e3;
+  --color-gold-line: rgba(217, 119, 6, 0.32);
+  /* 提醒（云端离线/降级条）：并进橙系 —— 品牌二期把"进行中/降级中"统一到基准线那支橙上，
+     与成功绿/失败红/取消灰的**终态**语义分开。这里用压深版以便压在浅橙底上仍达 AA */
+  --color-warn: #b0530f;
+  --color-warn-soft: #fbf0e7;
   /* 提醒条自己的描边（冲突条的按钮/分隔线）。Tailwind 的透明度修饰符对 var() 颜色无效，
      要淡一档只能另开 token，见 HANDOFF §4-13 */
-  --color-warn-line: rgba(168, 118, 47, 0.35);
+  --color-warn-line: rgba(176, 83, 15, 0.35);
 
   /* ===== 颜色：文件类型（产物卡片图标区分） ===== */
   --color-file-ppt: #cf6a3c;
@@ -48,21 +73,34 @@
   --color-file-other: #8c8678;
 
   /* ===== 颜色：关系图（canvas 绘制，经 theme.ts 读取） ===== */
-  --color-graph-bg: #faf9f5;
-  /* 边线：低饱和暖灰，压在米白底上只做"连着"的提示，不跟节点抢注意力 */
-  --color-graph-link: #d6cfc0;
-  --color-graph-link-dim: rgba(214, 207, 192, 0.25);
+  --color-graph-bg: #faf9f6;
+  /* 边线：低饱和暖灰，压在米白底上只做"连着"的提示，不跟节点抢注意力。
+     2026-08-18 三期再淡一档（#d6cfc0 → #ddd8ce）并把线宽降到 0.6px：
+     500+ 节点的图里，边一多就糊成一层毛毡，先糊掉的是节点本身 */
+  --color-graph-link: #ddd8ce;
+  --color-graph-link-dim: rgba(221, 216, 206, 0.22);
   --color-graph-label: rgba(61, 57, 47, 0.85);
   --color-graph-label-dim: rgba(61, 57, 47, 0.1);
-  /* 节点分组色：以主玫瑰为起点的同明度暖调谱系（玫瑰→陶土→赭黄→暖棕→灰绿→藕紫→砖红），
-     不再用默认的蓝/紫/绿三原色——那套跟暖米白底和玫瑰主色是两个体系 */
-  --color-group-1: #cf5b7a;
-  --color-group-2: #c6754f;
-  --color-group-3: #b58a3f;
-  --color-group-4: #956d50;
-  --color-group-5: #6f8a5c;
-  --color-group-6: #a67395;
-  --color-group-7: #ac5353;
+  /* 节点色：**多数安静、少数发声**（2026-08-18 重做，推翻了原来"按 doc_type 哈希取七色"的路线）。
+     旧路线的问题不是某支颜色不好看，是 373 个节点每一个都在抢颜色，整图必然是一锅粥。
+     现在只有三类实体卡有颜色（色相互相拉开）、枢纽用重量、其余一律暖灰当背景组织。
+     **加新颜色前先问一句：这类节点值不值得从背景里跳出来。** */
+  --color-graph-node: #b8b0a4;
+  /* 达人卡：**灰陶土**。这支色被降过两次，原则一句话——
+     **数量最大的类别必须最安静，显眼度让给数量少的合作方与枢纽**。
+       ① 品牌橙 #e8590c：169 个达人节点全是主色，跟界面主色抢戏（推翻）
+       ② 陶土红棕 #a85d48：真人复看仍然"成片抢眼"（推翻）
+       ③ 现在 #9a6b5c：饱和与明度各降半档，成团时退成背景的一部分，
+          单看又还认得出是"有身份的一类"。配合半径 ×0.88（见 drawNode）
+     再动这支色之前先看整图：判据不是"这个色好不好看"，是"121 张铺开会不会成片" */
+  --color-graph-talent: #9a6b5c;
+  --color-graph-product: #6f8a5c;
+  --color-graph-partner: #a67395;
+  --color-graph-hub: #4a443c;
+
+  /* ===== 颜色：用量柱状图的档位分段（浅=标准 / 深=增强，同柱堆叠） ===== */
+  --color-tier-standard: #f4b896;
+  --color-tier-enhanced: #c2500c;
 
   /* ===== 颜色：表格（markdown 正文 / 属性卡片共用一套） ===== */
   --color-table-head: #f2efe5;
@@ -70,11 +108,14 @@
   --color-table-hover: rgba(61, 57, 47, 0.05);
 
   /* ===== 颜色：可拖拽分隔线 ===== */
-  --color-divider-hover: rgba(226, 84, 132, 0.35);
+  --color-divider-hover: rgba(232, 89, 12, 0.35);
 
   /* ===== 字体 ===== */
   /* 全局：系统黑体栈 */
   --font-sans: 'PingFang SC', 'HarmonyOS Sans', 'Microsoft YaHei', sans-serif;
+  /* 品牌名（SamePage，纯拉丁）：中文栈里的 PingFang 渲染拉丁字母字重偏轻、字距偏松，
+     所以单独指定系统英文字面（macOS 是 SF Pro），配中文副标才压得住 */
+  --font-brand: -apple-system, 'SF Pro Display', 'SF Pro Text', Inter, 'Helvetica Neue', Arial, sans-serif;
   /* 仅首页问候语使用。拉丁字体排最前 → 数字与英文命中无衬线，中文才落到衬线，
      避免出现「英文/数字衬线 fallback」 */
   --font-serif: 'Helvetica Neue', Helvetica, 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', serif;
@@ -115,6 +156,10 @@
   --size-tree-max: 420px;
   --size-input: 60px;
   --size-modal: 380px;
+  /* toast 宽度**上限**（三期：从写死等宽改回按文案自适应 + 上限）。
+     写死等宽的代价是短文案也占一整条，而且它在窗口顶端横跨得太宽——
+     二期实测因此压住了笔记头部的按钮。现在短文案短框，长文案到 420px 折行 */
+  --size-toast: 420px;
   /* 多选一弹窗（编辑冲突的三个出口）：380px 放不下三颗按钮，会折成两行、
      主操作被挤到下一排，看着像"次要选项" */
   --size-modal-wide: 520px;
@@ -145,4 +190,47 @@
   --dur-fast: 0.14s;
   --dur-base: 0.22s;
   --dur-slow: 0.36s;
+}
+
+/**
+ * 深色侧栏（品牌二期）。
+ *
+ * 做法是**就地改写同名 token**而不是新造一套类名：侧栏里的东西（导航、最近对话、
+ * TaskDock、身份行）已经全部走 text-ink / text-muted / bg-hover / border-line，
+ * 在容器上换掉变量值，它们就整体跟着变深，组件一行都不用改；
+ * 反过来说——**任何从侧栏里"飞出去"的浮层（模态/toast）都不能挂在这个容器下**，
+ * 否则会连带吃到深色 token。
+ *
+ * 每个值都过了 WCAG 对比度（底 #211f1c）：
+ *   ink #c9c5be 9.56 · muted #a29c91 6.03 · muted-soft #948e83 5.05
+ *   accent/accent-ink #ff8a47 7.03 · on-solid #1e1c1a 落在橙上 7.26
+ * 想再压暗一档的先算再改：#6f6a61 那种"看着舒服"的灰只有 3.06，AA 都过不去。
+ */
+.sidebar-dark {
+  --color-sidebar: #211f1c;
+  --color-bg: #211f1c;
+  /* 卡片/选中底：比侧栏深一阶的暖炭（"深一阶"在深色体系里是提亮，不是压暗——
+     压暗会跟窗口外的黑边糊在一起） */
+  --color-card: #2a2724;
+  --color-border: #35312c;
+  --color-ink: #c9c5be;
+  --color-ink-soft: rgba(201, 197, 190, 0.78);
+  --color-muted: #a29c91;
+  --color-muted-soft: #948e83;
+  --color-hover: rgba(255, 255, 255, 0.05);
+  --color-hover-strong: rgba(255, 255, 255, 0.09);
+  /* 深底上的橙要提亮，#e8590c 压在炭黑上会发闷（对比度 3.6，也不够） */
+  --color-accent: #ff8a47;
+  --color-accent-ink: #ff8a47;
+  --color-accent-soft: rgba(255, 138, 71, 0.13);
+  --color-accent-line: rgba(255, 138, 71, 0.4);
+  --color-on-solid: #1e1c1a;
+  --color-logo-bar: #ff8a47;
+  --color-surface: #2a2724;
+  --color-table-head: #2a2724;
+  /* 状态语义色不动语义、只做深底可读性补偿（绿/红/灰在炭黑上原值偏暗） */
+  --color-ok: #4cb98a;
+  --color-danger: #f06d6d;
+  --color-danger-soft: rgba(240, 109, 109, 0.14);
+  --color-warning: #d9973a;
 }

@@ -685,6 +685,306 @@ const snapHover = async (name, ms = 250) => {
   await rawShot(cdp, name)
 }
 
+/**
+ * 悬停到卡片上、等 hover 才出现的按钮真的可见——**采样一次判死是不行的**。
+ *
+ * 产物列表挂着 watcher：删一个产物、跑完一轮入库，列表就会重渲染一次。
+ * 光标停着不动时，被换掉的那个节点上的 `:hover` 要等下一次鼠标移动才重算，
+ * 于是"hover 了但按钮不出来"完全是时序决定的——同一段代码上一轮绿这一轮红
+ * （2026-08-18 在 13 和 44 两步各撞过一次）。
+ * 所以：挪开 → 重新 hover → 轮询可见性，最多两轮；失败时把现场 dump 出来，
+ * 别只报一句"没出现"让下一个人重猜一遍。
+ */
+const hoverUntilVisible = async (card, btns, label, selector) => {
+  const list = Array.isArray(btns) ? btns : [btns]
+  let ok = false
+  for (let i = 0; i < 2 && !ok; i++) {
+    await win.mouse.move(4, 4)
+    await card.hover()
+    for (let t = 0; t < 12 && !ok; t++) {
+      await win.waitForTimeout(150)
+      ok = true
+      for (const b of list) ok = ok && (await b.isVisible().catch(() => false))
+    }
+  }
+  if (!ok) {
+    const dump = selector
+      ? await win.locator(selector).evaluateAll((els) =>
+          els.map((e) => ({
+            cls: e.className.slice(0, 70),
+            rect: e.getBoundingClientRect().toJSON(),
+            hovering: e.matches(':hover'),
+            btns: [...e.querySelectorAll('button')].map((b) => b.textContent.trim()),
+          }))
+        )
+      : null
+    throw new Error(`${label}：hover 后按钮没出现；现场：` + JSON.stringify(dump))
+  }
+}
+
+// ---------- 品牌二期（更名「拉齐」+ 炭黑侧栏 + 信号橙）的断言工具 ----------
+
+/**
+ * toast 的"一家人"检查（品牌二期，真人验收点名「同屏两条长得不像一家人」）。
+ *
+ * 采集是**跨步骤**的：同屏那三条、保存成功的绿、产物打不开那条带按钮的红，
+ * 各自在自己的真实场景里被量一次，最后统一比。
+ * 为什么不在一个时刻凑齐五种语义色：那需要给产品加一个 `window.__ui` 测试钩子，
+ * 而这几种 toast 全都能用真实操作造出来——按本仓库的规矩（HANDOFF §4-22），
+ * 能真造的就不给开关。
+ */
+const toastGeos = []
+const grabToastGeo = async (label) => {
+  const got = await win.locator('[data-testid="toast"]').evaluateAll((els) =>
+    els.map((e) => {
+      const s = getComputedStyle(e)
+      return {
+        kind: e.dataset.kind ?? '?',
+        icon: e.dataset.icon ?? '?',
+        width: Math.round(e.getBoundingClientRect().width),
+        maxWidth: s.maxWidth,
+        radius: s.borderRadius,
+        font: s.fontSize,
+        padding: `${s.paddingTop}/${s.paddingRight}/${s.paddingBottom}/${s.paddingLeft}`,
+        bg: s.backgroundColor,
+        action: !!e.querySelector('[data-testid="toast-action"]'),
+      }
+    })
+  )
+  for (const g of got) toastGeos.push({ ...g, at: label })
+  if (!got.length) console.log(`⚠️ toast 几何采集「${label}」没抓到（这一步的 toast 可能已经散了）`)
+  return got
+}
+
+/**
+ * 收尾统一判（三期改判据）：**底色必须全一样**（炭黑）、几何逐项相同、
+ * 语义由**图标**表达且对得上、宽度策略一致（自适应 + 同一个上限）。
+ * 二期那版判的是"底色至少三种"——那正是被推翻的路线，判据跟着一起改。
+ */
+const assertToastConsistency = () => {
+  if (toastGeos.length < 4)
+    throw new Error(`toast 几何样本只有 ${toastGeos.length} 条，覆盖不足（至少要同屏三条 + 成功 + 带按钮的错误）`)
+  for (const key of ['radius', 'font', 'padding', 'maxWidth']) {
+    const vals = [...new Set(toastGeos.map((g) => String(g[key])))]
+    if (vals.length > 1)
+      throw new Error(
+        `toast 的 ${key} 不一致：${vals.join(' ≠ ')}\n  明细 ` + JSON.stringify(toastGeos, null, 1)
+      )
+  }
+  const bgs = new Set(toastGeos.map((g) => g.bg))
+  if (bgs.size > 1)
+    throw new Error(`toast 底色不统一（三期规定一律炭黑，语义只走图标）：${[...bgs].join(' ≠ ')}`)
+  // 宽度**不要求相等**（自适应文案），但不许超过上限
+  for (const g of toastGeos) {
+    const cap = parseFloat(g.maxWidth)
+    if (Number.isFinite(cap) && g.width > cap + 1)
+      throw new Error(`toast 宽度 ${g.width} 超过上限 ${g.maxWidth}：${JSON.stringify(g)}`)
+  }
+  // 图标语义：info 不许有图标，ok/error/warn 必须有且是自己那一种
+  for (const g of toastGeos) {
+    const want = g.kind === 'info' ? 'none' : g.kind
+    if (g.icon !== want) throw new Error(`toast 语义图标不对：kind=${g.kind} 却是 icon=${g.icon}`)
+  }
+  const kinds = new Set(toastGeos.map((g) => g.kind))
+  if (kinds.size < 3) throw new Error(`语义种类只覆盖到 ${[...kinds].join('/')}，至少要 info/ok/error 三种`)
+  if (!toastGeos.some((g) => g.action)) throw new Error('没量到带动作按钮的 toast，这条断言等于空过')
+  const widths = [...new Set(toastGeos.map((g) => g.width))]
+  console.log(
+    'toast 一致性 ✓',
+    JSON.stringify({
+      样本: toastGeos.length,
+      语义: [...kinds],
+      底色: [...bgs][0],
+      宽度上限: toastGeos[0].maxWidth,
+      实际宽度: widths,
+      圆角: toastGeos[0].radius,
+      字号: toastGeos[0].font,
+      内边距: toastGeos[0].padding,
+    })
+  )
+}
+
+/**
+ * 全局文案扫描：界面上不许再出现旧名。
+ * 扫的是可见文本 ＋ title/placeholder/aria-label（旧名最容易残留在 tooltip 里），
+ * 大小写不敏感。每到一个页面都调一次——只在首页扫等于没扫。
+ */
+const assertNoOldBrand = async (where) => {
+  const hits = await win.evaluate(() => {
+    const bad = []
+    // 两代旧名都要扫：mcn-ai（初版）与「拉齐」（二期用过一天的中文名，三期改 SamePage）
+    const re = /mcn[-\s]?ai|拉齐/i
+    const text = document.body.innerText || ''
+    for (const line of text.split('\n')) if (re.test(line)) bad.push(`正文:「${line.trim()}」`)
+    for (const el of document.querySelectorAll('[title],[placeholder],[aria-label]')) {
+      for (const a of ['title', 'placeholder', 'aria-label']) {
+        const v = el.getAttribute(a)
+        if (v && re.test(v)) bad.push(`${a}:「${v}」`)
+      }
+    }
+    if (re.test(document.title)) bad.push(`document.title:「${document.title}」`)
+    return bad
+  })
+  if (hits.length) throw new Error(`【${where}】界面上还有旧名（mcn-ai／拉齐）：\n  ` + hits.join('\n  '))
+  console.log(`旧名扫描 ✓ ${where}`)
+}
+
+/**
+ * 旧玫瑰色残留扫描（品牌二期 D）。
+ *
+ * 两道：① **精确黑名单**——上一版主色与它的淡色/线色变体，出现即失败；
+ * ② **色相兜底**——任何落在玫红/品红区间（H 300–355）且有饱和度的颜色都报出来，
+ * 防的是"有人又调了一支新粉进来"。
+ *
+ * 唯一的白名单是关系图图例里的藕紫（H≈322）：它是实体卡「合作方」那一支，
+ * 是**这次配色方案定的**颜色，不是残留。白名单按 DOM 位置给（图例容器内），
+ * 不按色值给——按色值等于把整段紫色区间放行。
+ */
+const ROSE_BLACKLIST = ['226, 84, 132', '207, 91, 122', '217, 139, 166', '194, 81, 122', '251, 236, 243']
+const assertNoRose = async (where) => {
+  const found = await win.evaluate(
+    ({ blacklist }) => {
+      const PROPS = ['color', 'backgroundColor', 'borderTopColor', 'borderRightColor', 'borderBottomColor', 'borderLeftColor', 'outlineColor', 'fill', 'stroke', 'caretColor']
+      const hue = (r, g, b) => {
+        const [mx, mn] = [Math.max(r, g, b), Math.min(r, g, b)]
+        if (mx === mn) return { h: 0, s: 0 }
+        const d = mx - mn
+        const l = (mx + mn) / 2 / 255
+        const s = d / 255 / (1 - Math.abs(2 * l - 1))
+        let h
+        if (mx === r) h = ((g - b) / d) % 6
+        else if (mx === g) h = (b - r) / d + 2
+        else h = (r - g) / d + 4
+        return { h: (h * 60 + 360) % 360, s }
+      }
+      const hits = []
+      for (const el of document.querySelectorAll('*')) {
+        // 图例里的藕紫是本方案定的「合作方」色，不是旧玫瑰残留
+        if (el.closest('[data-testid="graph-legend"]')) continue
+        const cs = getComputedStyle(el)
+        for (const p of PROPS) {
+          const v = cs[p]
+          const m = String(v).match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/)
+          if (!m) continue
+          const [r, g, b] = [+m[1], +m[2], +m[3]]
+          const a = m[4] === undefined ? 1 : +m[4]
+          if (a < 0.05) continue
+          const key = `${r}, ${g}, ${b}`
+          if (blacklist.includes(key)) {
+            hits.push({ why: '旧玫瑰色值', tag: el.tagName, cls: String(el.className).slice(0, 50), p, v })
+            continue
+          }
+          const { h, s } = hue(r, g, b)
+          if (h >= 300 && h <= 355 && s > 0.15) {
+            hits.push({ why: `玫红区间 H=${Math.round(h)}`, tag: el.tagName, cls: String(el.className).slice(0, 50), p, v })
+          }
+        }
+      }
+      return hits.slice(0, 12)
+    },
+    { blacklist: ROSE_BLACKLIST }
+  )
+  if (found.length)
+    throw new Error(`【${where}】界面上还有玫瑰/粉系颜色：\n  ` + found.map((f) => `${f.why} ${f.p}=${f.v} on <${f.tag} class="${f.cls}">`).join('\n  '))
+  console.log(`旧玫瑰扫描 ✓ ${where}`)
+}
+
+/**
+ * 深色侧栏的对比度闸门（WCAG AA 4.5:1，全是小字所以没有大字豁免）。
+ *
+ * **在渲染态真算**，不是拿设计稿的十六进制对：文字色多半是 rgba（ink-soft 就是），
+ * 必须先合成到它实际压着的那层底上，否则算出来的数比眼睛看到的好看得多。
+ */
+const assertSidebarContrast = async () => {
+  const rows = await win.evaluate(() => {
+    const lin = (c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
+    const lum = ([r, g, b]) => 0.2126 * lin(r / 255) + 0.7152 * lin(g / 255) + 0.0722 * lin(b / 255)
+    const parse = (s) => {
+      const m = String(s).match(/rgba?\(([^)]+)\)/)
+      if (!m) return null
+      const p = m[1].split(',').map((x) => parseFloat(x))
+      return [p[0], p[1], p[2], p[3] === undefined ? 1 : p[3]]
+    }
+    const over = (fg, bg) => fg.slice(0, 3).map((c, i) => c * fg[3] + bg[i] * (1 - fg[3]))
+    /** 元素实际压着的底：自己不透明就用自己，否则往上找，最后落到侧栏底色 */
+    const bgOf = (el) => {
+      for (let n = el; n; n = n.parentElement) {
+        const c = parse(getComputedStyle(n).backgroundColor)
+        if (c && c[3] === 1) return c.slice(0, 3)
+        if (c && c[3] > 0) return over(c, bgOf(n.parentElement || document.body))
+      }
+      return [255, 255, 255]
+    }
+    const ratio = (el) => {
+      const bg = bgOf(el)
+      const fg = over(parse(getComputedStyle(el).color), bg)
+      const [hi, lo] = [lum(fg), lum(bg)].sort((a, b) => b - a)
+      return (hi + 0.05) / (lo + 0.05)
+    }
+    const out = []
+    const side = document.querySelector('aside')
+    if (!side) return out
+    const push = (label, el) => {
+      if (!el) return
+      const t = (el.innerText || '').trim().slice(0, 18)
+      if (!t) return
+      out.push({ label, text: t, ratio: Math.round(ratio(el) * 100) / 100 })
+    }
+    push('侧栏标题', side.querySelector('.text-xl'))
+    push('副标题', side.querySelector('.text-xs.text-muted'))
+    push('新对话按钮', side.querySelector('button[title="新对话"]'))
+    side.querySelectorAll('nav button').forEach((b, i) => push(`导航${i + 1}`, b))
+    push('分组标题-最近对话', side.querySelector('.text-2xs'))
+    push('最近对话项', side.querySelector('.group.relative button'))
+    push('身份行', side.lastElementChild)
+    document.querySelectorAll('[data-testid="task-dock"] *').forEach((e) => {
+      if (e.children.length === 0) push('TaskDock', e)
+    })
+    return out
+  })
+  const bad = rows.filter((r) => r.ratio < 4.5)
+  console.log('侧栏对比度：' + rows.map((r) => `${r.label} ${r.ratio}`).join(' · '))
+  if (bad.length)
+    throw new Error(
+      '深色侧栏对比度不达 WCAG AA 4.5：\n  ' +
+        bad.map((b) => `${b.label}「${b.text}」= ${b.ratio}`).join('\n  ')
+    )
+  if (rows.length < 5) throw new Error(`侧栏对比度只测到 ${rows.length} 项，选择器多半失效了`)
+}
+
+/** 侧栏 logo：真的在、真是 20px、基准线真是橙色（不是继承下来的文字色） */
+const assertSidebarLogo = async () => {
+  const r = await win.evaluate(() => {
+    const side = document.querySelector('aside')
+    const svg = side?.querySelector('[data-testid="brand-logo"]')
+    if (!svg) return { ok: false, why: '侧栏里没有 logo' }
+    const bar = svg.querySelector('[data-testid="brand-logo-bar"]')
+    const box = svg.getBoundingClientRect()
+    const barColor = getComputedStyle(bar).stroke
+    const lineColor = getComputedStyle(svg.querySelector('line')).stroke
+    return {
+      ok: true,
+      size: Math.round(box.width),
+      lines: svg.querySelectorAll('line').length,
+      barColor,
+      lineColor,
+      title: side.querySelector('.text-xl')?.textContent?.trim(),
+      titleFont: side.querySelector('.text-xl') ? getComputedStyle(side.querySelector('.text-xl')).fontFamily : '',
+    }
+  })
+  if (!r.ok) throw new Error('侧栏 logo：' + r.why)
+  if (r.size < 16 || r.size > 20) throw new Error(`侧栏 logo 尺寸 ${r.size}px，不在 16–20 区间`)
+  if (r.lines !== 4) throw new Error(`侧栏 logo 应为 3 横线 + 1 基准线 = 4 条，实为 ${r.lines}`)
+  if (r.barColor === r.lineColor)
+    throw new Error(`基准线与横线同色（${r.barColor}）——橙色 token 没生效`)
+  if (!/^rgb\(2[0-9]{2},\s*1[0-9]{2},/.test(r.barColor))
+    throw new Error(`基准线不是橙色：${r.barColor}`)
+  if (r.title !== 'SamePage') throw new Error(`侧栏标题不是 SamePage，实为「${r.title}」`)
+  if (!/SF Pro|-apple-system|Inter|Helvetica/i.test(r.titleFont))
+    throw new Error(`主名没走品牌英文字体栈（--font-brand），实为 ${r.titleFont}`)
+  console.log('侧栏 logo ✓', JSON.stringify(r))
+}
+
 // ---------- 过程可见性（步骤流）的断言工具 ----------
 //
 // 一条铁律：**断言一律到参数层**。「有一条检索步骤」是弱断言，跑绿了也证明不了
@@ -822,6 +1122,23 @@ const E2E_PASSWORD = process.env.E2E_PASSWORD || 'McnAi-Test-2026!'
 
 try {
   await snap('00-登录门', 1500)
+  // 登录门是 logo 三落点之一（大尺寸 logo + SamePage 字标），也是旧名最容易残留的一屏
+  await assertNoOldBrand('登录门')
+  await assertNoRose('登录门')
+  {
+    const g = await win.evaluate(() => {
+      const svg = document.querySelector('[data-testid="brand-logo"]')
+      return svg
+        ? { size: Math.round(svg.getBoundingClientRect().width), lines: svg.querySelectorAll('line').length,
+            name: [...document.querySelectorAll('div')].some((d) => d.textContent.trim() === 'SamePage') }
+        : null
+    })
+    if (!g) throw new Error('登录页没有品牌 logo')
+    if (g.size < 48) throw new Error(`登录页 logo 只有 ${g.size}px，不是大尺寸落点`)
+    if (g.lines !== 4) throw new Error(`登录页 logo 线条数 ${g.lines}，应为 4`)
+    if (!g.name) throw new Error('登录页没有 SamePage 字标')
+    console.log('登录页 logo ✓', JSON.stringify(g))
+  }
   if (CHAT) {
     await win.fill('input[placeholder="邮箱"]', E2E_EMAIL)
     await win.fill('input[placeholder="密码"]', E2E_PASSWORD)
@@ -855,6 +1172,14 @@ try {
     }
   }
   await snap('01-工作台首页', 800)
+  await assertSidebarLogo()
+  await assertSidebarContrast()
+  await assertNoOldBrand('工作台首页')
+  await assertNoRose('工作台首页')
+  // 深色侧栏的 hover 态要单独留一张：hover 只有 CDP 抓屏截得到（§4-15），
+  // 而"深底上 hover 是提亮还是压暗"正是这次改动最容易做错的一处
+  await win.hover('nav button:has-text("个人知识库")')
+  await snapHover('01i-侧栏-深色hover态')
   // 对话工作台（默认页，无模块入口——新对话/Recents 即入口）：空态 + 输入 + 快捷指令
   await snap('01b-工作台-空态', 400)
 
@@ -1025,6 +1350,10 @@ try {
     const n = await win.locator('[data-testid="toast"]').count()
     if (n !== 3) throw new Error(`连点 5 次后 toast 没有限流到 3 条：${n}`)
     await snap('40c-toast-最多三条', 100)
+
+    // 同屏这三条先量一遍（长短不一的文案就在这里）：几何必须逐项相同
+    await grabToastGeo('同屏三条')
+    await snapHover('40e-toast-同屏几何一致')
     /**
      * 「悬停暂停」和「点击关闭」拆成两段互不依赖的验证，各自用一条**新发的** toast。
      *
@@ -1059,10 +1388,47 @@ try {
 
     // 段一 · 悬停暂停：默认 3.2 秒，悬停 5 秒后这一条必须还在
     const hovered = await emitToast()
-    await hovered.hover()
-    await win.waitForTimeout(5000)
-    if (!(await alive(hovered)))
-      throw new Error('悬停 5 秒后被悬停的那条 toast 仍自己消失了（倒计时没暂停）')
+    /**
+     * 竞态⑤（2026-08-18 品牌二期走查现场）：`hover()` 返回不等于 `mouseenter` 已经落上，
+     * 于是"悬停 5 秒还在"变成跟 3.2 秒倒计时赛跑——上一轮绿、这一轮红，代码没动过。
+     * 所以先**确认 `:hover` 真的命中**（命中 = React 的 onMouseEnter 一定已经跑过，
+     * 暂停生效），落不上就挪开重来一次；始终落不上才是真失败，报出来别静默重试到超时。
+     */
+    let onIt = false
+    for (let i = 0; i < 2 && !onIt; i++) {
+      await hovered.hover()
+      for (let t = 0; t < 10 && !onIt; t++) {
+        onIt = await hovered.evaluate((el) => el.matches(':hover')).catch(() => false)
+        if (!onIt) await win.waitForTimeout(100)
+      }
+      if (!onIt) await win.mouse.move(0, 0)
+    }
+    if (!onIt) throw new Error('鼠标没能真正落在 toast 上（:hover 一直不命中），悬停暂停这条验不了')
+    /**
+     * 边等边采样，而不是干等 5 秒。
+     *
+     * **根因没查清，如实记**：这条断言在 2026-08-18 品牌二期这几轮里偶发红
+     * （同一段代码前后两轮绿、第三轮红），而单独写探针连跑 5 轮**一次都没复现**。
+     * 已经排除的：`:hover` 没命中（现在先确认命中才开始计时）、鼠标落点偏移、
+     * toast 被别的元素顶掉。所以这里改成每 250ms 取一次 `isConnected` + `:hover`，
+     * 死了就把整条时间线摆出来——"暂停失效"和"鼠标半路掉了"长得一模一样，
+     * 没有时间线只能靠猜，为这个已经白跑过一轮 16 分钟的走查。
+     */
+    const tl = []
+    const t0 = Date.now()
+    let dead = false
+    for (let i = 0; i < 20 && !dead; i++) {
+      const st = await hovered
+        .evaluate((el) => ({ conn: el.isConnected, hov: el.matches(':hover') }))
+        .catch(() => ({ conn: false, hov: false }))
+      if (!st.conn) dead = true
+      else tl.push(`${Date.now() - t0}ms hov=${st.hov ? 1 : 0}`)
+      if (!dead) await win.waitForTimeout(250)
+    }
+    if (dead)
+      throw new Error(
+        `悬停 5 秒后被悬停的那条 toast 仍自己消失了（倒计时没暂停）；时间线：${tl.join(' | ')}`
+      )
     const stay = await win.locator('[data-testid="toast"]').count()
     await snapHover('40d-toast-悬停暂停倒计时')
 
@@ -1815,6 +2181,33 @@ try {
         () => [...document.querySelectorAll('.max-w-3xl > div')].filter((b) => b.className.includes('justify-end')).length
       )
       if (userBubbles !== 1) throw new Error(`发出去的提问没留在历史里：user 气泡 ${userBubbles} 个`)
+      /**
+       * 错误气泡的**红边**（三期：语义底色只留给持续存在的状态，错误回答会一直留在历史里）。
+       * 断言取 computed style 与 token 比，不认"class 里有 border-danger"——
+       * Tailwind 类名写对了但 token 没接上是最容易糊过去的一种（`bg-x/60` 那类坑）。
+       */
+      const eb = await win.evaluate(() => {
+        const el = document.querySelector('[data-testid="error-bubble"]')
+        if (!el) return null
+        const cs = getComputedStyle(el)
+        const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim()
+        const hex2rgb = (h) => {
+          const m = h.replace('#', '')
+          return `rgb(${parseInt(m.slice(0, 2), 16)}, ${parseInt(m.slice(2, 4), 16)}, ${parseInt(m.slice(4, 6), 16)})`
+        }
+        return {
+          borderLeft: cs.borderLeftWidth,
+          color: cs.borderLeftColor,
+          bg: cs.backgroundColor,
+          wantColor: hex2rgb(css('--color-danger')),
+          wantBg: hex2rgb(css('--color-danger-soft')),
+        }
+      })
+      if (!eb) throw new Error('错误气泡没有 error-bubble 容器（红边没画）')
+      if (parseFloat(eb.borderLeft) < 2) throw new Error(`错误气泡左边框太细：${eb.borderLeft}`)
+      if (eb.color !== eb.wantColor) throw new Error(`错误气泡边色 ${eb.color} 与 --color-danger 对不上`)
+      if (eb.bg !== eb.wantBg) throw new Error(`错误气泡底色 ${eb.bg} 与 --color-danger-soft 对不上`)
+      console.log('错误气泡红边 ✓', JSON.stringify(eb))
       await snap('41-AI出错-气泡内重试按钮', 200)
 
       // 重试前后消息条数必须一样：只数"提问几条/重试按钮几个"抓不住"每重试一次多堆一条
@@ -2018,6 +2411,8 @@ try {
   // 知识库页
   await win.click('text=个人知识库')
   await snap('02-知识库-默认大图谱', 2500)
+  await assertNoOldBrand('个人知识库')
+  await assertNoRose('个人知识库')
 
   // 文件树默认宽度收窄到 ~220px（第二轮精修项）
   const treeW0 = await win.locator('[data-testid="tree-col"]').evaluate((el) => el.offsetWidth)
@@ -2068,6 +2463,7 @@ try {
   await win.click('button:has-text("删除")')
   await win.locator('text=可在废纸篓找回').waitFor({ timeout: 5000 })
   await snap('03c-删除完成toast', 200)
+  await grabToastGeo('删除笔记(info)')
   await win.waitForTimeout(1200)
   if (await win.locator('button.block.truncate:has-text("e2e待删除笔记")').count())
     throw new Error('删除后文件树里还留着这篇笔记')
@@ -2645,14 +3041,32 @@ try {
     console.log('分隔线拖拽 ✓', JSON.stringify({ treeBefore, treeAfter, graphBefore, graphAfter, saved, treeReload }))
   }
 
+  /** 02d 放大时用的锚点：02e 拍整图要按同一点原路缩回（滚轮缩放以指针为中心） */
+  let zoomAnchor = null
+
   // ---- 关系图配色特写：节点色是否融进暖色主题，需要人工看这张图确认 ----
+  // 2026-08-18 重做后 token 换了一套：按**角色**取色（talent/product/partner/hub/doc），
+  // 不再是 group-1..7 的哈希分组色。旧断言是按 group-* 写的，那套 token 已经删了
   {
     const groups = await win.evaluate(() => {
       const cs = getComputedStyle(document.documentElement)
-      const names = ['--color-graph-link', ...Array.from({ length: 7 }, (_, i) => `--color-group-${i + 1}`)]
+      const names = [
+        '--color-graph-link',
+        '--color-graph-node',
+        '--color-graph-talent',
+        '--color-graph-product',
+        '--color-graph-partner',
+        '--color-graph-hub',
+      ]
       return Object.fromEntries(names.map((n) => [n, cs.getPropertyValue(n).trim()]))
     })
     if (Object.values(groups).some((v) => !v)) throw new Error('图谱配色 token 缺失：' + JSON.stringify(groups))
+    // 旧的 group-* 一支都不许留：留着就会有人以为还能用，配色又慢慢回到"人人抢颜色"
+    const leftover = await win.evaluate(() => {
+      const cs = getComputedStyle(document.documentElement)
+      return Array.from({ length: 7 }, (_, i) => `--color-group-${i + 1}`).filter((n) => cs.getPropertyValue(n).trim())
+    })
+    if (leftover.length) throw new Error('旧的分组色 token 还在：' + leftover.join('、'))
     const cbox = await win.locator('canvas').first().boundingBox()
     if (!cbox) throw new Error('关系图 canvas 不存在')
     // 节点团不一定落在画布正中（力导布局每次落点不同），直接扫 canvas 像素求出
@@ -2679,13 +3093,20 @@ try {
       return { n, cx: (minX + maxX) / 2 / dpr, cy: (minY + maxY) / 2 / dpr }
     })
     if (!cluster.n) throw new Error('关系图画布上没有画出任何节点')
-    // 滚轮以指针为中心放大，放大后指针那一点的内容不动，正好用同一点当截图中心
-    await win.mouse.move(cbox.x + cluster.cx, cbox.y + cluster.cy)
+    // 滚轮以指针为中心放大，放大后指针那一点的内容不动，正好用同一点当截图中心。
+    // 锚点存到外层：下一段（02e 整图）要按同一个点、同样的格数原路缩回去
+    zoomAnchor = { x: cbox.x + cluster.cx, y: cbox.y + cluster.cy }
+    await win.mouse.move(zoomAnchor.x, zoomAnchor.y)
     for (let i = 0; i < 3; i++) {
       await win.mouse.wheel(0, -200)
       await win.waitForTimeout(250)
     }
     await win.waitForTimeout(1000)
+    // 同 02e：先在画布内抖一下清掉 hover，否则这张特写拍到的是"压暗态"（大半张灰）
+    await win.mouse.move(cbox.x + 12, cbox.y + cbox.height - 12)
+    await win.waitForTimeout(200)
+    await win.mouse.move(cbox.x + 14, cbox.y + cbox.height - 14)
+    await win.waitForTimeout(500)
     const w = Math.min(820, Math.floor(cbox.width))
     const h = Math.min(560, Math.floor(cbox.height))
     const clipX = Math.max(cbox.x, Math.min(cbox.x + cluster.cx - w / 2, cbox.x + cbox.width - w))
@@ -2696,6 +3117,111 @@ try {
     })
     record('02d-关系图-配色特写')
     console.log('shot: 02d-关系图-配色特写', JSON.stringify({ cluster, ...groups }))
+  }
+
+  /**
+   * 关系图的角色配色（2026-08-18 重做：多数安静、少数发声）。
+   *
+   * **必须造一张产品卡**：走查库里产品卡的来源阈值（≥2 处提及）从来没够过，
+   * 于是 `product` 那支绿色一次都不会出现——图例上却写着「产品」。
+   * 不造的话这条分支永远没被验过，而"图例声称的颜色实际不存在"正是这次要消灭的东西。
+   */
+  {
+    const tmpCard = join(vaultCopy, '30_实体', '产品', 'e2e走查产品卡.md')
+    mkdirSync(dirname(tmpCard), { recursive: true })
+    writeFileSync(
+      tmpCard,
+      ['---', 'doc_type: 产品页', 'entity_kind: product', 'entity_name: e2e走查产品卡', 'tags: ["实体", "产品"]', '---', '', '# 🛍 e2e走查产品卡', '', '关联：[[Home]]', ''].join('\n')
+    )
+    // 等 watcher 把这篇扫进索引（chokidar awaitWriteFinish 2s + 重建）
+    let kinds = {}
+    for (let i = 0; i < 30; i++) {
+      await win.waitForTimeout(1000)
+      kinds = await win.evaluate(async () => {
+        const g = await window.api.vault.graph()
+        const c = {}
+        for (const n of g.nodes) c[n.kind ?? '?'] = (c[n.kind ?? '?'] ?? 0) + 1
+        return c
+      })
+      if (kinds.product) break
+    }
+    for (const k of ['talent', 'product', 'partner', 'hub', 'doc']) {
+      if (!kinds[k]) throw new Error(`关系图缺少角色 ${k}（实测分布 ${JSON.stringify(kinds)}）`)
+    }
+    // "多数安静"是这次配色的设计前提，不是修辞：普通文档必须占大头，
+    // 否则说明角色判定把太多东西提成了"要发声的少数"
+    const total = Object.values(kinds).reduce((a, b) => a + b, 0)
+    const loud = total - kinds.doc
+    if (kinds.doc / total < 0.5)
+      throw new Error(`安静的普通文档只占 ${Math.round((kinds.doc / total) * 100)}%，"多数安静"不成立：${JSON.stringify(kinds)}`)
+    // 图例：五项齐全，且每个色点的颜色**就是**对应 token 的值（图例与画布同源，不许各画各的）
+    const legend = await win.evaluate(() => {
+      const box = document.querySelector('[data-testid="graph-legend"]')
+      if (!box) return null
+      const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim()
+      const toRgb = (hex) => {
+        const m = hex.replace('#', '')
+        return `rgb(${parseInt(m.slice(0, 2), 16)}, ${parseInt(m.slice(2, 4), 16)}, ${parseInt(m.slice(4, 6), 16)})`
+      }
+      const MAP = {
+        talent: '--color-graph-talent',
+        product: '--color-graph-product',
+        partner: '--color-graph-partner',
+        hub: '--color-graph-hub',
+        doc: '--color-graph-node',
+      }
+      return [...box.querySelectorAll('[data-legend]')].map((el) => ({
+        kind: el.dataset.legend,
+        label: el.textContent.trim(),
+        dot: getComputedStyle(el.querySelector('i')).backgroundColor,
+        want: toRgb(css(MAP[el.dataset.legend])),
+      }))
+    })
+    // 三期硬约束：**品牌橙不许再当任何类别的常态色**（只留给交互态的高亮环）。
+    // 二期把达人卡定成品牌橙，结果 169 个达人节点跟界面主色抢戏
+    const brandClash = await win.evaluate(() => {
+      const cs = getComputedStyle(document.documentElement)
+      const accent = cs.getPropertyValue('--color-accent').trim().toLowerCase()
+      return ['talent', 'product', 'partner', 'hub', 'node']
+        .map((k) => [k, cs.getPropertyValue(`--color-graph-${k}`).trim().toLowerCase()])
+        .filter(([, v]) => v === accent)
+        .map(([k]) => k)
+    })
+    if (brandClash.length)
+      throw new Error(`品牌橙又被拿去当节点常态色了：${brandClash.join('、')}（橙只留给选中/悬停高亮环）`)
+    if (!legend) throw new Error('关系图角落没有图例（颜色语义不许让用户猜）')
+    if (legend.length !== 5) throw new Error(`图例应有 5 项，实为 ${legend.length}`)
+    for (const it of legend) {
+      if (it.dot !== it.want) throw new Error(`图例「${it.label}」的色点 ${it.dot} 与 token ${it.want} 对不上`)
+    }
+    /**
+     * 这张是**整图**（用户验收看的就是它）：前一步 02d 为了拍特写把画布放大过、
+     * 而且鼠标还压在某个节点上（一度邻居提亮、其余压暗）。不复位的话拍出来是
+     * "放大 + 悬停态"的局部，看不出"多数安静"到底成没成立。
+     */
+    {
+      const cb = await win.locator('canvas').first().boundingBox()
+      // **原样退回 02d 放大的那 3 格**（滚轮缩放是指数的：多退几格就把整张图缩成一个点，
+      // 实测退 12 格拍出来是空白画布中间一个小点）。指针位置也要和放大时同一点，
+      // 否则以不同中心缩放会把图推出视野
+      if (zoomAnchor) await win.mouse.move(zoomAnchor.x, zoomAnchor.y)
+      for (let i = 0; i < 3; i++) {
+        await win.mouse.wheel(0, 200)
+        await win.waitForTimeout(200)
+      }
+      /**
+       * 清 hover 的压暗态（留着拍出来大半张图是灰的）。**必须在画布内再动一次鼠标**：
+       * Playwright 的 mouse.move 是瞬移，直接跳到画布外不会在 canvas 里产生 mousemove，
+       * force-graph 就不会重算 hover——2026-08-18 拍图时被这个坑了两张。
+       */
+      await win.mouse.move(cb.x + 12, cb.y + cb.height - 12)
+      await win.waitForTimeout(200)
+      await win.mouse.move(cb.x + 14, cb.y + cb.height - 14)
+      await win.waitForTimeout(600)
+    }
+    await snap('02e-关系图-角色配色与图例', 1200)
+    console.log('关系图角色配色 ✓', JSON.stringify({ kinds, 发声占比: `${Math.round((loud / total) * 100)}%`, legend: legend.map((l) => l.label) }))
+    rmSync(tmpCard, { force: true })
   }
 
   // ---- markdown 表格样式：造一篇带表格的笔记，看圆角/表头暖灰底/行 hover ----
@@ -2752,6 +3278,7 @@ try {
     await win.click('button:has-text("保存")')
     await win.locator('text=已保存').waitFor({ timeout: 5000 })
     await snap('20b-保存成功toast', 200)
+    await grabToastGeo('保存成功(ok/绿)')
     // 保存成功必须退出编辑态，且内容真的落盘（不是只把按钮变灰）
     if (await win.locator('textarea').count()) throw new Error('保存成功后没有退出编辑态')
     const saved = await win.evaluate(async () => window.api.vault.readRaw('e2e表格样式.md'))
@@ -2946,6 +3473,8 @@ try {
   // 设置页
   await win.click('text=设置')
   await snap('10-设置页', 600)
+  await assertNoOldBrand('设置页')
+  await assertNoRose('设置页')
 
   // ---- 设置页分组重构：四组卡片 + 管理员区默认不可见 ----
   {
@@ -3159,6 +3688,8 @@ try {
       if (!(await win.locator('[data-testid="usage-empty"]').count()))
         throw new Error('本月零记录时用量页没有空态引导')
       await snap('47-用量页-空态', 400)
+      await assertNoOldBrand('用量页')
+      await assertNoRose('用量页')
     }
 
     // 桩数据：直接往 userData/usage/YYYY-MM.jsonl 追加几条，验"落盘格式 → 汇总 → 页面"这条读取链路
@@ -3290,6 +3821,48 @@ try {
     })
     if (barBox.有记录的天数 < 1) throw new Error('桩数据没落到最近 14 天里')
     if (barBox.最高柱 < 20) throw new Error(`柱状图渲染出来是平的（最高柱 ${barBox.最高柱}px）`)
+
+    /**
+     * 档位分段（同柱堆叠）。桩数据里今天有一条增强 + 一条无档位（老记录算标准），
+     * 所以今天那根柱子**必须两段都在**；只有单档的日期照常单段。
+     * 断言量的是**像素**不是 div 个数——分段高度算成 0 的话，"两个 div 都在"照样通过
+     * （14 天柱状图第一版就是这么漏过去的）。
+     */
+    const seg = await win.evaluate(() => {
+      const cols = [...document.querySelectorAll('[data-testid="usage-daily"] > div')]
+      const bars = cols.map((c) => c.firstElementChild).filter((b) => Number(b?.dataset.count) > 0)
+      const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim()
+      const hex2rgb = (h) => {
+        const m = h.replace('#', '')
+        return `rgb(${parseInt(m.slice(0, 2), 16)}, ${parseInt(m.slice(2, 4), 16)}, ${parseInt(m.slice(4, 6), 16)})`
+      }
+      const both = bars.find((b) => Number(b.dataset.standard) > 0 && Number(b.dataset.enhanced) > 0)
+      const segOf = (bar, name) => {
+        const el = bar?.querySelector(`[data-seg="${name}"]`)
+        return el ? { h: Math.round(el.getBoundingClientRect().height), bg: getComputedStyle(el).backgroundColor } : null
+      }
+      const legend = [...document.querySelectorAll('[data-testid="usage-daily-legend"] [data-legend]')].map((e) => ({
+        k: e.dataset.legend,
+        label: e.textContent.trim(),
+        dot: getComputedStyle(e.querySelector('i')).backgroundColor,
+      }))
+      return {
+        混合柱: both ? { std: segOf(both, 'standard'), enh: segOf(both, 'enhanced'), d: { ...both.dataset } } : null,
+        单档柱数: bars.filter((b) => Number(b.dataset.standard) === 0 || Number(b.dataset.enhanced) === 0).length,
+        legend,
+        want: { standard: hex2rgb(css('--color-tier-standard')), enhanced: hex2rgb(css('--color-tier-enhanced')) },
+      }
+    })
+    if (!seg.混合柱) throw new Error('没有一根柱子同时含标准与增强，分档断言等于空过')
+    if (!seg.混合柱.std || seg.混合柱.std.h < 3) throw new Error(`标准档那一段没画出来：${JSON.stringify(seg.混合柱)}`)
+    if (!seg.混合柱.enh || seg.混合柱.enh.h < 3) throw new Error(`增强档那一段没画出来：${JSON.stringify(seg.混合柱)}`)
+    if (seg.混合柱.std.bg !== seg.want.standard || seg.混合柱.enh.bg !== seg.want.enhanced)
+      throw new Error(`分段颜色与 token 对不上：${JSON.stringify({ 实际: seg.混合柱, 期望: seg.want })}`)
+    if (seg.legend.length !== 2) throw new Error(`柱状图图例应有两项，实为 ${seg.legend.length}`)
+    for (const it of seg.legend) {
+      if (it.dot !== seg.want[it.k]) throw new Error(`图例「${it.label}」色点 ${it.dot} 与 token 对不上`)
+    }
+    console.log('用量柱状图分档 ✓', JSON.stringify({ 混合柱: seg.混合柱.d, 单档柱数: seg.单档柱数, 图例: seg.legend.map((l) => l.label) }))
     const note = (await win.locator('[data-testid="usage-token-note"]').innerText()).replace(/\s+/g, '')
     // tokens 含哪几项、以及打标为什么显示「—」，两件事都得写出来
     if (!/缓存读/.test(note) || !/只记次数/.test(note))
@@ -3485,12 +4058,16 @@ try {
   if (!(await cardPpt.count())) throw new Error('产物面板没有 e2e课件.pptx 卡片')
   // 静态时不应露出操作按钮（hover 才出）
   const beforeHover = await cardPpt.locator('button:has-text("入库")').isVisible().catch(() => false)
-  await cardPpt.hover()
-  await win.waitForTimeout(300)
   const openBtn = cardPpt.locator('button:has-text("打开")').first()
   const ingestBtn = cardPpt.locator('button:has-text("入库")').first()
-  if (!(await openBtn.isVisible()) || !(await ingestBtn.isVisible()))
-    throw new Error('产物卡片 hover 后「打开/入库」没出现')
+  /**
+   * hover 态要轮询 + 重试一次，别采样一次就判死：光标停着不动时，
+   * 产物列表被 watcher 事件刷新一次就可能把光标底下那个节点换掉，
+   * 而 :hover 要等下一次鼠标移动才重算（2026-08-18 走查现场撞到一次，
+   * 隔离脚本里怎么都复现不出来）。**失败时把现场 dump 出来**——
+   * "没 hover 上"和"按钮压根没渲染"长得一模一样，只报一句话等于让下一个人重猜一遍。
+   */
+  await hoverUntilVisible(cardPpt, [openBtn, ingestBtn], '产物卡片「打开/入库」', 'div.group:has([title="e2e课件.pptx"])')
   if (beforeHover) throw new Error('产物卡片没 hover 时就露出了操作按钮')
   await snapHover('13-产物卡片-hover操作')
   console.log('产物卡片 hover ✓（静态隐藏 → hover 出「打开/入库」）')
@@ -3502,10 +4079,12 @@ try {
     rmSync(join(artifactDir, gone), { force: true })
     const cardGone = win.locator(`div.group:has([title="${gone}"])`).first()
     if (!(await cardGone.count())) throw new Error('产物面板里找不到 e2e数据表.xlsx 卡片')
-    await cardGone.hover()
-    await win.waitForTimeout(200)
+    // 刚 rmSync 掉一个产物 → watcher 会把列表重渲染一次，光标底下的节点被换掉、
+    // hover 态跟着丢（同 hoverUntilVisible 的注释）。先等 toast 散掉再确认按钮真的在
     await win.locator('[data-testid="toast"]').first().waitFor({ state: 'detached', timeout: 8000 }).catch(() => {})
-    await cardGone.locator('button:has-text("打开")').click()
+    const goneOpen = cardGone.locator('button:has-text("打开")').first()
+    await hoverUntilVisible(cardGone, goneOpen, '产物卡片「打开」（文件已被删）', `div.group:has([title="${gone}"])`)
+    await goneOpen.click()
     await win.locator('[data-testid="toast"]').first().waitFor({ timeout: 8000 })
     const openToast = await win.locator('[data-testid="toast"]').first().innerText()
     if (!/打不开产物/.test(openToast)) throw new Error(`产物打不开时没有提示：「${openToast}」`)
@@ -3513,6 +4092,7 @@ try {
     const act = await win.locator('[data-testid="toast-action"]').first().innerText()
     if (!/Finder/.test(act)) throw new Error(`打不开产物的提示上没有兜底出口：「${act}」`)
     await snap('44-产物打开失败-提示与Finder出口', 200)
+    await grabToastGeo('产物打不开(error/带按钮)')
     console.log('M-05 产物打开失败 ✓', JSON.stringify({ toast: openToast.trim(), 出口: act.trim() }))
   }
 
@@ -3535,11 +4115,29 @@ try {
     await snapHover('29-产物入库-入库中')
     console.log('入库三态 · 入库中 ✓')
 
-    // 已入库：等本轮 pipeline 跑完（真 docx 应当转换成功）
+    /**
+     * 已入库：等本轮 pipeline 跑完（真 docx 应当转换成功）。
+     *
+     * 上限 320 秒 → 600 秒（2026-08-18 品牌二期走查实测被这条卡住）：这一步排在
+     * 投递箱/取消那些用例后面，入库任务往往**排在别人后面等**，而 A-3 之后每轮
+     * pipeline 末尾还要给全库跑一遍实体建卡（日志：`建卡完成：扫 112 篇`）。
+     * 实测那次入库在断言超时后 **18 秒**才落地——产品没坏，是这个上限成了临界值
+     * （同 `waitInboxIdle` 从 5 分钟提到 10 分钟那次的成因）。
+     * 顺带每 30 秒打一次任务状态：光等不打，超时了只能靠事后翻日志倒推。
+     */
     let done = false
-    for (let i = 0; i < 160 && !done; i++) {
+    for (let i = 0; i < 300 && !done; i++) {
       done = (await win.locator('[data-testid="ingest-done"]').count()) > 0
-      if (!done) await win.waitForTimeout(2000)
+      if (!done) {
+        if (i > 0 && i % 15 === 0) {
+          const st = await win.evaluate(async () => {
+            const s = await window.api.tasks.list()
+            return s.tasks.filter((x) => x.kind === 'ingest').map((x) => `${x.title}=${x.status}`)
+          })
+          console.log(`  等入库 ${i * 2}s：${st.join(' / ') || '（没有 ingest 任务）'}`)
+        }
+        await win.waitForTimeout(2000)
+      }
     }
     if (!done) {
       // 失败时把**三边**都打出来：主进程任务快照 / 落盘的已入库表 / 渲染层拿到的表。
@@ -3673,6 +4271,9 @@ try {
     console.log('H-01 工作台拖入 ✓（应用未被替换 + 文件进队列）', dropName)
   }
 
+  // ---- toast 一家人检查：把整轮采到的几何样本统一比一遍（采集点见 grabToastGeo）----
+  assertToastConsistency()
+
   // ---- before-quit：退出应用必须把 pipeline 进程组一起带走（当前就存在的孤儿进程 bug）----
   // 上一步刚往投递箱丢了文件，等它真的 spawn 起来，然后关掉应用再查 ps
   {
@@ -3772,7 +4373,9 @@ if (chatOnly.length) {
   console.log(
     CHAT
       ? '⚠️  以下截图属于 E2E_CHAT 专属，但本轮开了 E2E_CHAT 却没刷到，请查上面的跳过原因：'
-      : 'ℹ️  以下截图属于 E2E_CHAT 专属（本轮是本地模式，未刷新属正常，不算残留）：'
+      : 'ℹ️  以下截图属于 E2E_CHAT 专属（本轮是本地模式，未刷新属正常，不算残留）。\n' +
+        '    注：这批的画面**仍是品牌二期之前的旧配色**，属已知状态——按 2026-08-18 拍板\n' +
+        '    「本单不为它们单独跑一轮真实 AI」，待下次 E2E_CHAT 轮自然刷新：'
   )
   for (const f of chatOnly) console.log(`   - ${f}  ←  ${ONLY_IN_CHAT_RUN[f]}`)
 }

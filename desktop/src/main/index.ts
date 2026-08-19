@@ -25,7 +25,7 @@ function createWindow(): void {
     height: 920,
     minWidth: 1080,
     minHeight: 700,
-    title: 'mcn-ai',
+    title: 'SamePage',
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#FAF9F5',
     webPreferences: {
@@ -51,7 +51,7 @@ function createWindow(): void {
 
   win.webContents.on('render-process-gone', (_e, details) => {
     log('error', 'renderer-gone', details.reason)
-    dialog.showErrorBox('mcn-ai 界面异常', `界面进程异常退出（${details.reason}），即将自动恢复。\n如反复出现，请在设置页导出诊断报告。`)
+    dialog.showErrorBox('SamePage 界面异常', `界面进程异常退出（${details.reason}），即将自动恢复。\n如反复出现，请在设置页导出诊断报告。`)
     win.reload()
   })
 
@@ -75,12 +75,12 @@ function buildMenu(): void {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       {
-        label: 'mcn-ai',
+        label: 'SamePage',
         submenu: [
-          { label: '关于 mcn-ai', role: 'about' },
+          { label: '关于 SamePage', role: 'about' },
           { type: 'separator' },
           { label: '隐藏', role: 'hide' },
-          { label: '退出 mcn-ai', role: 'quit' },
+          { label: '退出 SamePage', role: 'quit' },
         ],
       },
       {

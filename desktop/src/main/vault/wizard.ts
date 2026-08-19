@@ -38,7 +38,7 @@ doc_type: 指南
 tags: [入门]
 ---
 
-# 欢迎使用 mcn-ai
+# 欢迎使用 SamePage
 
 这是你的个人知识库——一个普通的 markdown 文件夹，兼容 [[Obsidian]]。
 

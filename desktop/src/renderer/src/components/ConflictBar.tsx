@@ -19,8 +19,11 @@ export function ConflictBar({
 }) {
   const [showTheirs, setShowTheirs] = useState(false)
   return (
-    <div data-testid="conflict-bar" className="border-b border-warn-line bg-warn-soft">
-      <div className="flex items-center gap-2 px-8 py-2 text-sm text-warn">
+    /* 浅金底 + 深金字（三期）：这是一条**常驻在正文上方**的横幅，铺深色会一直拽走视线；
+       而它又必须一眼看见，所以用浅底深字而不是弱化成灰。云端降级条那条仍是橙系——
+       两者语义不同：降级是"系统在退让"，冲突是"有东西等你决定" */
+    <div data-testid="conflict-bar" className="border-b border-gold-line bg-gold-soft">
+      <div className="flex items-center gap-2 px-8 py-2 text-sm text-gold-ink">
         <AlertTriangle size={14} className="shrink-0" />
         <span className="min-w-0 flex-1">
           此文件已在外部被修改（Obsidian？）。你的改动还在，保存时会让你选怎么处理。
@@ -28,14 +31,14 @@ export function ConflictBar({
         <button
           data-testid="conflict-view-theirs"
           onClick={() => setShowTheirs((v) => !v)}
-          className="shrink-0 rounded-full border border-warn-line px-2.5 py-0.5 hover:bg-card"
+          className="shrink-0 rounded-full border border-gold-line px-2.5 py-0.5 hover:bg-card"
         >
           {showTheirs ? '收起对方版本' : '查看对方版本'}
         </button>
         <button
           data-testid="conflict-overwrite"
           onClick={onOverwrite}
-          className="shrink-0 rounded-full border border-warn-line px-2.5 py-0.5 hover:bg-card"
+          className="shrink-0 rounded-full border border-gold-line px-2.5 py-0.5 hover:bg-card"
         >
           用我的覆盖
         </button>

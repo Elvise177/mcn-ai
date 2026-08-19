@@ -132,7 +132,9 @@ export function StepStream({
           <ChevronDown size={12} /> {summary}
         </button>
       )}
-      <div className="border-l border-line pl-2.5">
+      {/* 左边线走橙：品牌二期把"进行中"的语义统一到基准线那支橙上（步骤流左边线 /
+          投递箱进度条 / 云端降级条同一支），成功绿·失败红·取消灰这些终态色不动 */}
+      <div className="border-l border-accent-line pl-2.5">
         {group.steps.map((s) => (
           <StepRow key={s.id} step={s} medians={medians} />
         ))}

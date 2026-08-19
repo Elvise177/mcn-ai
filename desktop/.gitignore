@@ -13,3 +13,6 @@ e2e/*.zip
 /index.js
 /preload.js
 /renderer.js
+
+# icns 的中间产物：可由 scripts/gen-icon.mjs 一键重出，真正进构建的是 build/icon.icns
+build/icon.iconset/

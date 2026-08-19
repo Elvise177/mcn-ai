@@ -9,17 +9,29 @@ import { ConflictBar } from '../components/ConflictBar'
 import { ui } from '../components/ui'
 import { X, Inbox, MoveUpLeft, MoreHorizontal, Loader2, FileWarning, RotateCcw } from 'lucide-react'
 import { pendingNote, inboxPanel } from '../lib/bus'
-import { GRAPH_GROUP_TOKENS, token, tokenPx } from '../theme'
+import { GRAPH_KIND_TOKEN, GRAPH_LEGEND, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
 import { errText } from '../lib/err'
 import { enqueueMessage } from '../lib/enqueue'
 import { useTask } from '../hooks/useTasks'
 import { useDragOver } from '../hooks/useDragOver'
 
-const colorOf = (group: string): string => {
-  let h = 0
-  for (const c of group) h = (h * 31 + c.charCodeAt(0)) % 9973
-  return token(GRAPH_GROUP_TOKENS[h % GRAPH_GROUP_TOKENS.length])
+/** 节点取色：角色 → token（角色由主进程算，见 vault/graph.ts 的 kindOf） */
+const colorOf = (kind: string): string => token(GRAPH_KIND_TOKEN[kind] ?? GRAPH_KIND_TOKEN.doc)
+
+/**
+ * 边线透明度随缩放联动：k≤0.5（缩得很远）→ 0.55，k≥1.6（放大看细节）→ 1.0，中间线性。
+ * **下限是调出来的**：第一版给 0.35，叠上已经调淡的线色之后整张图的边几乎看不见，
+ * 团块之间怎么连的读不出来——毛毡感是消了，结构也一起没了。0.55 是"能看出结构、
+ * 又不糊成一层"的那一档（563 节点 / 1973 边的 Maggie 库上目测定的）。
+ * 十六进制 token 转 rgba 在这里做，theme.css 里只放一支颜色（别为透明度再开一堆 token）。
+ */
+const fadeLink = (hex: string, k: number): string => {
+  const a = Math.max(0.55, Math.min(1, 0.55 + ((k - 0.5) / 1.1) * 0.45))
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
+  if (!m) return hex
+  const n = parseInt(m[1], 16)
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a.toFixed(2)})`
 }
 
 /** 链接里的 %20 之类还原成可读文案；坏的百分号编码会抛，原样显示即可 */
@@ -343,7 +355,7 @@ function EmptyVaultGuide({ onOpenInbox }: { onOpenInbox: () => void }) {
         <MoveUpLeft size={14} />
         左上角「投递箱」可随时看处理进度
       </div>
-      <div className="flex w-full max-w-md flex-col items-center rounded-xl border border-dashed border-accent-line bg-sidebar px-8 py-10 text-center">
+      <div className="flex w-full max-w-md flex-col items-center rounded-xl border border-dashed border-accent-line bg-surface px-8 py-10 text-center">
         <Inbox size={28} className="mb-3 text-accent" />
         <div className="text-xl font-medium">拖入你的第一份资料试试</div>
         <div className="mt-2 text-md leading-base text-muted">
@@ -1065,7 +1077,8 @@ function NoteView({
     setConflict(null)
     setDirty(false)
     setEditing(false)
-    ui.toast(msg)
+    // 真·成功（内容已落盘）→ 绿；「已删除」「已重命名」这类只是告知 → 保持默认炭黑
+    ui.toast(msg, 'ok')
   }
 
   /** 冲突条上的「用我的覆盖」：不等到保存那一步，就地把磁盘那版盖掉（对方改动会丢） */
@@ -1249,7 +1262,7 @@ function NoteView({
               </div>
             )}
             {emptyBody ? (
-              <div className="rounded-xl bg-sidebar px-4 py-3 text-base text-muted">
+              <div className="rounded-xl bg-surface px-4 py-3 text-base text-muted">
                 该笔记只有属性、没有正文（模板类文件常见）。点右上角「编辑」可添加内容。
               </div>
             ) : oversize ? (
@@ -1300,6 +1313,8 @@ interface GNode {
   id?: string | number
   name?: string
   group?: string
+  /** 节点角色：取色的唯一依据，主进程算好下发（vault/graph.ts 的 kindOf） */
+  kind?: string
   val?: number
   x?: number
   y?: number
@@ -1323,6 +1338,12 @@ const GraphPanel = memo(function GraphPanel({
   const [size, setSize] = useState({ w: 320, h: 400 })
   const hoverRef = useRef<string | null>(null)
   const neighborsRef = useRef<Map<string, Set<string>>>(new Map())
+  /** 当前缩放倍率（onZoom 写入）：边线透明度按它联动。**不进 state** —— 每帧 setState 会把 canvas 拖卡 */
+  const zoomRef = useRef(1)
+  /** 每个节点这一帧画出来的半径（标签层要用它决定文字落在圆下面多远） */
+  const radiusRef = useRef<Map<string, number>>(new Map())
+  /** 全量图数据的引用：标签层要"看到全图"才能排优先级，而 state 在回调里拿到的是快照 */
+  const dataRef = useRef<{ nodes: unknown[]; links: unknown[] }>({ nodes: [], links: [] })
 
   useEffect(() => {
     const load = (d: GraphData): void => {
@@ -1335,6 +1356,7 @@ const GraphPanel = memo(function GraphPanel({
         nb.get(l.target)!.add(l.source)
       }
       neighborsRef.current = nb
+      dataRef.current = d
       setData(d)
     }
     window.api.vault.graph().then(load)
@@ -1352,6 +1374,8 @@ const GraphPanel = memo(function GraphPanel({
 
   /* Obsidian 式绘制：圆点 + 下方文字标签（放大到一定倍率才显示，防止糊成一片）。
      currentRef 走 ref 而非 prop——点击笔记不触发图谱组件重渲染（此前卡顿来源之一） */
+  /* 当前缩放倍率：边线透明度按它联动（onZoom 回调写入，不进 state——
+     每帧 setState 会把 canvas 拖到卡） */
   const drawNode = useCallback(
     (node: GNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const id = String(node.id)
@@ -1361,31 +1385,133 @@ const GraphPanel = memo(function GraphPanel({
       const isNeighbor = !!hov && !!neighborsRef.current.get(hov)?.has(id)
       const dimmed = !!hov && !isHovered && !isNeighbor
 
-      const r = (2 + Math.sqrt(node.val ?? 1)) * (isHovered ? 1.5 : 1)
-      ctx.globalAlpha = dimmed ? 0.1 : 1
+      const kind = String(node.kind ?? 'doc')
+      // 枢纽（MOC/主题索引/合同）用**重量**而不是颜色跳出来：半径 ×1.4 + 深炭色。
+      // 再给它一支颜色的话，"少数发声"就又变成"大家一起喊"
+      const hub = kind === 'hub'
+      /**
+       * 尺寸服从同一条原则：**数量最大的最安静，显眼度让给数量少的**。
+       *   枢纽 ×1.4（30 个）· 合作方/产品卡 ×1.2（本库只有 2 + 1 个，不放大整图里根本找不到）
+       *   达人卡 ×0.88（121 张，最大的一类）· 普通文档 ×1
+       * 光靠颜色降饱和不够——同样面积铺满一片，眼睛还是会先看到它。
+       */
+      const sizeK = hub ? 1.4 : kind === 'talent' ? 0.88 : kind === 'partner' || kind === 'product' ? 1.2 : 1
+      const r = (2 + Math.sqrt(node.val ?? 1)) * sizeK * (isHovered ? 1.5 : isNeighbor ? 1.15 : 1)
+      // 压暗到 0.12 而不是全隐：整图的"形状"还得在，否则悬停时上下文全没了
+      ctx.globalAlpha = dimmed ? 0.12 : 1
       ctx.beginPath()
       ctx.arc(node.x!, node.y!, r, 0, 2 * Math.PI)
-      ctx.fillStyle = isCurrent || isHovered ? token('--color-accent') : colorOf(String(node.group ?? ''))
+      // **填色始终是角色色，高亮只靠环**：以前选中态把填色换成主色，
+      // 于是"选中的达人"和"选中的产品"长得一模一样，选中反而抹掉了信息
+      ctx.fillStyle = colorOf(kind)
       ctx.fill()
       if (isCurrent || isHovered) {
-        ctx.strokeStyle = token('--color-accent')
-        ctx.lineWidth = 1.5 / globalScale
+        // 先描一圈纸色再描橙环：达人卡本身就是橙的，不隔一道底色的话环和点会糊成一坨
+        ctx.strokeStyle = token('--color-graph-bg')
+        ctx.lineWidth = 2 / globalScale
         ctx.beginPath()
-        ctx.arc(node.x!, node.y!, r + 2.5 / globalScale, 0, 2 * Math.PI)
+        ctx.arc(node.x!, node.y!, r + 1.5 / globalScale, 0, 2 * Math.PI)
+        ctx.stroke()
+        ctx.strokeStyle = token('--color-accent')
+        ctx.lineWidth = 1.8 / globalScale
+        ctx.beginPath()
+        ctx.arc(node.x!, node.y!, r + 3 / globalScale, 0, 2 * Math.PI)
         ctx.stroke()
       }
-      // 标签：悬停节点及其邻居无视缩放常显；其余放大后显示（悬停时淡化）
-      const showLabel = isHovered || isNeighbor || globalScale > 1.2
-      if (showLabel) {
-        const label = String(node.name ?? '')
-        const fontSize = isHovered ? Math.max(12 / globalScale, 4) : Math.min(11 / globalScale, 6)
-        ctx.font = `${isHovered ? 'bold ' : ''}${fontSize}px ${token('--font-sans')}`
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'top'
-        ctx.fillStyle = dimmed ? token('--color-graph-label-dim') : token('--color-graph-label')
-        ctx.fillText(label.length > 12 ? label.slice(0, 12) + '…' : label, node.x!, node.y! + r + 1.5)
-      }
+      // **标签不在这里画**：分级显示 + 碰撞剔除需要"看到全图"才能决定谁让谁，
+      // 而 nodeCanvasObject 是逐节点回调、画完就盖不掉了。统一挪到 drawLabels（每帧收尾时跑一次）
       ctx.globalAlpha = 1
+      // 半径要留给标签层用（它得知道文字该落在圆下面多远）
+      radiusRef.current.set(id, r)
+    },
+    [currentRef]
+  )
+
+  /**
+   * 标签层（2026-08-18 三期重写，真人验收点名"放大图里标签互相压字"）。
+   *
+   * 两件事，都必须"看到全图"才能做，所以从 `nodeCanvasObject` 里搬出来、
+   * 改成每帧收尾时统一画一次（`onRenderFramePost`）：
+   *
+   * ① **分级显示**：远景只出枢纽，拉近逐级放出实体卡、最后才是普通文档。
+   *    以前是"放大到 1.2 倍就把所有标签一起放出来"，560 个节点当场糊成一片。
+   * ② **碰撞剔除**：按优先级从高到低摆放，占了位置就登记矩形，
+   *    后来者与已登记矩形相交就**不画**（Obsidian 的行为）。
+   *    逐节点回调做不到这件事——先画的已经落在画布上，盖不掉了。
+   *
+   * 优先级 = 角色（枢纽 > 实体卡 > 文档），同级按连接数。悬停节点与它的一度邻居永远优先且必显。
+   */
+  const drawLabels = useCallback(
+    (ctx: CanvasRenderingContext2D, k: number) => {
+      const nodes = (dataRef.current.nodes ?? []) as GNode[]
+      if (!nodes.length) return
+      const hov = hoverRef.current
+      const cur = currentRef.current
+      const nb = hov ? neighborsRef.current.get(hov) : null
+      /**
+       * 各角色开始显示标签的缩放阈值：**数量越多、越晚出场**。
+       * 数值是对着整图定的，不是拍的——本库 563 节点默认 fit 之后 k≈0.65，
+       * 所以枢纽给 0.4（远景就该有名字，否则整张图没有一个地标）、
+       * 合作方/产品 0.5（各只有个位数，出得起）、
+       * 达人卡 0.8（121 张，远景全放出来会被碰撞剔除成一片随机散点，比"没有"更糟）、
+       * 普通文档 1.8（拉到能看清单个节点了才需要读名字）。
+       */
+      const MIN_ZOOM: Record<string, number> = { hub: 0.4, partner: 0.5, product: 0.5, talent: 0.8, doc: 1.8 }
+      const PRIORITY: Record<string, number> = { hub: 4, partner: 3, product: 3, talent: 2, doc: 1 }
+
+      // 视口裁剪：屏幕外的节点不用量文字（560 个节点每帧全量 measureText 会掉帧）
+      const t = ctx.getTransform()
+      const W = ctx.canvas.width
+      const H = ctx.canvas.height
+      const onScreen = (x: number, y: number): boolean => {
+        const sx = t.a * x + t.e
+        const sy = t.d * y + t.f
+        return sx > -60 && sx < W + 60 && sy > -40 && sy < H + 40
+      }
+
+      const ranked = nodes
+        .filter((n) => n.x != null && n.y != null && onScreen(n.x!, n.y!))
+        .map((n) => {
+          const id = String(n.id)
+          const kind = String(n.kind ?? 'doc')
+          const forced = id === hov || id === cur || !!nb?.has(id)
+          return { n, id, kind, forced, p: (forced ? 10 : PRIORITY[kind] ?? 1) * 100 + Math.min(99, n.val ?? 1) }
+        })
+        .filter((x) => x.forced || k >= (MIN_ZOOM[x.kind] ?? 2))
+        .sort((a, b) => b.p - a.p)
+
+      const placed: Array<[number, number, number, number]> = []
+      const hit = (x0: number, y0: number, x1: number, y1: number): boolean =>
+        placed.some(([a0, b0, a1, b1]) => x0 < a1 && x1 > a0 && y0 < b1 && y1 > b0)
+
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'top'
+      const dimAll = !!hov
+      for (const item of ranked) {
+        const { n, id, forced } = item
+        const isHovered = id === hov
+        const label = String(n.name ?? '')
+        if (!label) continue
+        const text = label.length > 12 ? label.slice(0, 12) + '…' : label
+        /**
+         * **屏幕恒定字号**：11px（悬停 12px）除以缩放，换算成图坐标。
+         * 旧写法 `Math.min(11/k, 6)` 有个上限，于是缩小时字跟着一起缩——
+         * 远景标签只有 4px 高，等于画了一堆看不清的斑点（真人验收前一版就是这个毛病）。
+         * 现在字在屏幕上永远一样大，放不下的交给碰撞剔除去掉，这也是 Obsidian 的做法。
+         */
+        const fontSize = (isHovered ? 12 : 11) / k
+        ctx.font = `${isHovered ? 'bold ' : ''}${fontSize}px ${token('--font-sans')}`
+        const w = ctx.measureText(text).width
+        const r = radiusRef.current.get(id) ?? 3
+        const x0 = n.x! - w / 2
+        const y0 = n.y! + r + 1.5
+        // 让出一点行距，否则上下两行文字贴着也算"没碰上"
+        const box: [number, number, number, number] = [x0 - 1, y0 - 0.5, x0 + w + 1, y0 + fontSize + 1]
+        if (hit(...box)) continue
+        placed.push(box)
+        ctx.fillStyle = dimAll && !forced ? token('--color-graph-label-dim') : token('--color-graph-label')
+        ctx.fillText(text, n.x!, y0)
+      }
     },
     [currentRef]
   )
@@ -1419,7 +1545,27 @@ const GraphPanel = memo(function GraphPanel({
           <X size={14} />
         </button>
       </div>
-      <div ref={boxRef} className="flex-1">
+      <div ref={boxRef} className="relative flex-1">
+        {/*
+          图例：颜色语义不许让用户猜。放左下角——右下角是投递箱浮窗的地盘，
+          顶部是标题栏。`pointer-events-none` 让它不挡住底下的节点交互。
+          **底色用实色不用半透明**：Tailwind 的透明度修饰符（bg-card/90）对 var() 颜色无效，
+          写了会直接失效成透明（HANDOFF §4-13）。
+        */}
+        <div
+          data-testid="graph-legend"
+          className="pointer-events-none absolute bottom-3 left-3 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line bg-card px-2.5 py-1.5 text-2xs text-muted"
+        >
+          {GRAPH_LEGEND.map((it) => (
+            <span key={it.kind} data-legend={it.kind} className="flex items-center gap-1">
+              <i
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ background: `var(${GRAPH_KIND_TOKEN[it.kind]})` }}
+              />
+              {it.label}
+            </span>
+          ))}
+        </div>
         <ForceGraph2D
           width={size.w}
           height={size.h}
@@ -1434,14 +1580,26 @@ const GraphPanel = memo(function GraphPanel({
             ctx.fillStyle = color
             ctx.fill()
           }}
+          /**
+           * 边线（三期调）：**线宽降到 Obsidian 量级 0.6px、颜色再淡一档，
+           * 且透明度随缩放联动**——缩得越远、边越淡。
+           * 500+ 节点铺开时边的数量远多于点，等宽等色画出来是一层毛毡，
+           * 先被糊掉的恰恰是节点本身。缩远时人看的是"团块结构"，边只需要暗示；
+           * 放大后才需要看清"谁连着谁"。
+           */
           linkColor={(l: GLink) =>
             linkTouchesHover(l)
               ? token('--color-accent')
               : hoverRef.current
                 ? token('--color-graph-link-dim')
-                : token('--color-graph-link')
+                : fadeLink(token('--color-graph-link'), zoomRef.current)
           }
-          linkWidth={(l: GLink) => (linkTouchesHover(l) ? 1.8 : 1)}
+          linkWidth={(l: GLink) => (linkTouchesHover(l) ? 1.2 : 0.6)}
+          onZoom={(z: { k: number }) => {
+            zoomRef.current = z.k
+          }}
+          // 标签统一在这一帧的最后画：节点全部落笔之后才知道谁挤着谁
+          onRenderFramePost={(ctx: CanvasRenderingContext2D, k: number) => drawLabels(ctx, k)}
           onNodeHover={(n: GNode | null) => {
             hoverRef.current = n?.id != null ? String(n.id) : null
             if (boxRef.current) boxRef.current.style.cursor = n ? 'pointer' : 'default'

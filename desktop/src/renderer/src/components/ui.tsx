@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { X } from 'lucide-react'
+import { X, CheckCircle2, XCircle, AlertTriangle, Loader2 } from 'lucide-react'
 
 /**
  * 应用内交互组件体系——替代系统原生 prompt/alert/confirm（原生弹窗=廉价感头号来源）。
@@ -13,7 +13,18 @@ type ChooseOption = { value: string; label: string; danger?: boolean; primary?: 
 type ChooseOpts = { title: string; message?: string; options: ChooseOption[] }
 /** 光说"不行"等于把用户堵死在原地，得就地给出口（设计 §5.3） */
 type ToastAction = { label: string; onClick: () => void }
-type ToastItem = { id: number; msg: string; type: 'ok' | 'error'; action?: ToastAction }
+/**
+ * toast 的语义（见 `docs/DESIGN-color-semantics.md`）。
+ * **底色永远是炭黑，语义只由左侧图标表达**（三期重构，理由见 TOAST_BOX 上面那段）：
+ *   info    无图标 —— **默认**。告知一件事发生了：已删除、已复制、已进入运维模式。
+ *                     "解锁成功"这类也归这里：**解锁是告知，不是任务成功**
+ *   ok      绿勾   —— 用户发起的操作真的完成了（保存落盘、入库完成）
+ *   error   红叉   —— 失败，需要用户处理
+ *   warn    金琥珀叹号 —— 做完了但有折损、或没东西可做，比 error 轻一档
+ *   running 橙转圈 —— 进行中（瞬时提示里很少用；持续进行中该用状态条而不是 toast）
+ */
+export type ToastKind = 'info' | 'ok' | 'error' | 'warn' | 'running'
+type ToastItem = { id: number; msg: string; type: ToastKind; action?: ToastAction }
 
 type ModalState =
   | { kind: 'confirm'; opts: ConfirmOpts; resolve: (v: boolean) => void }
@@ -32,12 +43,38 @@ export const ui = {
   /** 返回选中项的 value；关掉弹窗/点遮罩 = null */
   choose: (opts: ChooseOpts): Promise<string | null> =>
     new Promise((resolve) => setModal?.({ kind: 'choose', opts, resolve })),
-  toast: (msg: string, type: 'ok' | 'error' = 'ok', action?: ToastAction): void =>
+  toast: (msg: string, type: ToastKind = 'info', action?: ToastAction): void =>
     pushToast?.({ msg, type, action }),
 }
 
 /** 同屏 toast 上限：再多就该用别的形式说话了 */
 const MAX_TOASTS = 3
+
+/**
+ * **一种底色，语义靠图标**（2026-08-18 三期重构，推翻了"整条变底色"那版）。
+ *
+ * 上一版按语义整条铺底：三条琥珀「未发现可入库的文件」堆在一起是三条大黄横幅，
+ * 刺眼且抢戏——瞬时提示本来就不该占据这么强的视觉权重。
+ * 现在全部炭黑底，成功/错误/警告只由**左侧图标**表达（信息类干脆没有图标）。
+ * 语义底色只留给**持续性状态条**（云端降级条橙、编辑冲突条浅金、错误气泡红边）——
+ * 那些是"一直在的状态"，值得一直占着颜色；toast 是"说一声就走"。
+ *
+ * **几何只有这一份**：圆角/字号/内边距/间距全在这一行。宽度改为**按文案自适应 + 上限**，
+ * 短文案短框（`max-w-toast`，不再是写死的等宽）；走查比的是"同宽度策略 + 同圆角字号内边距"。
+ */
+const TOAST_BOX =
+  'fade-up pointer-events-auto flex max-w-toast cursor-pointer items-start gap-2.5 rounded-lg bg-ink px-4 py-2.5 text-left text-base leading-5 text-on-solid shadow-pop'
+/** 动作按钮：描边胶囊，永远在文案右侧，间距节奏与图标一致（gap-2.5） */
+const TOAST_ACTION =
+  'shrink-0 rounded-full border border-on-solid px-2.5 py-0.5 text-sm transition-opacity hover:opacity-80'
+/** 语义图标：颜色是**图标自己的**，底色始终炭黑。info 没有图标——它不需要被"标记" */
+const TOAST_ICON: Record<ToastKind, { Icon: typeof CheckCircle2; cls: string } | null> = {
+  info: null,
+  ok: { Icon: CheckCircle2, cls: 'text-ok' },
+  error: { Icon: XCircle, cls: 'text-danger' },
+  warn: { Icon: AlertTriangle, cls: 'text-warning' },
+  running: { Icon: Loader2, cls: 'text-accent animate-spin' },
+}
 
 /**
  * 单条 toast 的生命周期（L-03）。倒计时放在这里而不是 pushToast 里，是为了
@@ -46,6 +83,7 @@ const MAX_TOASTS = 3
  */
 function ToastRow({ t, onClose }: { t: ToastItem; onClose: () => void }) {
   const [paused, setPaused] = useState(false)
+  const icon = TOAST_ICON[t.type]
   // 剩余时间跨暂停累计：悬停 → 移开之后接着走，而不是重新计时
   const left = useRef(t.action ? 8000 : 3200)
 
@@ -62,16 +100,20 @@ function ToastRow({ t, onClose }: { t: ToastItem; onClose: () => void }) {
   return (
     <div
       data-testid="toast"
+      data-kind={t.type}
+      data-icon={icon ? t.type : 'none'}
       title="点击关闭"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onClick={onClose}
-      className={`fade-up pointer-events-auto flex cursor-pointer items-center gap-3 rounded-full px-4 py-2 text-base text-on-solid shadow-pop ${
-        t.type === 'error' ? 'bg-danger' : 'bg-ink'
-      }`}
+      className={TOAST_BOX}
     >
-      <span>{t.msg}</span>
-      {/* 动作按钮：拒绝一件事的同时给出出口（如「停止当前生成」） */}
+      {/* 语义图标在最左；info 不给图标（"已删除""已复制"不需要被标记成一件事） */}
+      {icon && <icon.Icon size={15} className={`mt-px shrink-0 ${icon.cls}`} />}
+      {/* 文字左对齐、按内容自适应宽度（上限 max-w-toast），长文案自己折行 */}
+      <span className="min-w-0 flex-1">{t.msg}</span>
+      {/* 动作按钮：拒绝一件事的同时给出出口（如「停止当前生成」「在 Finder 中显示」）。
+          **描边按钮，不随语义换样式**——红底 toast 上的按钮以前看着像另一套控件 */}
       {t.action && (
         <button
           data-testid="toast-action"
@@ -80,7 +122,7 @@ function ToastRow({ t, onClose }: { t: ToastItem; onClose: () => void }) {
             t.action?.onClick()
             onClose()
           }}
-          className="shrink-0 rounded-full border border-on-solid px-2.5 py-0.5 text-sm transition-opacity hover:opacity-80"
+          className={TOAST_ACTION}
         >
           {t.action.label}
         </button>
@@ -128,7 +170,15 @@ export function UiHost() {
   return (
     <>
       {/* Toast */}
-      <div className="pointer-events-none fixed left-1/2 top-4 z-[100] flex -translate-x-1/2 flex-col items-center gap-2">
+      {/*
+        落点在**标题/操作栏以下**（top-14），不是贴着窗口顶。
+        原因是实测踩到的：toast 统一成固定宽度之后，它在窗口顶端横跨的范围变宽，
+        正好压住笔记头部那排按钮（「编辑/保存/…」）——而 toast 悬停会暂停倒计时，
+        于是鼠标往那颗按钮移过去的路上就把它自己钉死了，按钮永远点不到
+        （2026-08-18 走查现场：`编辑` 点击 30 秒超时，报 toast intercepts pointer events）。
+        往下挪 56px 之后它压的是正文区，不再挡任何常驻控件。
+      */}
+      <div className="pointer-events-none fixed left-1/2 top-14 z-[100] flex -translate-x-1/2 flex-col items-center gap-2">
         {toasts.map((t) => (
           <ToastRow key={t.id} t={t} onClose={() => setToasts((old) => old.filter((x) => x.id !== t.id))} />
         ))}
