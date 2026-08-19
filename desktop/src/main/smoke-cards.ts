@@ -238,6 +238,52 @@ async function main(): Promise<void> {
     await fs.rm(up, { recursive: true, force: true })
   }
 
+  console.log('\n【6c】存量双卡清理：两边都有卡 → 旧卡为准、标准位置那张删掉')
+  {
+    const up = join(tmpdir(), `mcnai-smoke-cards-dedup-${process.pid}`)
+    const mk = async (): Promise<{ oldCard: string; newCard: string }> => {
+      await fs.rm(up, { recursive: true, force: true })
+      await fs.mkdir(join(up, '.mcnai'), { recursive: true })
+      await fs.writeFile(join(up, '.mcnai', 'layout.json'),
+        JSON.stringify({ library: LIB, entities: { talent: '30_实体/达人', product: '30_实体/产品', partner: '30_实体/合作方' } }))
+      const oldCard = join(up, '20_公司管理/合作方/霞飞.md')
+      await fs.mkdir(join(oldCard, '..'), { recursive: true })
+      await fs.writeFile(oldCard, ['---', 'doc_type: 合作方', '---', '', '# 霞飞', '', '旧卡的用户正文。'].join('\n'), 'utf-8')
+      await note(up, '年框.md', { partner: ['霞飞'], contract: true })
+      // 先跑一轮**只有标准位置**的形态，造出"新卡"，再把旧卡放回去 = 存量双卡
+      await fs.rm(oldCard, { force: true })
+      await buildEntityCards(up, LIB)
+      await fs.mkdir(join(oldCard, '..'), { recursive: true })
+      await fs.writeFile(oldCard, ['---', 'doc_type: 合作方', '---', '', '# 霞飞', '', '旧卡的用户正文。'].join('\n'), 'utf-8')
+      return { oldCard, newCard: join(up, '30_实体/合作方/霞飞.md') }
+    }
+
+    const { oldCard, newCard } = await mk()
+    const exists = async (f: string): Promise<boolean> => fs.readFile(f, 'utf-8').then(() => true).catch(() => false)
+    check('前置：存量双卡真的造出来了', (await exists(oldCard)) && (await exists(newCard)))
+    const st = await buildEntityCards(up, LIB)
+    check('统计里报了清理数（不许静默删文件）', st.deduped === 1, JSON.stringify({ deduped: st.deduped }))
+    check('标准位置那张已删除', !(await exists(newCard)))
+    check('旧卡留下了', await exists(oldCard))
+    const merged = await fs.readFile(oldCard, 'utf-8')
+    check('关联段并回了旧卡', merged.includes('## 相关文档') && merged.includes('年框'))
+    check('旧卡的用户正文没被动', merged.includes('旧卡的用户正文。'))
+    check('文档侧双链指向旧卡',
+      (await fs.readFile(join(up, LIB, '年框.md'), 'utf-8')).includes('[[20_公司管理/合作方/霞飞|'))
+    const st2 = await buildEntityCards(up, LIB)
+    check('清完之后不再重复报清理', st2.deduped === 0, JSON.stringify({ deduped: st2.deduped }))
+
+    // 反例：用户改过标准位置那张 → **两张都留着**，绝不删
+    const again = await mk()
+    const edited = (await fs.readFile(again.newCard, 'utf-8')) + '\n\n我在这张卡上写了东西。\n'
+    await fs.writeFile(again.newCard, edited, 'utf-8')
+    const st3 = await buildEntityCards(up, LIB)
+    check('用户改过的那张**不删**', await exists(again.newCard))
+    check('这种情况不计入清理数', st3.deduped === 0, JSON.stringify({ deduped: st3.deduped }))
+    check('用户写的东西还在', (await fs.readFile(again.newCard, 'utf-8')).includes('我在这张卡上写了东西。'))
+    await fs.rm(up, { recursive: true, force: true })
+  }
+
   console.log('\n【7】A-8 上云闸门：敏感判据不许被 frontmatter 长度绕过')
   // 2026-08-18 发布前自测抓到的真洞：旧判据只看前 800 字符，而 A-3 之后
   // `entities_talent` 这类长数组会把最后写的 `sensitive: true` 顶出窗口，
@@ -270,7 +316,9 @@ async function main(): Promise<void> {
     const found = await fg('**/霞飞.md', { cwd: upVault, ignore: ['**/node_modules/**'], dot: false })
     check(`霞飞只剩一张卡（实得 ${found.length}：${found.join(' | ')}）`, found.length === 1)
     check('留下的是那张旧卡（在标准目录之外）', found[0]?.startsWith('20_') === true, found.join(' | '))
-    check('统计里报了复用', st.reused > 0, JSON.stringify({ reused: st.reused, created: st.created }))
+    // 两条路都算数：库里只有老卡 → reused；老卡与标准位置都有 → deduped（存量清理）
+    check('统计里报了复用或清理', st.reused + st.deduped > 0,
+      JSON.stringify({ reused: st.reused, deduped: st.deduped, created: st.created }))
     const card = found[0] ? await fs.readFile(join(upVault, found[0]), 'utf-8') : ''
     check('旧卡原有的「相关合作文件」段没被抹掉', card.includes('## 相关合作文件'))
     check('旧卡被补上了自动区', card.includes('mcnai:auto:start'))

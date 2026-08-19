@@ -474,6 +474,7 @@ export class InboxOrchestrator {
       if (st.merged) bits.push(`归一合并 ${st.merged}`)
       if (st.links) bits.push(`双链 ${st.links} 条`)
       if (st.reused) bits.push(`复用已有卡 ${st.reused}`)
+      if (st.deduped) bits.push(`清理重复卡 ${st.deduped}`)
       if (st.sensitiveCards) bits.push(`${st.sensitiveCards} 张敏感卡仅存本地`)
       // 冲突必须**说出来**：静默覆盖用户手工编辑过的卡是不可接受的（同 M-27 的原则）
       if (st.conflicted) bits.push(`${st.conflicted} 张你改过的卡未覆盖，新内容放在「待合并」里`)

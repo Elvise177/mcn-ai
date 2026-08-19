@@ -3,7 +3,14 @@ out/
 release/
 .env
 
-# 冻结版 pipeline 二进制不进仓库（96MB）：在 pkb-pipeline 仓库 pyinstaller 后 cp -R dist/mcn-ingest resources/pipeline
+# 冻结版 pipeline 二进制不进仓库（96MB）。在 pkb-pipeline 仓库 pyinstaller 之后，
+# **拷的是 dist/mcn-ingest 的内容，不是那个目录本身**：
+#     rm -rf resources/pipeline && mkdir -p resources/pipeline
+#     cp -R ~/Documents/AI/pkb-pipeline/dist/mcn-ingest/. resources/pipeline/
+# 正确结果是 resources/pipeline/ 下直接躺着可执行文件 mcn-ingest 与 _internal/。
+# 少写那个 `/.` 会变成 resources/pipeline/mcn-ingest/（目录），而 lib/pipeline.ts 的
+# pipelineBin() 要的正是 resources/pipeline/mcn-ingest 这个**文件** —— 于是 spawn 报
+# `EACCES`，投递箱一个文件都处理不了，而界面上只是"没有进度条"（2026-08-19 踩过，白跑一轮走查）。
 resources/pipeline/
 e2e/*.zip
 
