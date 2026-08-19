@@ -432,6 +432,14 @@ interface Window {
     shortcut: {
       on: (cb: (name: string) => void) => () => void
     }
+    update: {
+      /** disabledReason 非空 = 这台机器根本不查更新（dev 形态 / 更新源还是占位） */
+      state: () => Promise<{ ready: boolean; version: string | null; disabledReason: string | null }>
+      install: () => Promise<{ ok: boolean; error?: string }>
+      onReady: (
+        cb: (s: { ready: boolean; version: string | null; disabledReason: string | null }) => void
+      ) => () => void
+    }
     diag: {
       export: () => Promise<string>
       log: (level: 'info' | 'warn' | 'error', msg: string) => Promise<void>

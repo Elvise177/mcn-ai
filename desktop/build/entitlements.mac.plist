@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!--
+      Hardened Runtime 下 Electron 所需的最小集 —— 每一条都写明为什么要，
+      没有理由的一条都不要加（多给一条就是多松一道 Gatekeeper 的口子）。
+    -->
+
+    <!-- V8 需要可执行内存。缺这条：应用签名后一启动就崩在 JIT 上 -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- V8 的部分代码页不是通过 MAP_JIT 分配的，Electron 官方公证前置条件里明列 -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!--
+      本仓库特有的两处必需（不是抄模板抄来的）：
+      ① asarUnpack 出来的原生模块（@anthropic-ai/claude-agent-sdk-darwin-* 的二进制）
+      ② extraResources 里的 PyInstaller onedir（resources/pipeline/mcn-ingest + _internal/*.dylib|*.so）
+         —— 那是一个**独立进程**，会 dlopen 几十个 .so，library validation 一开就起不来
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

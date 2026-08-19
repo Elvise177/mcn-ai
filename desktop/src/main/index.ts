@@ -14,6 +14,7 @@ import { agentManager } from './agent'
 import { artifactsWatcher } from './agent/artifacts'
 import { tasks } from './tasks/registry'
 import { registerAssetScheme, registerAssetProtocol } from './vault/assets'
+import { initUpdater } from './updater'
 
 // 库内图片协议：**注册 scheme 必须在 app ready 之前**（Electron 硬性要求），
 // handler 在 ready 之后挂。没有它，笔记里抽出来的嵌图在渲染进程里是死链（见 vault/assets.ts）
@@ -62,6 +63,7 @@ function createWindow(): void {
     void provisionKeys() // 已登录用户启动时刷新服务端下发的 AI 配置（值没变则零写入）
     void probeCloud() // 云端可达性：探测有超时，Supabase 被暂停时不会把启动拖住
     startSyncRetry() // 上次退出时没同步上去的聊天记录，开机补一轮（退避 1m/5m/30m→转手动）
+    initUpdater(win) // 自动更新：内部自带 20 秒延迟，不与上面几件事抢冷启动那一段
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {

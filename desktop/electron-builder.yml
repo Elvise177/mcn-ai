@@ -2,6 +2,9 @@ appId: com.mcnai.desktop
 productName: mcn-ai
 directories:
   output: release
+# electron-builder 只公证 .app、不公证 dmg 本身。这个钩子把 dmg 也送去公证 + 订票，
+# 并重算 latest-mac.yml 里 dmg 的 sha512（订票会改字节）。原因写在脚本头部。
+afterAllArtifactBuild: scripts/notarize-dmg.cjs
 files:
   - out/**
   - package.json
@@ -16,13 +19,30 @@ asarUnpack:
 mac:
   icon: build/icon.icns
   target:
+    # zip 不是可选项：electron-updater 在 macOS 上是从 zip 增量更新的，
+    # latest-mac.yml 里指的也是 zip；只出 dmg 的话自动更新拿不到包
     - target: dmg
       arch: [arm64]
     - target: zip
       arch: [arm64]
-  identity: null
   category: public.app-category.productivity
-# 测试版未签名，dmg 内附安装说明（去 quarantine 标记）；正式签名方案见 docs/分发指南.md
+  # ── 正式签名（Developer ID Application）与公证 ───────────────────────────
+  # 显式钉死证书：留空是"自动挑一张"，机器上多一张证书就可能挑错，
+  # 而挑错的表现是公证被拒（要等十几分钟才知道）。
+  # **必须去掉 "Developer ID Application:" 前缀**——带上前缀 electron-builder 直接拒：
+  #   "Please remove prefix "Developer ID Application:" from the specified name"
+  # 证书类型由 mac target 自己定，这里只给名字那一段。取值来自：
+  #   security find-identity -v -p codesigning
+  identity: Senpeng Tan (6Y6F78H65Y)
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  # 公证走 notarytool + App Store Connect API Key（不用 App 专用密码：
+  # 密钥可单独吊销、不绑 Apple ID 双因素）。三个环境变量见 docs/RELEASE.md §A：
+  #   APPLE_API_KEY（.p8 文件路径）/ APPLE_API_KEY_ID / APPLE_API_ISSUER
+  # 三个都不设时 electron-builder 会**静默跳过公证**——所以发版脚本必须验 stapler。
+  notarize: true
 dmg:
   contents:
     - x: 130
@@ -31,7 +51,12 @@ dmg:
       y: 150
       type: link
       path: /Applications
-    - x: 270
-      y: 300
-      type: file
-      path: build/安装说明.txt
+# ── 自动更新源（electron-updater，generic provider）────────────────────────
+# 这个 url 会被烧进 app 包里的 resources/app-update.yml，客户端启动后去
+# <url>/latest-mac.yml 查版本。**当前是占位**，切到真实阿里云 OSS 的步骤见
+# docs/RELEASE.md §C。占位期间客户端不会发任何更新请求（src/main/updater.ts
+# 认出 `.invalid` 域名就整条跳过，不会在客户机上留一串失败日志）。
+publish:
+  provider: generic
+  url: https://samepage-updates.REPLACE-ME.invalid/mac/
+  channel: latest

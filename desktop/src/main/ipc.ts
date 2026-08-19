@@ -27,6 +27,7 @@ import { sendDingtalk } from './lib/dingtalk'
 import { startBizSync } from './knowledge/bizdata'
 import { getRoutes, setRoutes, ensureRouteFolders } from './lib/routes'
 import { tasks } from './tasks/registry'
+import { updateState, installUpdateNow } from './updater'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
@@ -254,6 +255,11 @@ export function registerIpc(): void {
   // ---- 诊断与日志 ----
   ipcMain.handle('diag:export', () => exportDiagnostics())
   ipcMain.handle('log:renderer', (_e, level: 'info' | 'warn' | 'error', msg: string) => log(level, 'renderer', msg))
+
+  // ---- 自动更新 ----
+  // state 是权威快照（`update:ready` 推送在窗口 reload 期间会丢，同任务层那条约定）
+  ipcMain.handle('update:state', () => updateState())
+  ipcMain.handle('update:install', () => installUpdateNow())
 
   // ---- inbox ----
   // ---- 投递箱分流配置（设置界面用） ----

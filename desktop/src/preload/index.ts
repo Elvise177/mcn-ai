@@ -113,6 +113,16 @@ const tasksApi = {
     return () => ipcRenderer.removeListener('task:event', listener)
   },
 }
+const update = {
+  /** 权威快照：事件可能在 reload 期间丢，渲染层每次挂载先拿它打底 */
+  state: () => ipcRenderer.invoke('update:state'),
+  install: () => ipcRenderer.invoke('update:install'),
+  onReady: (cb: (s: unknown) => void) => {
+    const listener = (_e: unknown, s: unknown): void => cb(s)
+    ipcRenderer.on('update:ready', listener)
+    return () => ipcRenderer.removeListener('update:ready', listener)
+  },
+}
 const shortcut = {
   on: (cb: (name: string) => void) => {
     const listener = (_e: unknown, name: string): void => cb(name)
@@ -131,7 +141,7 @@ const routes = {
 const dingtalk = {
   test: () => ipcRenderer.invoke('dingtalk:test'),
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes, tasks: tasksApi }
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes, update, tasks: tasksApi }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi

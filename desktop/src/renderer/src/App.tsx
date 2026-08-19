@@ -14,6 +14,7 @@ import { startTaskSync, useTask } from './hooks/useTasks'
 import { anchorStepGroup, clearStepGroups, startStepStream, trimStepGroups } from './lib/step-stream'
 import { TaskDock } from './components/TaskDock'
 import { OfflineBar } from './components/OfflineBar'
+import { UpdateBar } from './components/UpdateBar'
 
 type Page = 'workbench' | 'vault' | 'settings' | 'usage'
 
@@ -424,6 +425,7 @@ export default function App() {
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <UpdateBar />
         <OfflineBar />
         {/* key 换页触发一次淡入，避免页面切换硬切 */}
         <div key={page} className="page-enter min-h-0 flex-1">
