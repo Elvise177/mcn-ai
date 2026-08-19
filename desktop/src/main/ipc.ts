@@ -148,6 +148,16 @@ export function registerIpc(): void {
       await new Promise((r) => setTimeout(r, Number(e2eFail) || 0))
       throw new Error('磁盘不可写（e2e 模拟）')
     }
+    // MCNAI_E2E_NEW_VAULT（值 = 建到哪个路径）同样只给走查用：**成功那条分支**在这之前
+    // 一次都没被 e2e 覆盖过——原因和上面那条一样，系统保存框挡住了 Playwright，
+    // 于是"模板新建库"只能靠人手点。而 A-3 那个「双链 352 → 2」的 bug 正好长在这条路上
+    // （模板建的库里没有实体清单目录，07 建链无从下手），2026-08-18 发布前自测补上。
+    // 生产不读这个变量（判据同 HANDOFF §4-22：真触发它需要驱动原生对话框）
+    const e2eNew = process.env.MCNAI_E2E_NEW_VAULT
+    if (e2eNew) {
+      await createVault(e2eNew)
+      return openVault(e2eNew)
+    }
     const r = await dialog.showSaveDialog({
       title: '新建知识库',
       nameFieldLabel: '库名称',

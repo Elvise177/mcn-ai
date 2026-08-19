@@ -9,6 +9,7 @@ import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
+import { hasSensitiveMark } from '../lib/sensitive'
 import { notifyDingtalk } from '../lib/dingtalk'
 import { tasks } from '../tasks/registry'
 import { appendUsage } from '../usage'
@@ -29,6 +30,7 @@ const SUPPORTED_EXT = new Set(['.md', '.txt', '.docx', '.pdf', '.xlsx', '.pptx']
 
 /** 与 `02_convert.py` 的 `JUNK_DIRS` 对齐 */
 const JUNK_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', '__MACOSX', '__pycache__'])
+
 
 /**
  * 递归护栏。整包拖入是「用户一个动作、后台跑很久」的操作，没有上限的话
@@ -471,6 +473,7 @@ export class InboxOrchestrator {
       if (st.updated) bits.push(`更新 ${st.updated}`)
       if (st.merged) bits.push(`归一合并 ${st.merged}`)
       if (st.links) bits.push(`双链 ${st.links} 条`)
+      if (st.reused) bits.push(`复用已有卡 ${st.reused}`)
       if (st.sensitiveCards) bits.push(`${st.sensitiveCards} 张敏感卡仅存本地`)
       // 冲突必须**说出来**：静默覆盖用户手工编辑过的卡是不可接受的（同 M-27 的原则）
       if (st.conflicted) bits.push(`${st.conflicted} 张你改过的卡未覆盖，新内容放在「待合并」里`)
@@ -538,8 +541,7 @@ export class InboxOrchestrator {
         if (hit !== undefined) return hit
         let v = false
         try {
-          const head = (await fsp.readFile(join(this.vaultRoot!, rel), 'utf-8')).slice(0, 800)
-          v = /^sensitive:\s*true\s*$/m.test(head)
+          v = hasSensitiveMark(await fsp.readFile(join(this.vaultRoot!, rel), 'utf-8'))
         } catch {
           // 读不到就当敏感：宁可少传一篇，不可误传一篇
           v = true

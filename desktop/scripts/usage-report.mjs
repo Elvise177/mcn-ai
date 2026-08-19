@@ -177,13 +177,11 @@ const costCny = (route, model, t) => {
 }
 
 /** 一条记录的花费：route 缺失（改版前写的老记录）时按档位猜一次，并在表头提示 */
-let legacyRouteGuesses = 0
 const recCost = (r) => {
-  let route = r.route
-  if (!route) {
-    legacyRouteGuesses++
-    route = r.tier === 'enhanced' ? 'aihubmix' : 'deepseek'
-  }
+  // 注意：这里**不能**用自增计数器统计"猜了几条"——`recCost` 每张分组表都会把
+  // 全部记录再算一遍（5 张表 + 总计 = 6 遍），自增出来的是 条数×6。
+  // 2026-08-18 实测：10 条无 route 的记录被报成「60 条」。计数改在下面对记录集直接数。
+  const route = r.route ?? (r.tier === 'enhanced' ? 'aihubmix' : 'deepseek')
   return costCny(route, r.resolved_model ?? r.expected_model, tokensOf(r.usage))
 }
 
@@ -244,6 +242,7 @@ console.log('— 按实际模型 —')
 console.table(group((r) => r.resolved_model || `${r.expected_model || '(未知)'}（未上报实际模型）`))
 
 const totalCny = records.reduce((n, r) => n + recCost(r), 0)
+const legacyRouteGuesses = records.filter((r) => !r.route).length
 const degraded = records.filter((r) => r.degraded)
 console.log(`估算总成本：¥${totalCny.toFixed(2)}　费用为估算值，以实际账单为准`)
 if (legacyRouteGuesses) {

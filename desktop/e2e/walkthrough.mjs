@@ -333,6 +333,31 @@ const rawShot = async (cdp, name) => {
   await w3.waitForTimeout(1500)
   const skip3 = w3.locator('text=暂不登录')
   if (await skip3.count()) await skip3.click()
+
+  /**
+   * 空库时**工作台**这一屏也要给引导（R-3，2026-08-19 拍板的最小版）。
+   * 这一条必须在切去知识库页**之前**验——新客户登录后落的就是工作台，
+   * 在这一屏之前他根本走不到知识库页那个空态引导。
+   * 断言到文案层：默认那句「问你的库」在空库上是句假承诺，不许出现。
+   */
+  await w3.waitForTimeout(1200)
+  const sub = (await w3.locator('[data-testid="home-subtitle"]').innerText()).trim()
+  if (sub !== '把资料拖进来，或直接问我')
+    throw new Error(`空库时工作台副标题不对：「${sub}」（不许还说"问你的库"）`)
+  const hint = w3.locator('[data-testid="home-empty-vault-hint"]')
+  if (!(await hint.count())) throw new Error('空库时工作台没有引导文案')
+  const hintText = (await hint.innerText()).replace(/\s+/g, ' ').trim()
+  if (!/拖进|投递箱/.test(hintText)) throw new Error(`工作台空库引导没有指向：「${hintText}」`)
+  // 同一屏上不许自相矛盾：副标题改了、输入框却还写着「问你的库」就是产品自己打自己
+  const ph = await w3.locator('textarea').first().getAttribute('placeholder')
+  if (/问你的库/.test(ph ?? '')) throw new Error(`空库时输入框还在说「问你的库」：「${ph}」`)
+  // 不做浮层引导是拍板项——出现遮罩/气泡引导就是跑偏了
+  const overlay = await w3.locator('[data-testid="onboarding-overlay"], .onboarding-tour').count()
+  if (overlay) throw new Error('工作台出现了浮层引导（拍板只做一段文案+指向）')
+  await w3.screenshot({ path: join(shots, '02a-工作台-空库引导.png') })
+  record('02a-工作台-空库引导')
+  console.log('shot: 02a-工作台-空库引导 ✓', JSON.stringify({ 副标题: sub, 指向: hintText }))
+
   await w3.click('text=个人知识库')
   await w3.locator('text=拖入你的第一份资料试试').waitFor({ timeout: 8000 })
   const guideBtn = await w3.locator('button:has-text("打开投递箱")').count()
@@ -808,18 +833,38 @@ const assertToastConsistency = () => {
  * 全局文案扫描：界面上不许再出现旧名。
  * 扫的是可见文本 ＋ title/placeholder/aria-label（旧名最容易残留在 tooltip 里），
  * 大小写不敏感。每到一个页面都调一次——只在首页扫等于没扫。
+ *
+ * **扫之前先把两类"环境串"抠掉**（2026-08-18 E2E_CHAT 轮连踩两次）：
+ *   ① **邮箱**——侧栏身份行画的是「邮箱 · 版本号」，而测试账号叫
+ *      `mcnai-test-a@example.com`，`mcnai` 正好命中 `mcn[-\s]?ai`；
+ *   ② **走查自己的临时路径**——知识库页/设置页/换库确认/删除确认都会把库路径画出来，
+ *      而走查库就叫 `/tmp/mcnai-e2e-vault`。
+ * 两者都是**环境与用户数据，不是品牌文案**，扫它们只会一轮一轮报假红
+ * （而且每轮 E2E_CHAT ≈¥1.8，靠跑来发现太贵）。
+ *
+ * **抠的范围是刻意收窄的**：只抠邮箱、以及 `/tmp` 下 `mcnai-` 开头的走查目录，
+ * 不做"凡是路径一律放行"——产品自己生成的名字必须仍在扫描范围内
+ * （建库向导写的欢迎笔记、模板目录名这些，真带旧名就该报出来）。
  */
 const assertNoOldBrand = async (where) => {
   const hits = await win.evaluate(() => {
     const bad = []
     // 两代旧名都要扫：mcn-ai（初版）与「拉齐」（二期用过一天的中文名，三期改 SamePage）
     const re = /mcn[-\s]?ai|拉齐/i
+    // 环境串（邮箱 / 走查临时目录）不属于品牌文案，先抠掉再扫
+    const strip = (s) =>
+      String(s)
+        .replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, '<邮箱>')
+        // 完整路径与"只剩目录名"两种形态都要抠：界面上有的地方画全路径（换库确认、
+        // 删除确认），有的地方只画库名。截断成半截（`/tmp/mcnai-e2`）也要能命中，
+        // 所以尾巴用 `*` 不用 `+`。
+        .replace(/(\/private)?\/tmp\/mcnai-[\w.-]*|mcnai-(e2e|a1|smoke|probe|full|qa)[\w.-]*/g, '<走查目录>')
     const text = document.body.innerText || ''
-    for (const line of text.split('\n')) if (re.test(line)) bad.push(`正文:「${line.trim()}」`)
+    for (const line of text.split('\n')) if (re.test(strip(line))) bad.push(`正文:「${line.trim()}」`)
     for (const el of document.querySelectorAll('[title],[placeholder],[aria-label]')) {
       for (const a of ['title', 'placeholder', 'aria-label']) {
         const v = el.getAttribute(a)
-        if (v && re.test(v)) bad.push(`${a}:「${v}」`)
+        if (v && re.test(strip(v))) bad.push(`${a}:「${v}」`)
       }
     }
     if (re.test(document.title)) bad.push(`document.title:「${document.title}」`)
@@ -1172,6 +1217,17 @@ try {
     }
   }
   await snap('01-工作台首页', 800)
+  /**
+   * R-3 的反面：**有内容的库上不许出现空库引导**。
+   * 这条比正面那条更容易坏——`vault.tree()` 读慢一点或抛一下，首页就会挂着
+   * 一句「知识库还是空的」，而用户库里躺着几百篇。
+   */
+  {
+    const sub = (await win.locator('[data-testid="home-subtitle"]').innerText()).trim()
+    if (sub !== '问你的库，或直接说要做什么') throw new Error(`非空库首页副标题被改成了空库那句：「${sub}」`)
+    if (await win.locator('[data-testid="home-empty-vault-hint"]').count())
+      throw new Error('库里有内容，首页却挂着空库引导')
+  }
   await assertSidebarLogo()
   await assertSidebarContrast()
   await assertNoOldBrand('工作台首页')
@@ -3863,6 +3919,49 @@ try {
       if (it.dot !== seg.want[it.k]) throw new Error(`图例「${it.label}」色点 ${it.dot} 与 token 对不上`)
     }
     console.log('用量柱状图分档 ✓', JSON.stringify({ 混合柱: seg.混合柱.d, 单档柱数: seg.单档柱数, 图例: seg.legend.map((l) => l.label) }))
+
+    /**
+     * 深色仪表盘卡片（2026-08-18 微调）：**只有这一张卡是深色**，页面其余部分维持暖白纸面。
+     * 断言取渲染态的实际颜色比 token，不认 class 名——`.chart-dark` 是靠就地改写 CSS 变量生效的，
+     * 类名写对了但变量没接上，界面会安静地退回浅色（同 `bg-x/60` 那类坑）。
+     */
+    const dash = await win.evaluate(() => {
+      const card = document.querySelector('[data-testid="usage-daily"]')?.closest('.chart-dark')
+      if (!card) return null
+      const cs = getComputedStyle(card)
+      const axis = card.parentElement?.querySelector('[data-testid="usage-daily-legend"]')
+      const dateAxis = [...card.querySelectorAll('div')].find((d) => /^\d{2}\/\d{2}$/.test(d.textContent.trim()))
+      // 页面其余区域必须还是浅色：拿「按模式对比」那张卡对照
+      const light = document.querySelector('[data-testid="usage-by-tier"]')?.closest('.rounded-xl')
+      return {
+        cardBg: cs.backgroundColor,
+        cardInk: cs.color,
+        axisText: dateAxis ? getComputedStyle(dateAxis).color : null,
+        gridCount: card.querySelectorAll('[aria-hidden] .border-t').length,
+        legendInDark: !!axis && !!axis.closest('.chart-dark'),
+        lightCardBg: light ? getComputedStyle(light).backgroundColor : null,
+      }
+    })
+    if (!dash) throw new Error('用量页找不到深色仪表盘卡片（.chart-dark）')
+    if (dash.cardBg !== 'rgb(33, 31, 28)') throw new Error(`仪表盘卡片底色不是炭黑：${dash.cardBg}`)
+    if (dash.lightCardBg !== 'rgb(255, 255, 255)')
+      throw new Error(`页面其余卡片应保持浅色，实为 ${dash.lightCardBg}（深色只该有一块，两块就没有焦点了）`)
+    if (dash.gridCount < 3) throw new Error(`网格线只有 ${dash.gridCount} 条`)
+    if (!dash.legendInDark) throw new Error('两色图例没跟着进深色卡')
+    console.log('深色仪表盘卡 ✓', JSON.stringify(dash))
+
+    // 悬停出明细：日期 + 两档次数（原生 title 换成了自绘 tooltip，深底上才统一）
+    {
+      const col = win.locator('[data-testid="usage-daily"] > div').nth(13)
+      await col.hover()
+      await win.locator('[data-testid="usage-bar-tooltip"]').waitFor({ timeout: 4000 })
+      const tip = (await win.locator('[data-testid="usage-bar-tooltip"]').innerText()).replace(/\s+/g, ' ')
+      if (!/\d{4}-\d{2}-\d{2}/.test(tip) || !/标准 \d+ 次/.test(tip) || !/增强 \d+ 次/.test(tip))
+        throw new Error(`悬停明细没说清日期与两档次数：「${tip}」`)
+      await snapHover('47e-用量页-柱状图悬停明细')
+      console.log('柱状图悬停明细 ✓', JSON.stringify({ tip }))
+      await win.mouse.move(4, 4)
+    }
     const note = (await win.locator('[data-testid="usage-token-note"]').innerText()).replace(/\s+/g, '')
     // tokens 含哪几项、以及打标为什么显示「—」，两件事都得写出来
     if (!/缓存读/.test(note) || !/只记次数/.test(note))
@@ -4320,6 +4419,18 @@ const OWNED_BY_OTHER_SCRIPT = {
   'a1-拖入无可入库文件-明确提示.png': 'a1-enqueue.mjs',
   'assets-嵌图渲染.png': 'assets-render.mjs',
   'attach-附件缩略图.png': 'attachments.mjs',
+  // 2026-08-19 发布前自测新增的三个专项脚本（见 docs/RELEASE-CHECK.md）
+  '54-升级路径-老userData接管.png': 'upgrade-path.mjs',
+  '55-离线恢复-恢复前.png': 'offline-recovery.mjs',
+  '55b-离线恢复-等待后.png': 'offline-recovery.mjs',
+  '60-新装-登录门.png': 'fresh-install.mjs',
+  '60b-新装-登录后.png': 'fresh-install.mjs',
+  '61-新装-建库向导两分支.png': 'fresh-install.mjs',
+  '61b-新装-模板库已建.png': 'fresh-install.mjs',
+  '62-新装-入库完成.png': 'fresh-install.mjs',
+  '63-新装-问答.png': 'fresh-install.mjs',
+  '64-新装-产物面板.png': 'fresh-install.mjs',
+  '64b-新装-产物已入库.png': 'fresh-install.mjs',
 }
 /**
  * 只有 `E2E_CHAT=1`（真实 AI 调用）那一轮才刷得到的截图。
@@ -4374,8 +4485,8 @@ if (chatOnly.length) {
     CHAT
       ? '⚠️  以下截图属于 E2E_CHAT 专属，但本轮开了 E2E_CHAT 却没刷到，请查上面的跳过原因：'
       : 'ℹ️  以下截图属于 E2E_CHAT 专属（本轮是本地模式，未刷新属正常，不算残留）。\n' +
-        '    注：这批的画面**仍是品牌二期之前的旧配色**，属已知状态——按 2026-08-18 拍板\n' +
-        '    「本单不为它们单独跑一轮真实 AI」，待下次 E2E_CHAT 轮自然刷新：'
+        '    注：2026-08-19 的 E2E_CHAT 全量轮已把这批**全部刷成新配色**，\n' +
+        '    「仍是品牌二期旧配色」那条已知状态已销账：'
   )
   for (const f of chatOnly) console.log(`   - ${f}  ←  ${ONLY_IN_CHAT_RUN[f]}`)
 }

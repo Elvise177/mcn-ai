@@ -181,6 +181,49 @@ export default function Workbench({
 
   const empty = messages.length === 0 && !streaming
 
+  /**
+   * 库是不是空的（R-3，2026-08-19 拍板的最小版引导）。
+   *
+   * 空库时首页那句「问你的库，或直接说要做什么」是**假承诺**——库里一个字都没有，
+   * 问什么都只会得到"没找到"。知识库页早就有空态引导了（`EmptyVaultGuide`），
+   * 但新客户登录后落的是**工作台**，在那一屏之前根本走不到知识库页。
+   *
+   * 只做一段文案 + 指向，**不做浮层引导**（完整 onboarding 记 roadmap）。
+   */
+  const [vaultEmpty, setVaultEmpty] = useState(false)
+  useEffect(() => {
+    let alive = true
+    const count = (ns: Array<{ children?: unknown[] }>): number =>
+      ns.reduce((n, x) => n + (x.children ? count(x.children as Array<{ children?: unknown[] }>) : 1), 0)
+    const check = async (): Promise<void> => {
+      try {
+        /**
+         * **必须先确认"有库"**（走查现场逮到）：用户在首跑引导上点了「暂时跳过」时
+         * 一个库都没有，这时候说「把资料拖进来就会自动入库」是**错的**——
+         * 没有库，`inbox.enqueue` 直接抛（M-06），拖进去什么都不会发生。
+         * 那一屏保持原文案，引导只给「有库但库里是空的」这一种。
+         */
+        const s = await window.api.settings.get()
+        if (!s?.vaultPath) {
+          if (alive) setVaultEmpty(false)
+          return
+        }
+        const tree = await window.api.vault.tree()
+        if (alive) setVaultEmpty(Array.isArray(tree) && count(tree) === 0)
+      } catch {
+        // 没开库 / 读不到：这条只是引导，读不出来就当作不用引导，别把首页搞出错误态
+        if (alive) setVaultEmpty(false)
+      }
+    }
+    void check()
+    // 第一份资料入库之后这句话就该消失，所以跟着 vault 变化重算
+    const off = window.api.vault.onChanged(() => void check())
+    return () => {
+      alive = false
+      off()
+    }
+  }, [])
+
   // 拖文件进工作台页：以前没人拦，Electron 直接导航到 file:// 把整个应用替换掉。
   // 现在走和知识库页同一条链路（inbox.enqueue），拖入时给覆盖层告诉用户会发生什么
   // 与知识库页同一套进出计数判定（见 useDragOver）：老写法拖出窗口时覆盖层消不掉
@@ -231,7 +274,10 @@ export default function Workbench({
             <h1 className="fade-up mb-2 font-serif text-display font-medium leading-tight">
               {greetingLine(nickname)}
             </h1>
-            <p className="mb-8 text-md text-muted">问你的库，或直接说要做什么</p>
+            {/* 空库时不说「问你的库」——库里什么都没有，那是句假承诺（R-3） */}
+            <p className="mb-8 text-md text-muted" data-testid="home-subtitle">
+              {vaultEmpty ? '把资料拖进来，或直接问我' : '问你的库，或直接说要做什么'}
+            </p>
             <InputBox
               value={input}
               onChange={setInput}
@@ -242,6 +288,7 @@ export default function Workbench({
               attachments={attachments}
               onAttach={setAttachments}
               wide
+              placeholder={vaultEmpty ? '把资料拖进来，或直接问我想做什么…' : undefined}
             />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
               {CHIPS.map((c) => (
@@ -254,6 +301,16 @@ export default function Workbench({
                 </button>
               ))}
             </div>
+            {/* 指向：告诉他资料往哪放、放完会发生什么。一行字，不做浮层（R-3 拍板） */}
+            {vaultEmpty && (
+              <div
+                data-testid="home-empty-vault-hint"
+                className="mt-6 flex items-center gap-2 text-base text-muted"
+              >
+                <Inbox size={16} className="text-accent" />
+                <span>知识库还是空的——把文件拖进这个窗口就会自动入库，也可以在左侧「个人知识库」里用投递箱导入</span>
+              </div>
+            )}
             <RecentDock convs={recentConvs} onOpenConv={onOpenConv} />
           </div>
         ) : (
@@ -462,6 +519,7 @@ function InputBox({
   attachments,
   onAttach,
   wide,
+  placeholder,
 }: {
   value: string
   onChange: (v: string) => void
@@ -473,6 +531,8 @@ function InputBox({
   attachments: { path: string; name: string; thumb: string }[]
   onAttach: (a: { path: string; name: string; thumb: string }[]) => void
   wide?: boolean
+  /** 空库时换一句不假承诺的（R-3）；不给就是默认那句 */
+  placeholder?: string
 }) {
   // 高度跟随实际内容（含自动折行）：rows 按 \n 计数会漏掉软换行，长句折行时上一行被顶出视野
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -540,7 +600,7 @@ function InputBox({
             }
           }}
           rows={1}
-          placeholder='问你的库，或说"把XX做成PPT"…'
+          placeholder={placeholder ?? '问你的库，或说"把XX做成PPT"…'}
           className="max-h-32 flex-1 resize-none self-center overflow-y-auto bg-transparent py-1 text-md leading-6 outline-none"
         />
         {streaming ? (
