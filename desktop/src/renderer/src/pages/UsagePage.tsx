@@ -48,6 +48,8 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
   const [showCost, setShowCost] = useState(false)
   const [data, setData] = useState<UsageSummary | null>(null)
   const [loading, setLoading] = useState(true)
+  /** 柱状图上鼠标停在第几根柱子（仅悬停明细用，不影响任何数据口径） */
+  const [hover, setHover] = useState<number | null>(null)
 
   /**
    * 每次刷新都把 `showCost` 一起重新读一遍。
@@ -135,40 +137,92 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
               )}
             </div>
 
-            {/* 最近 14 天柱状图：纯 CSS 柱条，不为一张小图引一整个图表库 */}
-            <div className="mb-6 max-w-3xl rounded-xl border border-line bg-card p-6">
-              <div className="mb-4 text-md font-medium">最近 14 天</div>
+            {/*
+              最近 14 天柱状图：纯 CSS 柱条，不为一张小图引一整个图表库。
+              **整张卡走深色仪表盘**（`.chart-dark` 就地改写 token，同 .sidebar-dark 的手法）：
+              页面其余部分维持暖白纸面，深色只做**一个**视觉焦点——两块深色就没有焦点了。
+            */}
+            <div className="chart-dark mb-6 max-w-3xl rounded-xl bg-card p-6 text-ink">
+              <div className="text-md font-medium">最近 14 天</div>
+              {/* 提示放到底部图例那一行，不放标题右侧——悬停气泡是从柱子顶上弹出来的，
+                  放在标题行会被它盖住（拍验收图时就撞上了） */}
+              <div className="mb-4 mt-1 text-2xs text-muted">峰值 {maxDaily} 次/天</div>
               {/* 柱区与日期轴**分成两行**：柱子的百分比高度要有一个"确定高度"的父级才算得出来。
                   一开始把日期塞进同一列里，那一列在 `items-end` 的行里高度由内容决定（= 只有日期
                   那行字那么高），于是所有柱子都算成 0——页面上是一整片空白（走查截图抓到的） */}
               {/* 同柱堆叠：下段标准档（浅橙）、上段增强档（深橙）。
                   只画总次数的话，"20 次全标准"和"20 次里 5 次增强"长得一模一样，
                   而两者的钱差一个数量级——这张图的意义就在这个差别上 */}
-              <div data-testid="usage-daily" className="flex h-28 gap-1.5">
-                {data.daily.map((d) => {
-                  const h = d.count > 0 ? Math.max(8, (d.count / maxDaily) * 100) : 4
-                  const enhPct = d.count > 0 ? d.enhanced / d.count : 0
-                  return (
-                    <div key={d.date} className="flex min-w-0 flex-1 flex-col justify-end">
-                      <div
-                        data-count={d.count}
-                        data-standard={d.standard}
-                        data-enhanced={d.enhanced}
-                        title={`${d.date}：${d.count} 次（标准 ${d.standard} · 增强 ${d.enhanced}）`}
-                        // 0 也留一点底座：整行空白会让人以为图没渲染出来
-                        className={`flex w-full flex-col overflow-hidden rounded-sm ${d.count > 0 ? '' : 'bg-surface'}`}
-                        style={{ height: `${h}%` }}
-                      >
-                        {d.enhanced > 0 && (
-                          <div data-seg="enhanced" className="w-full bg-tier-enhanced" style={{ height: `${enhPct * 100}%` }} />
-                        )}
-                        {d.standard > 0 && (
-                          <div data-seg="standard" className="w-full flex-1 bg-tier-standard" />
-                        )}
-                      </div>
+              <div className="relative">
+                {/* 网格线：只给柱高一个参照，暗灰细线，不该被看成内容 */}
+                <div aria-hidden className="pointer-events-none absolute inset-0">
+                  {[0, 0.25, 0.5, 0.75, 1].map((p) => (
+                    <div key={p} className="absolute inset-x-0 border-t border-line" style={{ bottom: `${p * 100}%` }} />
+                  ))}
+                </div>
+                {/* 悬停明细：日期 + 两档次数。**不用原生 title**——原生提示是系统样式，
+                    在深色卡上是另一套观感，而且要等一秒才出，仪表盘上显得迟钝 */}
+                {hover != null && data.daily[hover] && (
+                  <div
+                    data-testid="usage-bar-tooltip"
+                    className="pointer-events-none absolute z-10 whitespace-nowrap rounded-md bg-surface px-2.5 py-1.5 text-2xs leading-4 text-ink shadow-pop"
+                    /* 靠边的柱子要**把气泡夹回卡片里**：一律居中对齐的话，
+                       悬停最左/最右那根时气泡会探出卡片外，看着像飞出去的浮层 */
+                    style={{
+                      left: `${((hover + 0.5) / data.daily.length) * 100}%`,
+                      transform:
+                        (hover + 0.5) / data.daily.length > 0.75
+                          ? 'translateX(-100%)'
+                          : (hover + 0.5) / data.daily.length < 0.25
+                            ? 'translateX(0)'
+                            : 'translateX(-50%)',
+                      bottom: '100%',
+                      marginBottom: 6,
+                    }}
+                  >
+                    <div className="font-medium">{data.daily[hover].date}</div>
+                    <div className="mt-0.5 flex items-center gap-2 text-muted">
+                      <span className="flex items-center gap-1">
+                        <i className="inline-block h-2 w-2 rounded-sm bg-tier-standard" />
+                        标准 {data.daily[hover].standard} 次
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <i className="inline-block h-2 w-2 rounded-sm bg-tier-enhanced" />
+                        增强 {data.daily[hover].enhanced} 次
+                      </span>
                     </div>
-                  )
-                })}
+                  </div>
+                )}
+                <div data-testid="usage-daily" className="relative flex h-28 gap-1.5">
+                  {data.daily.map((d, i) => {
+                    const h = d.count > 0 ? Math.max(8, (d.count / maxDaily) * 100) : 4
+                    const enhPct = d.count > 0 ? d.enhanced / d.count : 0
+                    return (
+                      <div
+                        key={d.date}
+                        className="flex min-w-0 flex-1 flex-col justify-end"
+                        onMouseEnter={() => setHover(i)}
+                        onMouseLeave={() => setHover((v) => (v === i ? null : v))}
+                      >
+                        <div
+                          data-count={d.count}
+                          data-standard={d.standard}
+                          data-enhanced={d.enhanced}
+                          // 0 也留一点底座：整行空白会让人以为图没渲染出来
+                          className={`flex w-full flex-col overflow-hidden rounded-sm transition-opacity ${
+                            d.count > 0 ? '' : 'bg-surface'
+                          } ${hover != null && hover !== i ? 'opacity-70' : ''}`}
+                          style={{ height: `${h}%` }}
+                        >
+                          {d.enhanced > 0 && (
+                            <div data-seg="enhanced" className="w-full bg-tier-enhanced" style={{ height: `${enhPct * 100}%` }} />
+                          )}
+                          {d.standard > 0 && <div data-seg="standard" className="w-full flex-1 bg-tier-standard" />}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
               <div className="mt-1.5 flex gap-1.5">
                 {data.daily.map((d) => (
@@ -185,6 +239,7 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                 <span data-legend="enhanced" className="flex items-center gap-1.5">
                   <i className="inline-block h-2.5 w-2.5 rounded-sm bg-tier-enhanced" /> 增强模式
                 </span>
+                <span className="ml-auto">悬停看当天明细</span>
               </div>
             </div>
 
