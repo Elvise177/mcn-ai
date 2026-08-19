@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "dist": "electron-vite build && electron-builder --mac",
+    "dist": "electron-vite build && electron-builder --mac && node scripts/fix-latest-yml.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "smoke:agent": "electron-vite build && ELECTRON_RUN_AS_NODE=1 electron out/main/smoke-agent.js",
     "smoke:provider": "electron-vite build && electron out/main/smoke-provider.js",

@@ -366,7 +366,12 @@ cd desktop && MCNAI_APP_BIN="$PWD/release/mac-arm64/mcn-ai.app/Contents/MacOS/mc
 
 ### 5. 生成并上传更新源
 
-`npm run dist` 已经在 `desktop/release/` 里出好了这三样，**一个都不能少**：
+`npm run dist` 已经在 `desktop/release/` 里出好了这三样，**一个都不能少**。
+（`dist` 的最后一步是 `node scripts/fix-latest-yml.mjs`——**订票会把 dmg 撑大约 13KB，
+而 electron-builder 在 afterAllArtifactBuild 钩子返回之后还会再写一遍 `latest-mac.yml`，
+把订票前的旧哈希盖回去**。所以清单的重算必须挂在 electron-builder 完全收工之后，
+不能放在钩子里。2026-08-19 实测踩过一次。）
+
 
 | 文件 | 干什么的 |
 |---|---|

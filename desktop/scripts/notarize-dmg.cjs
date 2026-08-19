@@ -13,43 +13,18 @@
  * **注意 `xcrun stapler validate <dmg>` 会骗人**：只公证不签名时它照样报 "validate worked"，
  * 而 `spctl` 判 rejected。**以 spctl 为准**——它才是 Gatekeeper 真正的判定引擎。
  *
- * 顺带把 `latest-mac.yml` 里 dmg 那条的 sha512/size 重算一遍：
- * 订票会改 dmg 的字节，不重算的话清单里那个哈希是**错的**。
- * （macOS 的自动更新走 zip，dmg 那条对更新链路无影响，但清单里躺一个错哈希迟早坑人。）
+ * **`latest-mac.yml` 的重算不在这里做**（第一版放在这里，错了）：
+ * electron-builder 在本钩子返回**之后**还会再写一遍那个文件，把算好的值盖回订票前的旧哈希。
+ * 实测证据：yml 的 mtime 比 dmg 晚 1 秒，里面的 size 比磁盘上的 dmg 小 13551 字节
+ * （正好是那张公证票的体积）。所以那一步挪到了 `scripts/fix-latest-yml.mjs`，
+ * 由 `npm run dist` 在 electron-builder 完全收工之后跑。
  *
  * 三个 APPLE_API_* 环境变量没设齐时**跳过并打警告**，不让构建失败——
  * 本地想快速出个未公证的包时不该被这一步挡住。真正的守门人是
  * `node scripts/verify-signing.mjs`。
  */
 const { spawnSync } = require('child_process')
-const { createHash } = require('crypto')
-const { readFileSync, writeFileSync, existsSync, statSync } = require('fs')
-const { join, basename, dirname } = require('path')
-
-function sha512Base64(file) {
-  return createHash('sha512').update(readFileSync(file)).digest('base64')
-}
-
-/** latest-mac.yml 里 dmg 那条的 sha512/size 在订票后会失效，就地改准 */
-function patchLatestYml(outDir, dmgs) {
-  const yml = join(outDir, 'latest-mac.yml')
-  if (!existsSync(yml)) return
-  let text = readFileSync(yml, 'utf8')
-  let changed = false
-  for (const dmg of dmgs) {
-    const name = basename(dmg)
-    // 只改 files 列表里 `- url: <这个 dmg>` 紧跟的那两行，不碰顶层 path/sha512（那是 zip 的）
-    const re = new RegExp(`(- url: ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n\\s*sha512: )[^\\n]+(\\n\\s*size: )\\d+`)
-    if (re.test(text)) {
-      text = text.replace(re, `$1${sha512Base64(dmg)}$2${statSync(dmg).size}`)
-      changed = true
-    }
-  }
-  if (changed) {
-    writeFileSync(yml, text)
-    console.log('  • latest-mac.yml 里 dmg 的 sha512/size 已按订票后的文件重算')
-  }
-}
+const { basename } = require('path')
 
 module.exports = async function afterAllArtifactBuild(buildResult) {
   const dmgs = (buildResult.artifactPaths || []).filter((p) => p.endsWith('.dmg'))
@@ -87,6 +62,5 @@ module.exports = async function afterAllArtifactBuild(buildResult) {
     console.log(`  • dmg 已公证并订票  file=${basename(dmg)}`)
   }
 
-  patchLatestYml(dirname(dmgs[0]), dmgs)
   return []
 }
