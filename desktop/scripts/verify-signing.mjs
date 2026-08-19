@@ -20,7 +20,7 @@
  *   7 包内**每一个 Mach-O**都签了（PyInstaller 那 89MB 是最容易漏的一片）
  */
 import { spawnSync } from 'child_process'
-import { existsSync, readdirSync } from 'fs'
+import { existsSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 
 const RELEASE = join(process.cwd(), 'release')
@@ -41,13 +41,19 @@ function findApp() {
   const hit = readdirSync(dir).find((f) => f.endsWith('.app'))
   return hit ? join(dir, hit) : null
 }
+/**
+ * **按修改时间取最新，不按文件名排序。**
+ * 一度是 `.sort().pop()`，改名（mcn-ai → SamePage）之后立刻踩雷：
+ * `release/` 里新旧两个 dmg 并存时，`'S'(83) < 'm'(109)`，`pop()` 拿到的是**旧包**——
+ * 于是"验收全绿"验的根本不是要发出去的那个。
+ */
 function findDmg() {
   if (!existsSync(RELEASE)) return null
-  const hit = readdirSync(RELEASE)
-    .filter((f) => f.endsWith('.dmg') && !f.includes('已重签'))
-    .sort()
-    .pop()
-  return hit ? join(RELEASE, hit) : null
+  const cands = readdirSync(RELEASE)
+    .filter((f) => f.endsWith('.dmg'))
+    .map((f) => ({ f, t: statSync(join(RELEASE, f)).mtimeMs }))
+    .sort((a, b) => b.t - a.t)
+  return cands.length ? join(RELEASE, cands[0].f) : null
 }
 
 const appPath = process.argv[2] || findApp()

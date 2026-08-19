@@ -189,9 +189,18 @@ src/main/index.ts:28        title: 'SamePage'          ← 只有界面字符串
 
 客户装完之后，Dock 上是 `mcn-ai`、点开界面写 SamePage。**这是发客户前最好一起收掉的不一致**，而且按上面的实测，收掉它的代价比 §4-27 记的小得多。
 
-#### 裁决（2026-08-19，用户拍板）
+#### 裁决（2026-08-19，用户拍板）→ **同日晚推翻，已改为 SamePage**
 
-**`productName` 不改**，维持内部名，显示层 SamePage 已足够。
+> **最终结论：`productName: SamePage` 已落地。** 下面这段是当天早些时候的裁决，
+> 保留是为了说明"为什么当时不改、后来又为什么改"。
+> 推翻的理由：名字不一致是客户直接看得见的东西，值得现在收掉；
+> 而上面那张实测表已经证明改它不动 userData、不动 Keychain。
+> 改名后复验：`CFBundleName`=SamePage 而 `app.getName()` 仍是 `mcn-ai-desktop`，
+> `upgrade-path.mjs` 七件事全绿、会话真解密、不要求重登。
+> **唯一实操代价**：旧的 `mcn-ai.app` 与新的 `SamePage.app` 是两个文件，
+> 覆盖安装不成立，装机必须手动删旧 app（`docs/RELEASE.md` §2）。
+
+~~**`productName` 不改**，维持内部名，显示层 SamePage 已足够。~~
 dmg 文件名 / .app 包名 / Finder·Dock 名 / 菜单栏应用名**暂时继续是 `mcn-ai`**，
 这条不一致**记账不阻断发布**，已写进 HANDOFF §4-27。
 **真正的内部改名等"天然要求重登"的时机搭车**——当前最可能的是网关切换那一单。

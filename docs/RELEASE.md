@@ -122,20 +122,53 @@ cd desktop && MCNAI_APP_BIN="$PWD/release/mac-arm64/mcn-ai.app/Contents/MacOS/mc
   能回状态行就是醒着的（根路径 404 属正常）
 - **aihubmix 余额**：这把 key 同时供着网页版的向量与聊天，打穿 = 桌面版 + 网页版一起挂，
   而第一个感知渠道是客户报障（HANDOFF §3-6）。发版前查一次
-- **老 macOS 兼容**：本轮全部验证跑在本机 arm64 上。发给系统更旧的客户机之前，
-  用 yara 做一次 XProtect 预检（HANDOFF §4-2）
+- **XProtect 预检**：✅ **2026-08-19 已做**（规则 v5356 / yara 4.5.8）——整包 452 个文件
+  （含 PyInstaller 那 146 个）与 dmg 本身**零命中**。跑法：
 
-## 2. 已知的名字不一致（记账，不阻断）
+  ```bash
+  yara -w -r /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Resources/XProtect.yara desktop/release/mac-arm64/SamePage.app
+  ```
 
-`productName` 维持 `mcn-ai`（2026-08-19 拍板，见 HANDOFF §4-27）。所以：
+  **每次换 Electron 大版本、或 XProtect 规则更新之后重跑一次**（规则版本看
+  `defaults read /Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist CFBundleShortVersionString`）。
+  这条以前是「XProtect 误杀 Electron 31+」的替代验证，签名之后误杀风险已大幅下降，
+  但 PyInstaller 那 89MB 仍是杀软最爱误报的一类，别省这一步
+- **老 macOS / Intel 仍未验**：全部验证跑在本机 **macOS 15.7.3 / arm64**。
+  **只出 arm64——Intel Mac 装不了**。更旧的 macOS 版本没有实机验过
 
-| 用户看到的地方 | 显示 |
-|---|---|
-| 界面（侧栏 / 登录页 / 窗口标题 / 菜单项文案） | **SamePage** |
-| Finder / 应用程序文件夹 / Dock / dmg 文件名 | **mcn-ai** |
+## 2. 名字已统一为 SamePage（2026-08-19，推翻同日「维持 mcn-ai」那条裁决）
 
-客户装完之后 Dock 上是 `mcn-ai`、点开界面写 SamePage。**装机时主动说一句**，
-免得客户以为装错了。真正的内部改名等"天然要求重登"的时机搭车（当前最可能是网关切换那一单）。
+界面、Dock、Finder、应用程序文件夹、菜单栏、dmg 文件名**全都是 SamePage**。
+
+**为什么这次敢改**（RELEASE-CHECK §2.3 的实测支撑）：userData 目录与 Keychain 服务名
+跟的是 `package.json` 的 `name`（`mcn-ai-desktop`），**不是** `productName`——
+打进 asar 的 package.json 里根本没有 `productName` 字段。改名后用打包形态探针复验：
+
+```
+CFBundleName / 可执行文件 = SamePage          ← Dock / Finder / 菜单栏
+app.getName()            = mcn-ai-desktop     ← userData 与 Keychain 跟它走，没变
+Keychain 服务名（推导）    = mcn-ai-desktop Safe Storage
+```
+
+`upgrade-path.mjs` 拿真实 userData 副本让 `SamePage.app` 接管，七件事全绿，
+**会话真解了密、不要求重新登录**。
+
+> **红线**：`package.json` 的 `name` 一个字都不能改，也不能给它加 `productName` 字段。
+> 那两件事才会换 userData 目录，等于把所有已装机器的配置、会话、密钥全甩掉。
+
+### ⚠️ 覆盖安装不成立，必须手动删旧 app
+
+旧版叫 `mcn-ai.app`，新版叫 `SamePage.app`——**这是两个不同的文件**，拖进「应用程序」
+不会覆盖，会变成两个都在，客户很可能点到旧的那个（还是 A-8 修复前的版本）。
+
+装机步骤：
+
+1. 把 `SamePage.app` 拖进「应用程序」
+2. **把旧的 `mcn-ai.app` 拖进废纸篓**
+3. 打开新的，在设置页确认版本号
+
+> **千万不要删 `~/Library/Application Support/mcn-ai-desktop/`** —— 那是数据
+> （库路径、会话历史、两把 key、档位配置），删 app 文件不影响它，删了它才是真丢东西。
 
 ## 3. 发版后队列（不挡这一版）
 

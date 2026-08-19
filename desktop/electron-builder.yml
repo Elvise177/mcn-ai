@@ -1,5 +1,11 @@
 appId: com.mcnai.desktop
-productName: mcn-ai
+# 2026-08-19 改名（推翻了同日「维持 mcn-ai」那条裁决）：Dock/Finder/菜单栏与界面统一叫 SamePage。
+# **安全前提（RELEASE-CHECK §2.3 实测）**：userData 目录与 Keychain 服务名跟的是
+# `package.json` 的 `name`（mcn-ai-desktop），**不是** productName——打进 asar 的
+# package.json 里根本没有 productName 字段。所以改这里只换显示名，不动数据、不强制重登。
+# **红线**：`package.json` 的 `name` 一个字不能改，也不能给它加 productName 字段——
+# 那两件事才会换 userData 目录，等于把所有已装机器的配置、会话、密钥全甩掉。
+productName: SamePage
 directories:
   output: release
 # electron-builder 只公证 .app、不公证 dmg 本身。这个钩子把 dmg 也送去公证 + 订票，
