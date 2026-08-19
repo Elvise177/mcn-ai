@@ -448,31 +448,56 @@ curl -s  "<更新源URL>/latest-mac.yml"                  # version/path/sha512 
 
 ---
 
-## C. 更新源：占位 → 真实地址
+## C. 更新源：阿里云 OSS（2026-08-19 已接上）
 
-**现在是占位状态。** `desktop/electron-builder.yml` 的 `publish.url` 写着
-`https://samepage-updates.REPLACE-ME.invalid/mac/`，`src/main/updater.ts` 认出 `.invalid`
-就整条跳过——占位期间客户机**不发任何更新请求**，日志里也不会堆一串 ENOTFOUND。
+| 项 | 值 |
+|---|---|
+| Bucket | `samepage-updates` |
+| 地域 | 西南1（成都），Endpoint `oss-cn-chengdu.aliyuncs.com` |
+| 更新源 URL | `https://samepage-updates.oss-cn-chengdu.aliyuncs.com/mac/` |
+| 权限 | 公共读（**「阻止公共访问」必须是关闭的**，它比读写权限优先级高） |
+| 冗余 | 本地冗余（更新包可再生成，不值得付同城冗余的钱） |
 
-### 切换步骤（拿到阿里云 OSS 地址之后）
+**验证公共读通没通**（不用登控制台）：匿名取一个不存在的对象，
+回 `NoSuchKey` = 通了；回 `AccessDenied` = 权限没配对。
 
-1. 改 `desktop/electron-builder.yml` 一行：
+```bash
+curl -s https://samepage-updates.oss-cn-chengdu.aliyuncs.com/mac/latest-mac.yml | head -5
+```
 
-   ```yaml
-   publish:
-     provider: generic
-     url: https://<bucket>.oss-cn-<region>.aliyuncs.com/samepage/mac/
-     channel: latest
-   ```
+### ⚠️ 这个 URL 是**打包时**烧进包里的
 
-2. OSS 侧：bucket 读权限设为**公共读**，`latest-mac.yml` 的 `Content-Type` 建议
-   `text/yaml`，并把它的缓存时间设短（`Cache-Control: max-age=60`）——
-   CDN 把 yml 缓存住是这类更新源最常见的"发了但客户收不到"。
-3. 重新 `npm run dist`（url 是**打包时**烧进 `resources/app-update.yml` 的，改了必须重打）
-4. 按 §B 5–6 上传并验证
-5. **验证真的切过来了**：新装一台，看日志里这一行：
-   `[updater] 自动更新已启用，源：https://…`
-   还写着「更新源是占位地址」就是没切成。
+`publish.url` 会被写进 app 包内的 `resources/app-update.yml`，**改了它必须重新打包**——
+已经装到客户机上的旧包记的仍是它自己被打包时的那个地址。
+
+**所以「先定更新源、再发第一版」这个顺序是有意义的**：2026-08-19 中途曾用 `.invalid`
+占位打过几个包，那种包**永远不会查更新**（`updater.ts` 认出 `.invalid` 就整条跳过），
+发出去之后要再手动换一次才能接上自动更新。当前发的这一版已经烧的是真实地址。
+
+**换地址时**：改 `publish.url` → `npm run dist` → 按 §B 5–6 上传验证 →
+新装一台看日志里有没有这一行：`[updater] 自动更新已启用，源：https://…`。
+
+### 上传后必做：给 `latest-mac.yml` 设短缓存
+
+**这是每个文件的属性，每次重传都要重设**。控制台：文件列表 → 勾选 `latest-mac.yml`
+→ 更多 → 设置 HTTP 头 → `Cache-Control` 填 `max-age=60`。
+命令行一步到位：
+
+```bash
+ossutil cp latest-mac.yml oss://samepage-updates/mac/ -f --meta "Cache-Control:max-age=60"
+```
+
+不设的话默认缓存好几小时：**你发了新版本、包也传上去了，客户端却拿到缓存里的旧 yml**，
+表现是"明明发了但客户收不到"，而服务器上文件明明是新的——这类问题特别难查。
+
+### 建议顺手设一道花费告警
+
+流量是后付费、**没有天然上限**。240MB 的包被脚本循环下 1000 次就是百来块，
+而那对脚本只是几分钟的事。两条选一条：
+
+- **费用中心 → 预算管理 → 新建预算**：成本预算 / 按月 / **10 元** / 50%·80%·100% 各发短信
+  （推荐——覆盖整个账号，不用跟指标名较劲）
+- 云监控 → 报警规则 → 产品选 OSS → 资源选该 Bucket → 指标「公网流出流量」→ 1 小时 ≥ 2GB
 
 ### ⚠️ 待办：更新源的鉴权（记账，不挡这一版）
 

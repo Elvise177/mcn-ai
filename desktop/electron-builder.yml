@@ -58,11 +58,16 @@ dmg:
       type: link
       path: /Applications
 # ── 自动更新源（electron-updater，generic provider）────────────────────────
-# 这个 url 会被烧进 app 包里的 resources/app-update.yml，客户端启动后去
-# <url>/latest-mac.yml 查版本。**当前是占位**，切到真实阿里云 OSS 的步骤见
-# docs/RELEASE.md §C。占位期间客户端不会发任何更新请求（src/main/updater.ts
-# 认出 `.invalid` 域名就整条跳过，不会在客户机上留一串失败日志）。
+# 阿里云 OSS，西南1（成都），Bucket `samepage-updates`，公共读。
+#
+# **这个 url 是打包时烧进 app 包里的 `resources/app-update.yml` 的**，客户端启动后去
+# `<url>/latest-mac.yml` 查版本。所以**改了它必须重新打包**——已经装到客户机上的旧包
+# 记的仍是它自己被打包时的那个地址，不会跟着变。
+# （2026-08-19 之前这里是 `.invalid` 占位；用占位地址打出去的包永远不会查更新，
+#   那种包发出去之后要再手动换一次才能接上自动更新。）
+#
+# 换地址的完整步骤见 docs/RELEASE.md §C。
 publish:
   provider: generic
-  url: https://samepage-updates.REPLACE-ME.invalid/mac/
+  url: https://samepage-updates.oss-cn-chengdu.aliyuncs.com/mac/
   channel: latest
