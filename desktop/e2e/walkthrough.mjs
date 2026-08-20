@@ -732,22 +732,6 @@ await assertStandardRoute(win, '走查主实例')
   }
 
   /**
-   * **界面上的版本号必须等于真实版本**（2026-08-20 真人发现）。
-   *
-   * 它原来是渲染层里手写的常量 `const APP_VERSION = 'v0.1.0'`——
-   * 装了 0.1.1 界面照样显示 0.1.0。而"看设置页版本号确认客户升没升级"
-   * 是发版流程里的关键一步，一个永远不变的数字等于把这一步废掉，
-   * **而且它不会自己暴露**：界面看着挺正常，只有拿另一版对比才发现。
-   */
-  {
-    const real = await win.evaluate(() => window.api.settings.get().then((x) => x.appVersion ?? ''))
-    const shown = await win.locator('aside').last().innerText()
-    if (!real) bad.push('settings.get() 没有回 appVersion（主进程没暴露真实版本）')
-    else if (!shown.includes(real)) bad.push(`侧栏显示的版本号里没有真实版本 ${real}，实得「${shown.split('\n').pop()}」`)
-    else console.log(`版本号 ✓ 界面与真实版本一致（${real}）`)
-  }
-
-  /**
    * **第一版检索口径 = 本地**（2026-08-19 裁决）。
    * 出厂值必须是 `local`——云端那一支不给 file_path，模型只能猜路径（HANDOFF §3-13）。
    * 这条断言零成本，守的是"别有人顺手把默认值改回 cloud"。
@@ -1352,8 +1336,21 @@ try {
   if (!/^(早上好|下午好|晚上好|夜深了)$/.test(greeting)) throw new Error(`问候语不对：「${greeting}」`)
   const footer = await win.locator('aside div').last().innerText()
   if (/\d{6,}/.test(footer)) throw new Error(`侧栏身份行露出了用户 ID：「${footer}」`)
-  if (!footer.includes('v0.1.0')) throw new Error(`侧栏身份行缺版本号：「${footer}」`)
-  console.log('问候语/身份行 ✓', JSON.stringify({ greeting, footer: footer.trim() }))
+  /**
+   * **版本号要跟主进程的真实版本比，不许写死**（2026-08-20 真人发现）。
+   *
+   * 这条原来写的是 `footer.includes('v0.1.0')`——而渲染层里也正好写死着
+   * `const APP_VERSION = 'v0.1.0'`。**两边写死同一个数，一对就绿**，
+   * 于是 0.1.1 装上去界面还显示 0.1.0，走查全绿、真人一眼看穿。
+   *
+   * 教训不是"漏测了"，是**断言把被测值抄了一遍**——这种断言测的是我自己会不会打字，
+   * 不是产品对不对。凡是"界面显示的 X 应该等于系统里的 X"，X 必须从**另一侧**取。
+   */
+  const realVer = await win.evaluate(() => window.api.settings.get().then((x) => x.appVersion ?? ''))
+  if (!realVer) throw new Error('settings.get() 没回 appVersion——主进程没暴露真实版本')
+  if (!footer.includes(`v${realVer}`))
+    throw new Error(`侧栏版本号与真实版本不符：真实 v${realVer}，界面「${footer.trim()}」`)
+  console.log('问候语/身份行 ✓', JSON.stringify({ greeting, footer: footer.trim(), 真实版本: realVer }))
 
   // 输入框：60px 起高 + 附件占位按钮
   // offsetHeight：含 1px 边框的实际高度（box-sizing: border-box，clientHeight 会少掉两条边）
