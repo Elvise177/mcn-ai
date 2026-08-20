@@ -149,7 +149,21 @@ try {
   const vroot = s.vaultPath ?? VAULT
   const allMd = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
     e.isDirectory() ? allMd(join(d, e.name)) : e.name.endsWith('.md') ? [join(d, e.name)] : [])
-  const mds = allMd(vroot)
+  /**
+   * **轮询，不要采样一次**（2026-08-19 踩到）。
+   *
+   * 建卡器（`vault/entity-cards.ts`）跑在 pipeline 之后，"入库跑完"那一刻卡片
+   * 不一定已经落盘。这里原本是直接 `allMd(vroot)` 采样一次，于是同一份代码
+   * 两轮分别数到 **1 张卡**和 **0 张卡**——数字在变本身就说明采样早了。
+   * （那一轮的现场：断言时 10 篇 md / 0 张卡，跑完去看磁盘是 13 篇 md / **3 张卡**，
+   *   卡片名都对：灰太太 / pink bear丰唇蜜 / 罗小曼卧蚕盘。产品是好的，断言太急。）
+   * 同走查里那条既有约定：「凡是断言 Dock 的地方都必须轮询而不是采样一次」。
+   */
+  let mds = allMd(vroot)
+  for (let i = 0; i < 30 && mds.filter((f) => f.includes('/30_实体/')).length === 0; i++) {
+    await win.waitForTimeout(2000)
+    mds = allMd(vroot)
+  }
   // A-3 的哨兵**必须排掉 MOC/主题索引**：那两篇天生就是一堆双链，
   // 而 A-3 报的「双链 352 → 2」里的那个 2 恰恰就是它们——把 MOC 算进来这条断言永远绿
   const isMoc = (f) => /(_MOC|_主题索引|Library_MOC)/.test(f)

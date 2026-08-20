@@ -30,3 +30,23 @@ export function enqueueMessage(r: EnqueueResult): { text: string; type: 'ok' | '
 
 /** 支持的格式，给空态提示用（真相源见 `main/inbox/orchestrator.ts` 的 `SUPPORTED_EXT`） */
 export const SUPPORTED_HINT = 'md / txt / docx / pdf / xlsx / pptx'
+
+/**
+ * 拖放来的 `File` → 磁盘路径。**两个拖入口共用这一个，别各写各的。**
+ *
+ * `window.api.files.pathFor` 内部是 `webUtils.getPathForFile`（在 preload 里调，
+ * 渲染层拿不到 electron 模块）。**这是生产环境唯一有效的那条**——
+ * `File.path` 在 Electron 32 被移除，2026-08-19 从 30.5.1 升到 43.4.1 跨过这个断点，
+ * 所有拖放入库当场全废且**静默**，客户报的就是"拖进去没有任何反应"。
+ *
+ * 后面那条 `f.path` **只为走查存在**：合成 DragEvent 里的 File 不是真拖进来的，
+ * `getPathForFile` 拿不到路径，走查靠 `Object.defineProperty(f,'path',…)` 造一个。
+ * 而那个自定义属性**过不了 contextBridge 边界**（跨界时被丢掉），所以这条回退
+ * 必须留在**渲染层**、不能放进 preload——第一版就是放错了地方，H-01 当场红。
+ *
+ * **它在真机上是死代码**（`'path' in new File([''],'x')` === false，实测），
+ * 所以不会掩盖真实故障。真正的护栏是调用方那句「取不到路径就弹错」。
+ */
+export function pathOfDropped(f: File): string {
+  return window.api.files.pathFor(f) || (f as File & { path?: string }).path || ''
+}

@@ -18,6 +18,8 @@ import { attachmentNote, stageAttachments } from './attachments'
 import type { AgentTask } from '../tasks/types'
 import { conversationMessages, type ChatMessage } from './conversations'
 import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
+import { judgeWrite } from './write-guard'
+import { backupBeforeWrite } from './write-backup'
 import {
   countToolResults,
   isStepWorthy,
@@ -59,6 +61,10 @@ export interface AgentStreamPayload {
    * 会靠拼回去的历史照样答对，resume 坏了也测不出来。
    */
   recovered?: boolean
+  /** B4：这条 notice 对应一次 AI 写入，渲染层据此在 toast 上挂「撤销」 */
+  writeUndoId?: string
+  /** B4：被撤销的目标文件（toast 文案用） */
+  writeRel?: string
 }
 
 /** 一轮对话的执行上下文。抽出来是因为「会话恢复失败」要拿同一份参数原样重跑一次 */
@@ -112,6 +118,25 @@ interface LiveSession {
  * 实测 **174 秒**，比不管还慢。闸门的位置和拒绝语的措辞一样重要。
  */
 const SCAN_LIMIT = 5
+
+/** B4：AI 写知识库的确认弹窗等多久。到点默认**拒**（见 askWrite 的注释） */
+const WRITE_CONFIRM_TIMEOUT_MS = 60_000
+
+/**
+ * 给确认卡用的一句话改动摘要。
+ * **不把整段新内容塞进弹窗**——模型一次可能写几千字，弹窗里滚不完也看不懂；
+ * 用户真正要判断的是"改哪个文件、是新建还是改写、动了多少"。
+ */
+function summarizeWrite(tool: string, input: Record<string, unknown>): string {
+  if (tool === 'Edit') {
+    const oldS = String(input.old_string ?? '')
+    const newS = String(input.new_string ?? '')
+    const head = oldS.replace(/\s+/g, ' ').slice(0, 40)
+    return `替换一段文字（原文约 ${oldS.length} 字 → 新文约 ${newS.length} 字）${head ? `：「${head}…」` : ''}`
+  }
+  const content = String(input.content ?? '')
+  return `写入全文，约 ${content.length} 字`
+}
 
 /** PPT 版式速查（源自 render_pptx.py 的设计系统，注入系统提示词） */
 const PPT_GUIDE = `render_pptx 的 outline JSON 格式：
@@ -189,6 +214,41 @@ export class AgentManager {
   isStreaming(sessionId: string): boolean {
     const t = tasks.get(this.taskId(sessionId))
     return t?.status === 'running' || t?.status === 'queued'
+  }
+
+  /**
+   * B4：等用户对一次 AI 写入表态。**60 秒不理默认拒**。
+   *
+   * 为什么必须有超时：这个 Promise 挂在 `canUseTool` 上，不 resolve 那一轮对话就永远卡着，
+   * 而用户可能压根没看见弹窗（切到别的应用了 / 关了窗口）。默认拒是唯一安全的取向——
+   * 超时放行等于"不看就同意"，那这道确认就白做了。
+   *
+   * 窗口不在（无头冒烟）时直接拒：没有人能点，等 60 秒毫无意义。
+   */
+  private writeWaiters = new Map<string, (d: { allow: boolean; reason?: string }) => void>()
+
+  private askWrite(
+    sessionId: string,
+    info: { rel: string; tool: string; summary: string }
+  ): Promise<{ allow: boolean; reason?: string }> {
+    if (!this.win) return Promise.resolve({ allow: false, reason: 'no-window' })
+    const id = `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+    return new Promise((resolve) => {
+      const done = (d: { allow: boolean; reason?: string }): void => {
+        if (!this.writeWaiters.has(id)) return
+        this.writeWaiters.delete(id)
+        clearTimeout(timer)
+        resolve(d)
+      }
+      const timer = setTimeout(() => done({ allow: false, reason: 'timeout' }), WRITE_CONFIRM_TIMEOUT_MS)
+      this.writeWaiters.set(id, done)
+      this.win?.webContents.send('agent:confirm-write', { id, sessionId, ...info })
+    })
+  }
+
+  /** 渲染层点了允许/拒绝之后回到这里 */
+  resolveWriteConfirm(id: string, allow: boolean): void {
+    this.writeWaiters.get(id)?.({ allow, reason: allow ? undefined : 'denied' })
   }
 
   /**
@@ -295,7 +355,15 @@ export class AgentManager {
      * 重发那一轮照样带得上。
      */
     const staged = await stageAttachments(sessionId, attachments)
-    const promptWithFiles = prompt + attachmentNote(staged)
+    /**
+     * 带不上的附件**必须报给用户**（B7）：格式不支持 / 文件损坏 / 超过 20MB。
+     * 静默丢附件是最糟的形态——用户以为模型看过那份文件，模型其实没见过，
+     * 之后的一切结论都建立在一个错误前提上（同 A-4「转换失败要说出来」那条教训）。
+     */
+    for (const f of staged.failed) {
+      this.emit({ sessionId, kind: 'notice', text: `《${f.name}》没能带上：${f.reason}` })
+    }
+    const promptWithFiles = prompt + attachmentNote(staged.paths, staged.names)
     await this.runTurn({
       sessionId,
       taskId,
@@ -558,13 +626,47 @@ export class AgentManager {
             ],
           },
           canUseTool: async (toolName: string, input: Record<string, unknown>) => {
-            // Write 只放行 90_产物；其余未预授权工具一律拒绝
+            /**
+             * 写知识库：**从"一律拒"改成"确认后放行"**（2026-08-19，B4）。
+             *
+             * 老规则是只放行 `90_产物/`，于是用户让 AI 改自己的笔记，AI 只能回
+             * 「环境限制文件写入」——对客户来说这就是产品残疾。防乱改是对的，
+             * 但正确实现是**可以改、要点头、能撤销**，判定逻辑在 `write-guard.ts`。
+             */
             if (toolName === 'Write' || toolName === 'Edit') {
-              const p = String(input.file_path ?? '')
-              if (p.startsWith(artifactsDir) || p.startsWith('90_产物')) {
+              const verdict = judgeWrite(String(input.file_path ?? ''), vaultManager.currentRoot, artifactsDir)
+              if (verdict.kind === 'allow-artifact') {
                 return { behavior: 'allow' as const, updatedInput: input }
               }
-              return { behavior: 'deny' as const, message: '只允许写入 90_产物/ 目录' }
+              if (verdict.kind === 'deny') {
+                return { behavior: 'deny' as const, message: verdict.reason }
+              }
+              // ask：问用户。**60 秒不理默认拒**——一轮对话不能无限期挂在一个弹窗上
+              const root = vaultManager.currentRoot!
+              const decision = await this.askWrite(sessionId, {
+                rel: verdict.rel,
+                tool: toolName,
+                summary: summarizeWrite(toolName, input),
+              })
+              if (!decision.allow) {
+                return {
+                  behavior: 'deny' as const,
+                  message:
+                    decision.reason === 'timeout'
+                      ? '用户没有在 60 秒内确认这次修改，已取消。可以把改动内容直接说给用户，让他自己改'
+                      : '用户拒绝了这次修改。别再试同一个文件，可以把建议的改法说出来让他自己决定',
+                }
+              }
+              // 放行前先备份原文，撤销出口挂在 toast 上
+              const backupId = await backupBeforeWrite(root, verdict.rel)
+              this.emit({
+                sessionId,
+                kind: 'notice',
+                text: `AI 修改了《${verdict.rel}》`,
+                writeUndoId: backupId,
+                writeRel: verdict.rel,
+              })
+              return { behavior: 'allow' as const, updatedInput: input }
             }
             // **拒绝要指路**：只说"未开放"的话模型会一直换姿势重试同一件事——
             // 实测它被挡在 Grep 外面后改用 Bash 调 grep，连撞 9 次、烧掉 174 秒

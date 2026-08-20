@@ -1,6 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import { WriteConfirm } from './components/WriteConfirm'
 import { UiHost } from './components/ui'
 import './styles/index.css'
 
@@ -20,6 +21,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
     {/* UiHost 挂在 App 外面：它以前在主界面布局里，于是首跑的登录门/建库引导那几屏
         根本没有 toast 宿主，`ui.toast` 静默空转——建库失败连报错都弹不出来（H-12 走查抓到） */}
+    {/* AI 写知识库的确认卡（B4）：与 UiHost 一样挂在 App 外面——
+        它可能在登录门/建库引导那几屏之外的任何时刻弹出来 */}
+    <WriteConfirm />
     <UiHost />
   </React.StrictMode>
 )

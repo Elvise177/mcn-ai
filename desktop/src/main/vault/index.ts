@@ -1,4 +1,4 @@
-import { promises as fs } from 'fs'
+import { promises as fs, existsSync } from 'fs'
 import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
@@ -210,6 +210,12 @@ export class VaultManager {
     return rel
   }
 
+  /** 在访达里定位库内的文件或目录（右键菜单用，B5） */
+  reveal(relPath: string): void {
+    if (!this.root) return
+    shell.showItemInFolder(join(this.root, relPath))
+  }
+
   /** 新建笔记，返回相对路径；重名自动加序号 */
   async createNote(dir: string, name: string): Promise<string> {
     if (!this.root) throw new Error('vault 未打开')
@@ -222,6 +228,29 @@ export class VaultManager {
     const abs = join(this.root, rel)
     await fs.mkdir(dirname(abs), { recursive: true })
     await fs.writeFile(abs, `---\ntags: []\n---\n\n# ${safe}\n\n`, 'utf-8')
+    return rel
+  }
+
+  /**
+   * 新建文件夹（2026-08-19 客户提出：AI 建不了、界面也建不了，只能去访达）。
+   *
+   * **为什么以前没有**：AI 侧 `Write`/`Edit` 只放行 `90_产物/`（安全边界，不改），
+   * 而界面上只有 `createNote`，且笔记名里的 `/` 会被过滤掉——于是整个产品里
+   * **没有任何一条路能建目录**，客户只能去访达/Obsidian 里建。
+   *
+   * 空目录不会出现在文件树里（树是按笔记聚出来的），所以顺手在里面放一篇同名笔记，
+   * 用户建完立刻看得见、也立刻能写东西——否则点完"成功"却什么都没出现，比不给这个功能更糟。
+   */
+  async createFolder(parentDir: string, name: string): Promise<string> {
+    if (!this.root) throw new Error('vault 未打开')
+    const safe = name.replace(/[\\/:*?"<>|]/g, '').trim()
+    if (!safe) throw new Error('文件夹名不能为空')
+    let rel = join(parentDir, safe)
+    let n = 1
+    while (existsSync(join(this.root, rel))) rel = join(parentDir, `${safe} ${++n}`)
+    await fs.mkdir(join(this.root, rel), { recursive: true })
+    // 放一篇占位笔记：空目录在文件树里是看不见的（树按笔记聚），建完得让用户看得见
+    await this.createNote(rel, safe)
     return rel
   }
 

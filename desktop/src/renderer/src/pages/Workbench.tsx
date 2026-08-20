@@ -6,7 +6,7 @@ import { ui } from '../components/ui'
 import { CHIPS } from '../config/chips'
 import { greetingLine } from '../lib/profile'
 import { errText } from '../lib/err'
-import { enqueueMessage } from '../lib/enqueue'
+import { enqueueMessage, pathOfDropped } from '../lib/enqueue'
 import { useDragOver } from '../hooks/useDragOver'
 import { useTask } from '../hooks/useTasks'
 import { TierSelector } from '../components/TierSelector'
@@ -232,10 +232,17 @@ export default function Workbench({
     e.preventDefault()
     e.stopPropagation()
     drag.reset()
-    const paths = [...(e.dataTransfer?.files ?? [])]
-      .map((f) => (f as File & { path?: string }).path)
-      .filter((p): p is string => !!p)
-    if (!paths.length) return
+    // 取路径走 preload 的 files.pathFor（webUtils）——`File.path` 在 Electron 32 被移除，
+    // 直接读它恒为 undefined，升级后所有拖放会**静默**失效（见 preload/index.ts 的注释）
+    const dropped = [...(e.dataTransfer?.files ?? [])]
+    const paths = dropped.map(pathOfDropped).filter((p) => !!p)
+    if (!paths.length) {
+      // 拿不到路径必须说话，不许静默——否则这类故障在界面上等于"什么都没发生"
+      if (dropped.length) {
+        ui.toast(`拖入失败：读不到这 ${dropped.length} 个文件的路径。临时办法：在访达里把文件放进知识库目录下的 00_投递箱 文件夹，会自动入库。请把这条报给我们`, 'error')
+      }
+      return
+    }
     try {
       // 原来报的是 `paths.length`（拖进来几个**条目**），拖一个文件夹就说「1 个文件」，
       // 而里面可能是 200 个。现在报 enqueue 真正收下的数（A-1）
@@ -333,8 +340,13 @@ export default function Workbench({
                                   className="h-16 w-16 rounded-lg border border-line object-cover"
                                 />
                               ) : (
-                                // 重启后 thumb 没了（内存态），留个文件名占位比空着强
-                                <span key={k} className="rounded-lg border border-line px-2 py-1 text-sm text-muted">
+                                // 文档附件没有缩略图（B7）；重启后图片的 thumb 也没了（内存态）。
+                                // 两种都走这条：图标 + 文件名，比空着或只有一行字强
+                                <span
+                                  key={k}
+                                  className="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2 py-1 text-sm text-muted"
+                                >
+                                  <FileIcon name={a.name} size={13} />
                                   {a.name}
                                 </span>
                               )
@@ -552,12 +564,23 @@ function InputBox({
         <div data-testid="attach-strip" className="flex flex-wrap gap-2 px-3 pt-3">
           {attachments.map((a) => (
             <div key={a.path} className="group relative">
-              <img
-                src={a.thumb}
-                alt={a.name}
-                title={a.name}
-                className="h-14 w-14 rounded-lg border border-line object-cover"
-              />
+              {/* B7：文档没有缩略图，用类型图标 + 文件名占位（不是所有附件都是图片了） */}
+              {a.thumb ? (
+                <img
+                  src={a.thumb}
+                  alt={a.name}
+                  title={a.name}
+                  className="h-14 w-14 rounded-lg border border-line object-cover"
+                />
+              ) : (
+                <div
+                  title={`${a.name}（仅本次对话参考，不入库）`}
+                  className="flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-lg border border-line bg-surface px-1"
+                >
+                  <FileIcon name={a.name} size={18} />
+                  <span className="w-full truncate text-center text-[10px] leading-tight text-muted">{a.name}</span>
+                </div>
+              )}
               <button
                 data-testid="attach-remove"
                 onClick={() => onAttach(attachments.filter((x) => x.path !== a.path))}
@@ -579,12 +602,26 @@ function InputBox({
           onClick={async () => {
             const picked = await window.api.chat.pickAttachments()
             if (!picked.length) return
+            /**
+             * B7：超过 20MB 的文档不走"临时参考"这条路——转换慢，上下文也塞不下。
+             * **就地告诉用户正确的那条路**（拖进窗口入库），别只说"不行"。
+             */
+            const big = picked.filter((x) => x.tooBig)
+            if (big.length) {
+              ui.toast(
+                `${big.map((x) => `《${x.name}》`).join('、')} 超过 20MB，没有作为本轮参考带上。` +
+                  `要长期保存并随时查询，请把它拖进窗口自动入库`,
+                'warn'
+              )
+            }
+            const picked2 = picked.filter((x) => !x.tooBig)
+            if (!picked2.length) return
             // 按路径去重，重复挑同一张不该堆两遍
             const merged = [...attachments]
-            for (const p of picked) if (!merged.some((x) => x.path === p.path)) merged.push(p)
+            for (const p of picked2) if (!merged.some((x) => x.path === p.path)) merged.push(p)
             onAttach(merged.slice(0, 8))
           }}
-          title="添加图片附件"
+          title="添加图片或文档（仅本次对话参考，不入库；要长期保存请拖进窗口）"
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted hover:bg-hover hover:text-ink"
         >
           <Paperclip size={16} />

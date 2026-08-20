@@ -15,6 +15,8 @@ import { artifactsWatcher } from './agent/artifacts'
 import { tasks } from './tasks/registry'
 import { registerAssetScheme, registerAssetProtocol } from './vault/assets'
 import { initUpdater } from './updater'
+import { pruneBackups } from './agent/write-backup'
+import { clearAttachments, clearAttachmentsSync } from './agent/attachments'
 
 // 库内图片协议：**注册 scheme 必须在 app ready 之前**（Electron 硬性要求），
 // handler 在 ready 之后挂。没有它，笔记里抽出来的嵌图在渲染进程里是死链（见 vault/assets.ts）
@@ -64,6 +66,14 @@ function createWindow(): void {
     void probeCloud() // 云端可达性：探测有超时，Supabase 被暂停时不会把启动拖住
     startSyncRetry() // 上次退出时没同步上去的聊天记录，开机补一轮（退避 1m/5m/30m→转手动）
     initUpdater(win) // 自动更新：内部自带 20 秒延迟，不与上面几件事抢冷启动那一段
+    void pruneBackups() // AI 写入备份保留 30 天，启动时清一次（B4）
+    /**
+     * 上次运行留下的对话附件，开机清掉（B7 发现：`clearAttachments` 导出了却**从没人调**，
+     * 于是临时目录一直在累积）。B7 之后躺在里面的不再是缩略图，是**用户的真实文档**——
+     * 转出来的 md 里就是文件全文。放着不管等于把客户的资料摊在临时目录里。
+     * 退出时也清一次（见 before-quit），两头堵：崩溃退出时开机这次兜底。
+     */
+    void clearAttachments()
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -153,6 +163,7 @@ app.on('before-quit', (e) => {
   void vaultManager.close()
   void inboxOrchestrator.stop()
   void artifactsWatcher.stop()
+  clearAttachmentsSync() // 对话附件是"仅本轮参考"，不该留在临时目录过夜。**必须同步**：异步版在进程退出前跑不完（B7 走查实测）
 
   if (quitting || !inboxOrchestrator.hasChild()) return
   quitting = true

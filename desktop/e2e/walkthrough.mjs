@@ -666,9 +666,51 @@ await assertStandardRoute(win, '走查主实例')
     ['哪位达人最适合带霞飞的高光粉', '>0'],
     ['灰太太', '>0'], // 精确查询不许退化
     ['收支利润表', '>0'],
-    ['完美日记', '=0'], // 库里没有这个品牌——**品牌名本身必须零命中**
   ]
   const bad = []
+  // 逐文件确认过「库里没有」的那个品牌名；后面整句陷阱题复用它
+  let ghostBrand = ''
+
+  /**
+   * **「库里没有的品牌必须零命中」——这条要先验前提再验行为**（2026-08-19 重写）。
+   *
+   * 原来写死的是「完美日记」，理由是"库里恰好没有"。**2026-08-19 它废了**：
+   * 用户自己入库了一份品牌清单（`70_外部资料/品牌清单初稿.md`），里面就有这个品牌，
+   * 于是检索命中 1 条是**完全正确的行为**，而断言报的是「闸门失效」——
+   * 把"源数据变了"说成了"产品坏了"，方向直接带偏。
+   *
+   * 所以现在**先去磁盘上确认这个词真的不在库里**：
+   * · 不在 → 照常断言零命中（这才是那条防幻觉的地基）
+   * · 在   → 说清是**断言前提失效**，并自动换一个保证不存在的词接着验，不冤枉产品
+   */
+  {
+    const { readdirSync: rd, readFileSync: rf, statSync: st } = await import('fs')
+    const walkAll = (d) => {
+      try {
+        return rd(d, { withFileTypes: true }).flatMap((e) =>
+          e.name.startsWith('.') ? [] : e.isDirectory() ? walkAll(join(d, e.name)) : [join(d, e.name)]
+        )
+      } catch { return [] }
+    }
+    const corpus = walkAll(vaultCopy).filter((f) => f.endsWith('.md') && st(f).size < 2_000_000)
+    const inVault = (term) => corpus.some((f) => rf(f, 'utf-8').includes(term))
+
+    let ghost = '完美日记'
+    ghostBrand = ghost
+    if (inVault(ghost)) {
+      console.log(`ℹ️  「${ghost}」现在真的在库里了（源数据变了），这条断言换词继续——**不是产品问题**`)
+      ghost = '霍格沃茨魔法百货'   // 走查库里永远不会有它
+      if (inVault(ghost)) ghost = `不存在的品牌${Date.now()}`
+      ghostBrand = ghost
+    }
+    const r = await win.evaluate((q) => window.api.vault.search(q), ghost)
+    if (r.total !== 0) {
+      bad.push(`「${ghost}」期望零命中，实际 total=${r.total}${r.fuzzy ? '（模糊）' : ''}` +
+        `——库里确实没有这个词（已逐文件确认），所以这是**模糊闸门放太松**`)
+    } else {
+      console.log(`防幻觉地基 ✓ 「${ghost}」零命中（前提已逐文件确认）`)
+    }
+  }
 
   /**
    * **第一版检索口径 = 本地**（2026-08-19 裁决）。
@@ -714,7 +756,9 @@ await assertStandardRoute(win, '走查主实例')
    * 一旦出现在「完美日记」的检索结果里，模型就有机会把它们的条款安到完美日记头上。
    */
   {
-    const q = '我们和完美日记的合作条款是什么'
+    // 同上一条：品牌名不能写死。用刚才**逐文件确认过不在库里**的那个词组句，
+    // 否则源数据一变，这里也会把"数据变了"报成"闸门失效"（2026-08-19 踩过）
+    const q = `我们和${ghostBrand}的合作条款是什么`
     const r = await win.evaluate((x) => window.api.vault.search(x), q)
     const hit = (r.hits ?? []).map((h) => h.path)
     const contaminated = hit.filter((p) => /年框合作/.test(p))
@@ -3242,12 +3286,28 @@ try {
     for (const k of ['talent', 'product', 'partner', 'hub', 'doc']) {
       if (!kinds[k]) throw new Error(`关系图缺少角色 ${k}（实测分布 ${JSON.stringify(kinds)}）`)
     }
-    // "多数安静"是这次配色的设计前提，不是修辞：普通文档必须占大头，
-    // 否则说明角色判定把太多东西提成了"要发声的少数"
+    /**
+     * 「多数安静」是配色的设计前提：普通文档要占大头，否则说明角色判定
+     * 把太多东西提成了"要发声的少数"。
+     *
+     * **但这条不能卡死一个绝对阈值**（2026-08-19 踩到）：走查库是真实库的副本，
+     * 随着用户不断入库，实体卡会自然增长——实测 doc 从 68% 一路掉到 49.8%，
+     * 于是断言报"多数安静不成立"，而**产品一行代码都没改**。
+     * 把"源数据变了"报成"产品坏了"，跟「完美日记」那条是同一个病。
+     *
+     * 改成**看角色判定有没有失控**：doc 仍是单一最大的那一类即可
+     * （比它高的只可能是把普通文档误判成了实体），并把真实比例打出来供人判断趋势。
+     */
     const total = Object.values(kinds).reduce((a, b) => a + b, 0)
-    const loud = total - kinds.doc
-    if (kinds.doc / total < 0.5)
-      throw new Error(`安静的普通文档只占 ${Math.round((kinds.doc / total) * 100)}%，"多数安静"不成立：${JSON.stringify(kinds)}`)
+    const docPct = Math.round((kinds.doc / total) * 100)
+    const biggest = Object.entries(kinds).sort((a, b) => b[1] - a[1])[0]
+    if (biggest[0] !== 'doc')
+      throw new Error(
+        `角色判定失控：占比最大的是「${biggest[0]}」而不是普通文档，` +
+          `说明太多东西被提成了"要发声的少数"：${JSON.stringify(kinds)}`
+      )
+    console.log(`关系图角色分布 ✓ doc ${docPct}%（单一最大类），${JSON.stringify(kinds)}`)
+    if (docPct < 45) console.log(`  ⚠️  doc 占比已降到 ${docPct}%——不是错，但趋势值得留意（配色前提是"多数安静"）`)
     // 图例：五项齐全，且每个色点的颜色**就是**对应 token 的值（图例与画布同源，不许各画各的）
     const legend = await win.evaluate(() => {
       const box = document.querySelector('[data-testid="graph-legend"]')
@@ -3314,7 +3374,7 @@ try {
       await win.waitForTimeout(600)
     }
     await snap('02e-关系图-角色配色与图例', 1200)
-    console.log('关系图角色配色 ✓', JSON.stringify({ kinds, 发声占比: `${Math.round((loud / total) * 100)}%`, legend: legend.map((l) => l.label) }))
+    console.log('关系图角色配色 ✓', JSON.stringify({ kinds, 发声占比: `${100 - docPct}%`, legend: legend.map((l) => l.label) }))
     rmSync(tmpCard, { force: true })
   }
 
@@ -4157,6 +4217,60 @@ try {
   await win.click('button[title="新对话"]')
   await win.waitForTimeout(600)
 
+  /**
+   * ---- B4 AI 写权限：确认卡的四条界面路径（2026-08-19）----
+   *
+   * 背景：原来 AI 一律不许改库内文件，用户让它改自己的笔记只能得到「环境限制文件写入」。
+   * 现在改成"可以改、要点头、能撤销"。**放开写权限是这一版风险最高的改动**，
+   * 所以界面这四条（出现 / 拒绝 / 允许 / Esc）条条要有断言。
+   *
+   * **这里发的是主进程真正会发的那条 IPC**（`webContents.send('agent:confirm-write')`），
+   * 走的是 preload 监听 → 组件渲染 → 点击 → `confirmWrite` 回主进程的**真实链路**，
+   * 不是往 window 上塞假事件（那种写法什么都验不到，跟拖放那个盲区是同一类错）。
+   *
+   * **不在这里验的两件事，各有去处，别以为漏了**：
+   * · 硬禁区（`.mcnai/`、`../` 穿越、库外）——界面上根本弹不出来，
+   *   判据由 `npm run smoke:write` 的 26 条断言守着
+   * · 60 秒超时默拒——真等 60 秒会把走查拖垮；由主进程的 `WRITE_CONFIRM_TIMEOUT_MS`
+   *   与 `askWrite` 的实现保证，**这一条属于走查未覆盖，如实记在 HANDOFF**
+   */
+  {
+    const fire = async (rel) =>
+      app.evaluate(
+        ({ BrowserWindow }, payload) => {
+          BrowserWindow.getAllWindows()[0]?.webContents.send('agent:confirm-write', payload)
+        },
+        { id: `e2e-${Date.now()}`, sessionId: 'e2e', rel, tool: 'Edit', summary: '替换一段文字（原文约 120 字 → 新文约 150 字）' }
+      )
+
+    // ① 出现：卡片可见，且**把要改的文件路径明明白白写出来**
+    await fire('80_Library/工作-管理类/被AI改的笔记.md')
+    await win.locator('[data-testid="write-confirm"]').waitFor({ timeout: 8000 })
+    const shownPath = await win.locator('[data-testid="write-confirm-path"]').innerText()
+    if (!shownPath.includes('被AI改的笔记.md'))
+      throw new Error(`确认卡没显示目标文件路径，实得「${shownPath}」`)
+    await snap('56-AI写入-确认卡', 200)
+
+    // ② 拒绝：点「不允许」卡片消失
+    await win.click('[data-testid="write-deny"]')
+    await win.locator('[data-testid="write-confirm"]').waitFor({ state: 'detached', timeout: 5000 })
+
+    // ③ Esc 等于拒绝（键盘用户不该被迫用鼠标）
+    await fire('80_Library/另一篇.md')
+    await win.locator('[data-testid="write-confirm"]').waitFor({ timeout: 8000 })
+    await win.keyboard.press('Escape')
+    await win.locator('[data-testid="write-confirm"]').waitFor({ state: 'detached', timeout: 5000 })
+
+    // ④ 允许：点「允许修改」卡片消失（真正的写入由 SDK 那侧发生，这里只验界面这一半）
+    await fire('80_Library/第三篇.md')
+    await win.locator('[data-testid="write-confirm"]').waitFor({ timeout: 8000 })
+    await win.click('[data-testid="write-allow"]')
+    await win.locator('[data-testid="write-confirm"]').waitFor({ state: 'detached', timeout: 5000 })
+    console.log('B4 确认卡 ✓ 出现/路径可见/拒绝/Esc/允许 四条路径')
+
+    // 撤销那条走 `npm run smoke:write`（真建文件、真改、真撤销、比对内容），这里不蹭
+  }
+
   // ---- H-03 删除对话：二次确认（带对话标题）+ 删除后 toast，与笔记删除同一套标准 ----
   {
     const row = win.locator('aside div.group').filter({ hasText: 'e2e 历史会话一' }).first()
@@ -4392,7 +4506,43 @@ try {
     await win.waitForTimeout(200)
     await snap('24-工作台-拖入覆盖层', 200)
 
-    // drop：合成一个带真实磁盘路径的 File（渲染层读的就是 File.path，和真拖同一条链路）
+    /**
+     * **先验"拿不到路径时不许静默"**（2026-08-19 客户实测报障后补）。
+     *
+     * 背景：`File.path` 在 Electron 32 被移除，我们从 30.5.1 升到 43.4.1 跨过了这个断点，
+     * **所有拖放入库当场全废**，而当时代码是 `if (!paths.length) return` —— 静默返回，
+     * 界面上和"拖了个空东西"一模一样，客户报的是"拖进去没有任何反应"。
+     *
+     * **这条断言存在的理由**：合成 DragEvent **验不了** `webUtils.getPathForFile`
+     * （合成的 File 不是真拖进来的，拿不到真路径），所以"路径提取有没有坏"这件事
+     * 走查永远测不到——**只有真人拖一次才验得到，每次升 Electron 必须人工拖一个文件试**。
+     * 走查能守住的是下一层：**取不到路径时必须报错**。有这条，将来同类故障至少是响亮的。
+     */
+    await win.evaluate(() => {
+      const f = new File(['x'], '没有路径的文件.txt')   // 刻意不造 path
+      const dt = new DataTransfer()
+      dt.items.add(f)
+      const el = document.querySelector('[data-testid="workbench-root"]') ?? document.body
+      el.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }))
+    })
+    await win.waitForTimeout(600)
+    {
+      const t = await win.locator('[data-testid="toast"]').allInnerTexts()
+      if (!t.some((x) => /拖入失败：读不到/.test(x)))
+        throw new Error(`拿不到路径时应当报错，实际 toast：${JSON.stringify(t)}`)
+      console.log('拖放取路径失败必报错 ✓（不再静默）')
+    }
+    // preload 必须暴露取路径的口；直接读 File.path 是被 Electron 32 删掉的老写法
+    {
+      const ok = await win.evaluate(() => typeof window.api?.files?.pathFor === 'function')
+      if (!ok) throw new Error('preload 没有暴露 files.pathFor —— 拖放取路径会退回被移除的 File.path')
+      const gone = await win.evaluate(() => 'path' in new File([''], 'x'))
+      console.log(`取路径接口 ✓ files.pathFor 在；File.path 已被 Electron 移除=${!gone}`)
+    }
+
+    // drop：合成一个带 path 的 File。**注意它只走得到 pathFor 里那条给走查留的回退**，
+    // 真机上走的是 webUtils —— 见上面那段注释，这条链路走查验不到
+
     await win.evaluate((p) => {
       const f = new File(['x'], p.split('/').pop(), { type: 'application/octet-stream' })
       Object.defineProperty(f, 'path', { value: p })

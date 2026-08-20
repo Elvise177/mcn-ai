@@ -6,7 +6,7 @@ import { X, CheckCircle2, XCircle, AlertTriangle, Loader2 } from 'lucide-react'
  * 用法：ui.confirm({...}) / ui.prompt({...}) / ui.toast(msg)；App 根部挂一次 <UiHost />
  */
 
-type ConfirmOpts = { title: string; message?: string; danger?: boolean; okText?: string }
+type ConfirmOpts = { title: string; message?: string; danger?: boolean; okText?: string; cancelText?: string }
 type PromptOpts = { title: string; placeholder?: string; initial?: string; okText?: string }
 /** 多选一（>2 个出口）：编辑冲突的「覆盖 / 另存为副本 / 取消」就是它（设计 §5.2） */
 type ChooseOption = { value: string; label: string; danger?: boolean; primary?: boolean }
@@ -245,7 +245,7 @@ export function UiHost() {
                   onClick={() => close(dismissed())}
                   className="rounded-full border border-line px-4 py-1.5 text-base transition-colors hover:bg-hover"
                 >
-                  取消
+                  {(modal.kind === 'confirm' && modal.opts.cancelText) || '取消'}
                 </button>
                 <button
                   onClick={() => close(modal.kind === 'confirm' ? true : text.trim() || null)}

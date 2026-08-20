@@ -80,6 +80,16 @@ export class InboxOrchestrator {
   private killTimer: ReturnType<typeof setTimeout> | null = null
   /** 本轮是被谁停的。非 null 时终态是 canceled 而不是 failed */
   private canceledBy: 'user' | 'quit' | null = null
+  /**
+   * 上一轮是被用户停掉的、而且没跑完 → 「立即处理」必须放行，哪怕投递箱是空的。
+   *
+   * **这是 2026-08-19 我自己引入的回归**：为了修「空投递箱点立即处理会默默跑全库」，
+   * 我加了一道"投递箱空就拒绝"的闸门，结果把**取消后接着做**这条路一起堵死了——
+   * 而取消提示写的正是「点『立即处理』可接着做」。
+   * 客户实测：停在 PII守卫（2/8）后点立即处理，报"没有文件要处理"。
+   * 真相是文件在更早的「转换」阶段就已经进 `.done/` 了，剩下没跑完的是**对全库跑的阶段**。
+   */
+  private canceledIncomplete = false
 
   attachWindow(win: BrowserWindow): void {
     this.win = win
@@ -99,6 +109,13 @@ export class InboxOrchestrator {
   }
 
   /** 进度分母在主进程算，渲染层不再自己拼（同一句话要在全局条和面板里一致） */
+  /**
+   * 打标的篇级进度（B3c）。**没有它，界面在这一步会十几分钟一动不动**——
+   * 客户实测：投 14 个文件，面板停在「PII守卫 2/8」十分钟没变，
+   * 而后台其实一直在稳步打标，只是没人报进度，看着就是死机。
+   */
+  private tagProgress: { done: number; total: number } | null = null
+
   private computeProgress(): { done: number; total: number; label: string } {
     let done = 0
     let label = ''
@@ -108,6 +125,10 @@ export class InboxOrchestrator {
       if (i < 0) continue
       done = Math.max(done, i + 1)
       label = INBOX_FLOW[i][1]
+    }
+    // 停在打标这一阶段时，把阶段名换成带篇数的——用户要看见它在动
+    if (this.tagProgress && label === '智能打标') {
+      label = `智能打标 · 第 ${this.tagProgress.done + 1}/${this.tagProgress.total} 篇`
     }
     return { done, total: INBOX_FLOW.length, label: label || '准备中' }
   }
@@ -168,6 +189,7 @@ export class InboxOrchestrator {
     if (ev.type === 'run-end') {
       const canceled = this.canceledBy
       const progress = this.computeProgress()
+
       tasks.patch(id, {
         stages: [...this.stages],
         progress,
@@ -182,6 +204,25 @@ export class InboxOrchestrator {
             ? '投递箱处理完成'
             : '投递箱处理失败',
       } as Partial<InboxTask>)
+      // 被用户停掉 = 还有活没干完，「立即处理」得能接着做（见 canceledIncomplete 的注释）。
+      // 跑到自然结束（不论成败）就把这个标记清掉——那时投递箱空就是真的没事可做了
+      this.canceledIncomplete = canceled === 'user'
+      /**
+       * 「未处理的文件仍在投递箱里」这句话**不一定成立**——文件在「转换」阶段就已经进了
+       * `.done/`，停在后面那些**对全库跑的**阶段时投递箱其实是空的（客户 2026-08-19 实测：
+       * 停在 PII守卫 后点立即处理，被告知"没有文件要处理"，而提示语刚说过"仍在投递箱里"）。
+       * 说错话比不说更糟，所以数一遍再决定怎么说。`toTask` 是同步的，这里异步补后半句。
+       */
+      if (canceled) {
+        const base = `已停止（本轮处理到 ${progress.done}/${progress.total}，已完成的部分已保留）`
+        void this.pendingCount()
+          .then((n) => {
+            tasks.patch(id, {
+              title: base + (n > 0 ? `；还有 ${n} 个文件没处理` : '；剩余的整理步骤没跑完'),
+            } as Partial<InboxTask>)
+          })
+          .catch(() => {})
+      }
       // 用户主动停的是 canceled 不是 failed——主动操作不该看起来像出错（设计 §5.1）
       tasks.finish(id, canceled ? 'canceled' : ev.ok ? 'succeeded' : 'failed')
       // 「进行中」永不落盘，落的只有这一条终态结果（重启后面板仍能看到上次结果）
@@ -281,6 +322,148 @@ export class InboxOrchestrator {
     await this.watcher?.close()
     this.watcher = null
     if (this.debounce) clearTimeout(this.debounce)
+  }
+
+  /**
+   * 投递箱里还有几个待处理的文件（`.done`/`.failed` 与隐藏文件不算）。
+   *
+   * 「立即处理」以前不看这个数直接把 pipeline 拉起来，而 pipeline 的后半段
+   * （实体建卡 / MOC 重建 / 主题索引）是**对全库跑的**——于是空投递箱点一下
+   * 就是"把整个库重过一遍"：白等几分钟、可能烧打标额度，界面上还只显示一条进度条，
+   * 用户完全看不出其实没有新东西。客户 2026-08-19 实测提的就是这个。
+   */
+  async pendingCount(): Promise<number> {
+    if (!this.inboxDir) return 0
+    let n = 0
+    const walk = async (d: string, depth: number): Promise<void> => {
+      if (depth > MAX_DEPTH) return
+      let entries: import('fs').Dirent[]
+      try {
+        entries = await fs.readdir(d, { withFileTypes: true })
+      } catch {
+        return // 目录还没建 / 读不了：当作没有待处理
+      }
+      for (const e of entries) {
+        if (e.name.startsWith('.')) continue // .done / .failed / .DS_Store 都在这儿被排除
+        if (e.isDirectory()) await walk(join(d, e.name), depth + 1)
+        else n++
+      }
+    }
+    await walk(this.inboxDir, 0)
+    return n
+  }
+
+  /**
+   * 还有多少篇笔记的标签是旧版本生成的（B3b）。零 LLM、零写盘，几十毫秒。
+   *
+   * 拆出来的理由：以前"全库补齐"是搭在**随便哪次入库**上的——用户投 1 个文件，
+   * 后台却在补打标上百篇旧笔记，十分钟不动（客户实测原话：「入库1个文件都要这么久」）。
+   * 现在常规入库只打本批（`03_tag_llm --files`），补齐由用户显式发起。
+   */
+  async staleTagCount(): Promise<number> {
+    if (!this.vaultRoot) return 0
+    return new Promise((resolve) => {
+      const child = spawn(pipelineBin(), ['--vault', this.vaultRoot!, '--count-stale', '--skip-llm'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      let buf = ''
+      child.stdout.on('data', (d: Buffer) => (buf += d.toString()))
+      child.on('close', () => {
+        for (const line of buf.split('\n')) {
+          if (!line.trim().startsWith('{')) continue
+          try {
+            const ev = JSON.parse(line)
+            if (ev.stage === 'tag_stale') return resolve(Number(ev.stale) || 0)
+          } catch {
+            /* 不是我们要的那行 */
+          }
+        }
+        resolve(0)
+      })
+      child.on('error', () => resolve(0))
+    })
+  }
+
+  /**
+   * 全库补齐（B3b）：把还没达到当前 schema 的笔记补打一遍。
+   * **用户显式发起**，作为一条独立任务跑，不挡入库、可取消（复用同一套 kill 进程组）。
+   */
+  async runTagBackfill(): Promise<void> {
+    if (!this.vaultRoot || this.running) return
+    const llmKey = getLlmKey()
+    if (!llmKey) return
+    this.running = true
+    this.tagProgress = null
+    const id = this.taskId
+    tasks.start({
+      id,
+      kind: 'inbox',
+      key: this.vaultRoot,
+      status: 'running',
+      title: '正在升级旧笔记的标签',
+      cancelable: true,
+      files: [],
+      stages: [],
+      progress: { done: 0, total: 1, label: '准备中' },
+    })
+    await new Promise<void>((resolve) => {
+      const child = spawn(
+        pipelineBin(),
+        [
+          '--vault', this.vaultRoot!, '--tag-backfill', '--max-cost', '10',
+          '--llm-key', llmKey, '--llm-base-url', store.get('llmBaseUrl'), '--llm-model', store.get('llmModel'),
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'], detached: true }
+      )
+      this.child = child
+      tasks.patch(id, { pid: child.pid, cancelable: true } as Partial<InboxTask>)
+      let buf = ''
+      child.stdout.on('data', (d: Buffer) => {
+        buf += d.toString()
+        let i: number
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i).trim()
+          buf = buf.slice(i + 1)
+          if (!line.startsWith('{')) continue
+          try {
+            const ev = JSON.parse(line)
+            if (ev.status === 'progress' && ev.stage === 'tag_llm') {
+              const done = Number(ev.done) || 0
+              const total = Number(ev.total) || 1
+              tasks.patch(id, {
+                progress: { done, total, label: `已升级 ${done}/${total} 篇` },
+              } as Partial<InboxTask>)
+            }
+          } catch {
+            /* 忽略非 JSON 行 */
+          }
+        }
+      })
+      child.on('close', () => {
+        this.child = null
+        const canceled = this.canceledBy === 'user'
+        tasks.patch(id, {
+          pid: undefined,
+          cancelable: false,
+          title: canceled ? '标签升级已停止（已完成的部分保留，可再次开始）' : '旧笔记标签升级完成',
+        } as Partial<InboxTask>)
+        tasks.finish(id, canceled ? 'canceled' : 'succeeded')
+        this.running = false
+        this.canceledBy = null
+        resolve()
+      })
+      child.on('error', () => {
+        this.child = null
+        tasks.finish(id, 'failed')
+        this.running = false
+        resolve()
+      })
+    })
+  }
+
+  /** 上一轮是不是被用户停掉且没跑完（「立即处理」据此放行，见 canceledIncomplete） */
+  hasUnfinishedWork(): boolean {
+    return this.canceledIncomplete
   }
 
   /** 退出前的清理入口：有没有还活着的 pipeline */
@@ -605,6 +788,7 @@ export class InboxOrchestrator {
     }
     this.running = true
     this.canceledBy = null
+    this.tagProgress = null // 每轮重新计数
     const runStart = Date.now()
     this.send({ type: 'run-start' })
 
@@ -636,6 +820,17 @@ export class InboxOrchestrator {
           if (!line.startsWith('{')) continue
           try {
             const ev = JSON.parse(line)
+            /**
+             * 打标的**篇级进度**（B3c）：`03_tag_llm` 每处理一篇打一行
+             * `{stage:'tag_llm', status:'progress', done, total, file}`。
+             * 它不是阶段迁移，所以**不进 stages**（进了会把 8 个阶段的进度算歪），
+             * 只更新 `tagProgress` 让阶段标签带上篇数，然后就地 patch 一次任务。
+             */
+            if (ev.status === 'progress' && ev.stage === 'tag_llm') {
+              this.tagProgress = { done: Number(ev.done) || 0, total: Number(ev.total) || 0 }
+              tasks.patch(this.taskId, { progress: this.computeProgress() } as Partial<InboxTask>)
+              continue
+            }
             if (ev.stage === 'done') lastStatus = ev.status
             this.send({
               type: 'stage',

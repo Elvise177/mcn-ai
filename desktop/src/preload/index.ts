@@ -1,4 +1,30 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+
+/**
+ * 从拖放进来的 `File` 取真实磁盘路径。
+ *
+ * **`File.path` 在 Electron 32 被移除了**（我们 2026-08-19 从 30.5.1 升到 43.4.1，
+ * 正好跨过这个断点）。官方替代是 `webUtils.getPathForFile()`，而 `webUtils`
+ * **只能在 preload 里调**——渲染进程是 sandbox + contextIsolation，拿不到 electron 模块。
+ *
+ * 这个洞的代价：升级后**所有拖放入库全部失效**（工作台拖入 / 知识库拖入 / 分区投递），
+ * 而且当时的代码 `if (!paths.length) return` 是**静默返回** → 用户看到的是"拖进去没反应"。
+ * 客户实测报的就是它。
+ *
+ * **`f.path` 那条回退只为走查存在**：合成的 `DragEvent` 里那个 `File` 不是真拖进来的，
+ * `getPathForFile` 对它返回空串，而走查靠 `Object.defineProperty(f,'path',…)` 造路径。
+ * **真机上这条回退永远取不到值**（属性根本不存在），所以它不会掩盖真实故障。
+ * 真正的护栏是调用方那句"拿不到路径就弹错"——见 VaultPage/Workbench 的 onDrop。
+ */
+function pathForFile(file: File): string {
+  try {
+    const p = webUtils.getPathForFile(file)
+    if (p) return p
+  } catch {
+    /* 合成事件里 getPathForFile 会抛，落到下面的回退 */
+  }
+  return (file as File & { path?: string }).path ?? ''
+}
 
 const api = {
   settings: {
@@ -44,8 +70,10 @@ const api = {
       ipcRenderer.invoke('vault:writeChecked', relPath, raw, baseHash),
     saveCopy: (relPath: string, raw: string) => ipcRenderer.invoke('vault:saveCopy', relPath, raw),
     createNote: (dir: string, name: string) => ipcRenderer.invoke('vault:createNote', dir, name),
+    createFolder: (dir: string, name: string) => ipcRenderer.invoke('vault:createFolder', dir, name),
     deleteNote: (relPath: string) => ipcRenderer.invoke('vault:deleteNote', relPath),
     renameNote: (relPath: string, newName: string) => ipcRenderer.invoke('vault:renameNote', relPath, newName),
+    reveal: (relPath: string) => ipcRenderer.invoke('vault:reveal', relPath),
     openFile: (href: string, fromNote: string) => ipcRenderer.invoke('vault:openFile', href, fromNote),
     onChanged: (cb: (payload: { path: string; self?: boolean }) => void) => {
       const listener = (_e: unknown, payload: { path: string; self?: boolean }): void => cb(payload)
@@ -60,6 +88,11 @@ const api = {
 const inbox = {
   enqueue: (paths: string[], subdir?: string) => ipcRenderer.invoke('inbox:enqueue', paths, subdir),
   runNow: () => ipcRenderer.invoke('inbox:runNow'),
+  pending: () => ipcRenderer.invoke('inbox:pending'),
+  /** B3b：还有多少篇笔记的标签是旧版本生成的（零 LLM、零写盘） */
+  staleTags: () => ipcRenderer.invoke('inbox:staleTags'),
+  /** B3b：显式发起一次全库标签升级（独立任务，可停止） */
+  tagBackfill: () => ipcRenderer.invoke('inbox:tagBackfill'),
   cancel: () => ipcRenderer.invoke('inbox:cancel'),
 }
 const auth = {
@@ -85,6 +118,14 @@ const chat = {
   list: () => ipcRenderer.invoke('chat:list'),
   save: (conv: unknown) => ipcRenderer.invoke('chat:save', conv),
   delete: (id: string) => ipcRenderer.invoke('chat:delete', id),
+  /** B4：AI 要改知识库时主进程发来的确认请求（60 秒不答默认拒） */
+  onConfirmWrite: (cb: (r: unknown) => void) => {
+    const listener = (_e: unknown, r: unknown): void => cb(r)
+    ipcRenderer.on('agent:confirm-write', listener)
+    return () => ipcRenderer.removeListener('agent:confirm-write', listener)
+  },
+  confirmWrite: (id: string, allow: boolean) => ipcRenderer.invoke('agent:confirmWrite', id, allow),
+  undoWrite: (id: string) => ipcRenderer.invoke('agent:undoWrite', id),
   onStream: (cb: (payload: unknown) => void) => {
     const listener = (_e: unknown, payload: unknown): void => cb(payload)
     ipcRenderer.on('agent:stream', listener)
@@ -141,7 +182,11 @@ const routes = {
 const dingtalk = {
   test: () => ipcRenderer.invoke('dingtalk:test'),
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes, update, tasks: tasksApi }
+const files = {
+  /** 拖放来的 File → 磁盘路径。取不到返回空串，调用方**必须**把空串报给用户，不许静默 */
+  pathFor: (file: File) => pathForFile(file),
+}
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes, update, files, tasks: tasksApi }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi

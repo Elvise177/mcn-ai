@@ -1,6 +1,6 @@
 {
   "name": "mcn-ai-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "mcn-ai 桌面版：MCN 公司与达人的 AI 工作操作系统",
   "main": "./out/main/index.js",
   "private": true,
@@ -13,7 +13,11 @@
     "smoke:provider": "electron-vite build && electron out/main/smoke-provider.js",
     "smoke:resume": "electron-vite build && ELECTRON_RUN_AS_NODE=1 electron out/main/smoke-resume.js",
     "smoke:steps": "electron-vite build && ELECTRON_RUN_AS_NODE=1 electron out/main/smoke-steps.js",
-    "smoke:cards": "electron-vite build && ELECTRON_RUN_AS_NODE=1 electron out/main/smoke-cards.js"
+    "smoke:cards": "electron-vite build && ELECTRON_RUN_AS_NODE=1 electron out/main/smoke-cards.js",
+    "smoke:write": "electron-vite build && ELECTRON_RUN_AS_NODE=1 electron out/main/smoke-write-guard.js",
+    "smoke:ipc": "node scripts/smoke-ipc-contract.mjs",
+    "smoke:pipeline": "node scripts/smoke-pipeline.mjs",
+    "verify": "node scripts/verify-all.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.211",

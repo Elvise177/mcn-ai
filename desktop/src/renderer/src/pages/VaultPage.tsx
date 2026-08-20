@@ -12,7 +12,7 @@ import { pendingNote, inboxPanel } from '../lib/bus'
 import { GRAPH_KIND_TOKEN, GRAPH_LEGEND, token, tokenPx } from '../theme'
 import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
 import { errText } from '../lib/err'
-import { enqueueMessage } from '../lib/enqueue'
+import { enqueueMessage, pathOfDropped } from '../lib/enqueue'
 import { useTask } from '../hooks/useTasks'
 import { useDragOver } from '../hooks/useDragOver'
 
@@ -188,6 +188,15 @@ function useInbox(onDone?: (files: string[]) => void, onEnd?: (ok: boolean) => v
 }
 
 /** 阶段进度（done/total/label）由主进程算好放在 task.progress 里，这里只负责画 */
+/**
+ * 库变更 → 重建视图的防抖窗口（2026-08-19）。
+ * 图谱那 3 秒是照投递箱的 3 秒去抖窗口取的，两边节奏对齐；文件树便宜，1 秒够。
+ */
+const GRAPH_REFRESH_DEBOUNCE_MS = 3000
+const TREE_REFRESH_DEBOUNCE_MS = 1000
+/** 少于这个数就不打扰用户——几篇的补齐在下次入库时顺手就完了，不值得弹窗 */
+const STALE_TAG_PROMPT_MIN = 20
+
 function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boolean; onClose: () => void }) {
   const dot = (s?: string): string =>
     s === 'ok' ? 'bg-ok' : s === 'error' ? 'bg-danger' : s === 'warn' ? 'bg-warning' : 'bg-line'
@@ -251,14 +260,24 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
               onClick={async () => {
                 setStopping(true)
                 await window.api.inbox.cancel()
-                ui.toast('已停止本轮投递，已完成的部分保留，未处理的文件仍在投递箱里')
+                ui.toast('已停止本轮投递，已完成的部分保留。点「立即处理」可接着做')
               }}
               className="text-muted hover:text-accent disabled:opacity-60"
             >
               {stopping ? '停止中…' : '停止本轮'}
             </button>
           ) : (
-            <button onClick={() => window.api.inbox.runNow()} className="text-muted hover:text-accent">
+            <button
+              data-testid="inbox-run-now"
+              onClick={async () => {
+                // 空投递箱不再默默跑全库（客户 2026-08-19 提：「明明没有文件又在处理什么」）
+                const r = await window.api.inbox.runNow()
+                if (r && r.started === false) {
+                  ui.toast('投递箱里没有待处理的文件。把文件拖进窗口，或在访达里放进库目录下的 00_投递箱 文件夹', 'info')
+                }
+              }}
+              className="text-muted hover:text-accent"
+            >
               立即处理
             </button>
           )}
@@ -271,7 +290,9 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
           风险远大于收益（设计 §5.1） */}
       {canceled && (
         <div data-testid="inbox-canceled" className="border-b border-line px-4 py-2 text-sm text-muted">
-          {task?.title ?? '已停止'}；未处理的文件仍在投递箱里，点「立即处理」可接着做。
+          {/* 后半句由主进程按投递箱实际剩余文件数拼进 title —— 这里再写死一句会跟它打架
+              （客户 2026-08-19 实测：提示说"仍在投递箱里"，点立即处理却说"没有文件"） */}
+          {task?.title ?? '已停止'}，点「立即处理」可接着做。
         </div>
       )}
       {/* 阶段进度条：过去只有一串日志行，看不出"还剩几步"，跑长任务时体感像卡死 */}
@@ -482,14 +503,27 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
       pendingNote.path = null
     }
     refreshTree()
+    /**
+     * 树刷新也要防抖（同图谱那条的原因，只是它便宜些）：批量入库时几十次变更
+     * 会让文件树连着重建几十遍，肉眼看到的是整棵树在闪。
+     * **正在编辑的那篇笔记的重读不防抖**——那是用户在等的东西，慢一秒都不该。
+     */
+    let timer: ReturnType<typeof setTimeout> | null = null
     const off = window.api.vault.onChanged(({ path }) => {
-      refreshTree()
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        refreshTree()
+      }, TREE_REFRESH_DEBOUNCE_MS)
       setCurrent((cur) => {
         if (cur === path) readNote(path, true)
         return cur
       })
     })
-    return off
+    return () => {
+      if (timer) clearTimeout(timer)
+      off()
+    }
   }, [refreshTree, readNote])
 
   // 编辑态的「有未保存改动」提到这一层：NoteView 是 key={current} 挂载的，
@@ -568,6 +602,135 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     openNote(rel)
   }
 
+  /**
+   * 新建文件夹（2026-08-19 客户提出）。落点跟「新建笔记」同一套：
+   * 当前打开的笔记在哪个目录就建在哪儿，没开笔记就建在库根。
+   * 主进程会顺手在新目录里放一篇同名笔记——**空目录在文件树里看不见**（树按笔记聚），
+   * 不放的话用户点完"成功"却什么都没出现。
+   */
+  /**
+   * 右键菜单（B5）。**菜单项两套**：右键目录能新建，右键笔记只能改这一篇。
+   * 落点由"你右键的是谁"决定——这正是工具栏那个按钮做不到的事。
+   */
+  const [ctxMenu, setCtxMenu] = useState<{
+    at: { x: number; y: number }
+    items: Array<{ label: string; danger?: boolean; onClick: () => void }>
+  } | null>(null)
+
+  const onTreeContext = useCallback(
+    (e: React.MouseEvent, path: string, isDir: boolean) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const at = { x: e.clientX, y: e.clientY }
+      const items: Array<{ label: string; danger?: boolean; onClick: () => void }> = isDir
+        ? [
+            { label: '在这里新建笔记', onClick: () => void createNoteIn(path) },
+            { label: '在这里新建文件夹', onClick: () => void createFolderIn(path) },
+            { label: '在访达中显示', onClick: () => void window.api.vault.reveal(path) },
+          ]
+        : [
+            { label: '打开', onClick: () => openNote(path) },
+            { label: '重命名…', onClick: () => void renameAt(path) },
+            { label: '在访达中显示', onClick: () => void window.api.vault.reveal(path) },
+            { label: '删除', danger: true, onClick: () => void deleteAt(path) },
+          ]
+      setCtxMenu({ at, items })
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [openNote]
+  )
+
+  /** 在指定目录下新建笔记/文件夹——落点明确，不再"猜当前目录" */
+  const createNoteIn = async (dir: string): Promise<void> => {
+    const name = await ui.prompt({ title: `在「${dir || '库根'}」下新建笔记`, placeholder: '笔记名称' })
+    if (!name) return
+    try {
+      openNote(await window.api.vault.createNote(dir, name))
+    } catch (e) {
+      ui.toast(`新建笔记失败：${errText(e)}`, 'error')
+    }
+  }
+  const createFolderIn = async (dir: string): Promise<void> => {
+    const name = await ui.prompt({ title: `在「${dir || '库根'}」下新建文件夹`, placeholder: '文件夹名称' })
+    if (!name) return
+    try {
+      const rel = await window.api.vault.createFolder(dir, name)
+      ui.toast(`已创建：${rel}`, 'ok')
+    } catch (e) {
+      ui.toast(`新建文件夹失败：${errText(e)}`, 'error')
+    }
+  }
+  const renameAt = async (rel: string): Promise<void> => {
+    const cur = (rel.split('/').pop() ?? '').replace(/\.md$/, '')
+    const name = await ui.prompt({ title: '重命名', placeholder: '新名称', initial: cur })
+    if (!name || name === cur) return
+    try {
+      const next = await window.api.vault.renameNote(rel, name)
+      ui.toast('已重命名', 'ok')
+      openNote(next)
+    } catch (e) {
+      ui.toast(`重命名失败：${errText(e)}`, 'error')
+    }
+  }
+  const deleteAt = async (rel: string): Promise<void> => {
+    const okd = await ui.confirm({
+      title: '确认删除这篇笔记？',
+      message: `${rel}\n\n将移入系统废纸篓，可随时找回。`,
+      danger: true,
+    })
+    if (!okd) return
+    try {
+      await window.api.vault.deleteNote(rel)
+      ui.toast('已删除，可在废纸篓找回', 'ok')
+    } catch (e) {
+      ui.toast(`删除失败：${errText(e)}`, 'error')
+    }
+  }
+
+  /**
+   * 旧标签升级的提示（B3b，2026-08-19）。
+   *
+   * **文案刻意软化**：说的是"升级后检索更准"，不是"你的库有问题"。
+   * 这些笔记本来就是好的，只是标签是旧版打标器产出的、少了实体字段——
+   * 让用户觉得自己的库"坏了"是最糟的表达。
+   *
+   * 只在**有库、且待升级数量值得打扰**时提示；用户选"以后再说"就本次运行不再问。
+   */
+  const [staleAsked, setStaleAsked] = useState(false)
+  useEffect(() => {
+    if (!vault.path || staleAsked || inboxRunning) return
+    let alive = true
+    void window.api.inbox.staleTags().then(async (n) => {
+      if (!alive || n < STALE_TAG_PROMPT_MIN) return
+      setStaleAsked(true)
+      const mins = Math.max(1, Math.round((n * 4) / 60)) // 实测每篇约 4 秒
+      const go = await ui.confirm({
+        title: '知识库可以升级一下',
+        message:
+          `有 ${n} 篇笔记的标签是旧版本生成的，升级后检索更准（约 ${mins} 分钟），随时可暂停。\n\n` +
+          '升级期间可以照常使用，不影响新文件入库。',
+        okText: '现在升级',
+        cancelText: '以后再说',
+      })
+      if (go) void window.api.inbox.tagBackfill()
+    })
+    return () => {
+      alive = false
+    }
+  }, [vault.path, staleAsked, inboxRunning])
+
+  const createFolder = async (): Promise<void> => {
+    const name = await ui.prompt({ title: '新建文件夹', placeholder: '文件夹名称' })
+    if (!name) return
+    const dir = current ? current.split('/').slice(0, -1).join('/') : ''
+    try {
+      const rel = await window.api.vault.createFolder(dir, name)
+      ui.toast(`已创建：${rel}`, 'ok')
+    } catch (e) {
+      ui.toast(`新建文件夹失败：${errText(e)}`, 'error')
+    }
+  }
+
   const deleteNote = async (): Promise<void> => {
     if (!current) return
     // 二次确认里带上文件名与所在目录，避免删错文件
@@ -625,17 +788,31 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
 
   // dataTransfer 可能是 null（合成事件、或某些平台的异常 drop）——
   // 直接展开会抛 TypeError 冒到 window.onerror，用户看不到但日志里全是它
+  /**
+   * **取路径必须走 preload 的 `files.pathFor`**（内部是 `webUtils.getPathForFile`）。
+   * `File.path` 在 Electron 32 被移除，直接读它恒为 undefined —— 2026-08-19 升到 43
+   * 之后所有拖放入库当场全废，而且是**静默**全废，客户报的就是"拖进去没反应"。
+   */
   const dropPaths = (e: React.DragEvent): string[] =>
-    [...(e.dataTransfer?.files ?? [])]
-      .map((f) => (f as File & { path?: string }).path)
-      .filter((p): p is string => !!p)
+    [...(e.dataTransfer?.files ?? [])].map(pathOfDropped).filter((p) => !!p)
 
   const doEnqueue = async (e: React.DragEvent, subdir?: string): Promise<void> => {
     e.preventDefault()
     e.stopPropagation()
     drag.reset()
+    const dropped = [...(e.dataTransfer?.files ?? [])]
     const paths = dropPaths(e)
-    if (!paths.length) return
+    /**
+     * **拿不到路径必须说话**。原来这里是 `if (!paths.length) return` —— 静默返回，
+     * 于是"取路径的 API 被 Electron 删了"这种要命的故障，在界面上和"用户拖了个空东西"
+     * 长得一模一样：什么都不发生。真出问题时没人查得到。
+     */
+    if (!paths.length) {
+      if (dropped.length) {
+        ui.toast(`拖入失败：读不到这 ${dropped.length} 个文件的路径。临时办法：在访达里把文件放进知识库目录下的 00_投递箱 文件夹，会自动入库。请把这条报给我们`, 'error')
+      }
+      return
+    }
     setShowInbox(true)
     // A-1：这条路径以前拿到结果就扔了，整包拖进来一个文件都没收也是这个样子
     try {
@@ -688,6 +865,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
           于是跑批期间点 ✕ 关不掉（`inboxRunning` 立刻把它顶回来），
           「关闭」按钮成了摆设。开跑自动展开由上面那个 effect 负责，
           关掉之后想再看，走 Dock 唤回 */}
+      {ctxMenu && <TreeContextMenu at={ctxMenu.at} items={ctxMenu.items} onClose={() => setCtxMenu(null)} />}
       {showInbox && (
         <InboxPanel task={inboxTask} running={inboxRunning} onClose={() => setShowInbox(false)} />
       )}
@@ -716,11 +894,15 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
                       : 'hover:text-accent'
                 }
               >
+                {/* 加图标：原来三个灰色小字挤在一起，客户反馈"根本找不到投递箱在哪" */}
+                <Inbox size={12} className="inline -mt-0.5 mr-0.5" />
                 投递箱{inboxRunning ? '·忙' : ''}
               </button>
               <button onClick={createNote} title="新建笔记" className="hover:text-accent">
                 新建
               </button>
+              {/* 「新建文件夹」按钮已撤（B5）：工具栏按钮说不清"建在哪一级"，
+                  改由**右键文件树上的目录**出菜单——你右键谁就建在谁下面 */}
               {!showGraph && !vaultEmpty && (
                 <button onClick={() => setGraphVisible(true)} title="打开关系图" className="hover:text-accent">
                   图谱
@@ -734,7 +916,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         </div>
         <div className="flex-1 overflow-auto p-2">
           {!query.trim() ? (
-            <Tree nodes={tree} current={current} onOpen={openNote} depth={0} expanded={expanded} onToggle={toggleDir} />
+            <Tree nodes={tree} current={current} onOpen={openNote} depth={0} expanded={expanded} onToggle={toggleDir} onContext={onTreeContext} />
           ) : searching || !result ? (
             <div data-testid="search-loading" className="flex items-center gap-2 px-2 py-3 text-sm text-muted">
               <Loader2 size={13} className="animate-spin" /> 检索中…
@@ -839,6 +1021,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
             currentRef={currentRef}
             onOpen={openNote}
             onClose={() => setGraphVisible(false)}
+            ingesting={inboxRunning}
           />
         </>
       ) : (
@@ -898,6 +1081,84 @@ function NoteError({
   )
 }
 
+/**
+ * 文件树右键菜单（B5，2026-08-19）。
+ *
+ * **为什么要有它**：之前"新建文件夹"是工具栏上一个按钮，用户根本不知道它会建在哪一级
+ * （真人验收原话：「我怎么知道我的文件夹建在哪一级？不应该跟成熟的软件一样么？」）。
+ * Finder / VS Code / Obsidian 都是**右键目标对象**出菜单——所见即所得，
+ * 你右键的是谁就作用在谁身上。工具栏那个按钮已撤掉，避免两套语义不一致的入口。
+ *
+ * 三个容易漏的细节，都做了：
+ * ① **点外面关**（mousedown 捕获，不是 click——click 会被菜单项自己吃掉）
+ * ② **Esc 关**
+ * ③ **贴边翻转**：菜单在窗口右/下边缘时往回翻，否则会被裁掉一半
+ */
+function TreeContextMenu({
+  at,
+  items,
+  onClose,
+}: {
+  at: { x: number; y: number }
+  items: Array<{ label: string; danger?: boolean; onClick: () => void }>
+  onClose: () => void
+}) {
+  const boxRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState(at)
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent): void => {
+      if (!boxRef.current?.contains(e.target as Node)) onClose()
+    }
+    const onEsc = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onEsc)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onEsc)
+    }
+  }, [onClose])
+
+  // 贴边翻转：量出真实尺寸再决定落点（菜单项数量不固定，写死高度会翻错）
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    setPos({
+      x: at.x + r.width > window.innerWidth - 8 ? Math.max(8, at.x - r.width) : at.x,
+      y: at.y + r.height > window.innerHeight - 8 ? Math.max(8, at.y - r.height) : at.y,
+    })
+  }, [at])
+
+  return (
+    <div
+      ref={boxRef}
+      data-testid="tree-context-menu"
+      role="menu"
+      style={{ left: pos.x, top: pos.y }}
+      className="fixed z-[70] min-w-[168px] overflow-hidden rounded-lg border border-line bg-card py-1 shadow-lg"
+    >
+      {items.map((it) => (
+        <button
+          key={it.label}
+          role="menuitem"
+          onClick={() => {
+            onClose()
+            it.onClick()
+          }}
+          className={`block w-full px-3 py-1.5 text-left text-sm hover:bg-hover ${
+            it.danger ? 'text-danger' : 'text-ink'
+          }`}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function Tree({
   nodes,
   current,
@@ -905,6 +1166,7 @@ function Tree({
   depth,
   expanded,
   onToggle,
+  onContext,
 }: {
   nodes: VaultTreeNode[]
   current: string | null
@@ -912,6 +1174,8 @@ function Tree({
   depth: number
   expanded: Set<string>
   onToggle: (p: string) => void
+  /** 右键：dir=true 表示右键的是目录（菜单项两套不一样） */
+  onContext: (e: React.MouseEvent, path: string, dir: boolean) => void
 }) {
   return (
     <>
@@ -920,19 +1184,21 @@ function Tree({
           <div key={n.path}>
             <button
               onClick={() => onToggle(n.path)}
+              onContextMenu={(e) => onContext(e, n.path, true)}
               className="w-full rounded px-2 py-1 text-left text-base text-ink-soft hover:bg-hover"
               style={{ paddingLeft: 8 + depth * 14 }}
             >
               {expanded.has(n.path) ? '▾' : '▸'} {n.name}
             </button>
             {expanded.has(n.path) && (
-              <Tree nodes={n.children} current={current} onOpen={onOpen} depth={depth + 1} expanded={expanded} onToggle={onToggle} />
+              <Tree nodes={n.children} current={current} onOpen={onOpen} depth={depth + 1} expanded={expanded} onToggle={onToggle} onContext={onContext} />
             )}
           </div>
         ) : (
           <button
             key={n.path}
             onClick={() => onOpen(n.path)}
+            onContextMenu={(e) => onContext(e, n.path, false)}
             className={`block w-full truncate rounded px-2 py-1 text-left text-base ${
               current === n.path ? 'bg-accent-soft text-accent' : 'text-ink-soft hover:bg-hover'
             }`}
@@ -1326,12 +1592,15 @@ const GraphPanel = memo(function GraphPanel({
   currentRef,
   onOpen,
   onClose,
+  ingesting,
 }: {
   expanded: boolean
   width: number
   currentRef: MutableRefObject<string | null>
   onOpen: (p: string) => void
   onClose: () => void
+  /** 投递箱正在跑：这期间**完全不刷图**（每次变更都重载会让力导向永远收敛不了） */
+  ingesting: boolean
 }) {
   const [data, setData] = useState<GraphData>({ nodes: [], links: [] })
   const boxRef = useRef<HTMLDivElement>(null)
@@ -1359,10 +1628,33 @@ const GraphPanel = memo(function GraphPanel({
       dataRef.current = d
       setData(d)
     }
+    /**
+     * **防抖 + 入库期间不刷**（客户 2026-08-19 实测：一次投 14 个文件，关系图十分钟一直在动）。
+     *
+     * 原来是每收到一次 `vault:changed` 就重取整图并 `load()`，而 `load()` 会让力导向模拟
+     * 从头跑一遍。批量入库时几十次变更连着来 → 图**永远收敛不了**，节点一直在飘，
+     * 既看不清也点不中。
+     *
+     * 两道闸：① 变更停下来 3 秒才重取；② 投递箱在跑时**完全不刷**，跑完再刷一次。
+     * 3 秒是照着投递箱那条既有的 3 秒去抖窗口取的（见 orchestrator），两边节奏对齐。
+     */
     window.api.vault.graph().then(load)
-    const off = window.api.vault.onChanged(() => window.api.vault.graph().then(load))
-    return off
-  }, [])
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const schedule = (): void => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        void window.api.vault.graph().then(load)
+      }, GRAPH_REFRESH_DEBOUNCE_MS)
+    }
+    // 入库期间不接变更；`ingesting` 翻回 false 时这个 effect 重跑，顺带补刷一次
+    const off = ingesting ? () => {} : window.api.vault.onChanged(schedule)
+    if (!ingesting) schedule()
+    return () => {
+      if (timer) clearTimeout(timer)
+      off()
+    }
+  }, [ingesting])
 
   useEffect(() => {
     const el = boxRef.current

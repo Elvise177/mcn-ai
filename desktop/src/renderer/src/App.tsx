@@ -147,7 +147,21 @@ export default function App() {
       } else if (p.kind === 'notice' && p.text) {
         // 中性提示（如"旧上下文已过期、已开新会话"）。**不进对话历史**——
         // 它是这一次的运行状况，不是 AI 说的话，塞进气泡会被下次重建上下文时喂回给模型
-        ui.toast(p.text)
+        if (p.writeUndoId) {
+          // B4：AI 改了知识库里的文件 → toast 上挂「撤销」，原文写回（新建的则移入废纸篓）
+          const undoId = p.writeUndoId
+          const rel = p.writeRel ?? ''
+          ui.toast(p.text, 'ok', {
+            label: '撤销',
+            onClick: () => {
+              void window.api.chat.undoWrite(undoId).then((r) => {
+                ui.toast(r.ok ? `已撤销对《${rel}》的修改` : `撤销失败：${r.error ?? '未知原因'}`, r.ok ? 'ok' : 'error')
+              })
+            },
+          })
+        } else {
+          ui.toast(p.text)
+        }
       }
     })
     return () => {

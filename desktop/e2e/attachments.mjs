@@ -11,8 +11,9 @@
  * 该验的东西一个不少。
  */
 import { _electron as electron } from 'playwright-core'
-import { rmSync, mkdirSync, existsSync, readdirSync, copyFileSync, readFileSync } from 'fs'
+import { rmSync, mkdirSync, existsSync, readdirSync, copyFileSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { execFileSync } from 'child_process'
 import { tmpdir } from 'os'
 
 const root = '/Users/tansenpeng/Documents/AI/mcn-ai/desktop'
@@ -112,6 +113,80 @@ check('附件已拷进临时目录（不依赖用户原文件还在）', staged.
 check('拷贝内容与原图一致', staged.length > 0 && readFileSync(staged[0]).length === readFileSync(PIC[1]).length,
   JSON.stringify({ staged: staged[0] }))
 
+/**
+ * ---- B7 文档附件：仅本轮参考、不入库（2026-08-19）----
+ *
+ * 三条都要**真验**，不许打印一行信息就算过（这一段第一版就是那么写的，被推翻重做）：
+ *   ① 全链：选文档 → 发送 → 临时目录里出现**转换后的 .md**，内容是文档正文
+ *   ② 失败要说话：损坏的 docx 必须给出人话原因
+ *   ③ 清理：退出后临时目录不留东西
+ */
+{
+  const DOC = join(root, 'e2e/sample.docx')
+
+  // ① 全链：桩掉选择框喂 docx → 点附件 → **真发送一条消息**
+  await app.evaluate(({ dialog }, files) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: files })
+  }, [DOC])
+  await win.click('[data-testid="attach-btn"]')
+  await win.locator('[data-testid="attach-strip"]').waitFor({ timeout: 8000 })
+  const stripText = await win.locator('[data-testid="attach-strip"]').innerText().catch(() => '')
+  check('文档附件出现在附件条上（显示文件名）', /sample/.test(stripText), JSON.stringify(stripText))
+
+  await win.fill('textarea', '这份文档讲了什么')
+  await win.keyboard.press('Enter')
+  // 转换要起子进程，给足时间；不等 AI 回答（本地模式没 key，回不回都不影响这条断言）
+  await win.waitForTimeout(12000)
+
+  const attachRoot2 = join(tmpdir(), 'mcnai-attach')
+  const walk = (x) => {
+    try {
+      return readdirSync(x, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? walk(join(x, e.name)) : [join(x, e.name)]
+      )
+    } catch { return [] }
+  }
+  const files = existsSync(attachRoot2) ? walk(attachRoot2) : []
+  const mds = files.filter((f) => f.endsWith('.md'))
+  check('文档被转成了 markdown（临时目录里有 .md）', mds.length >= 1, JSON.stringify(files.map((f) => f.replace(attachRoot2, ''))))
+  if (mds.length) {
+    const text = readFileSync(mds[0], 'utf-8')
+    check('转换出来的 md 有正文内容（不是空壳）', text.trim().length > 20, JSON.stringify(text.slice(0, 80)))
+  }
+
+  // ② 失败要说话：直接调冻结产物，验它给的是人话不是堆栈
+  const BROKEN = join(tmpdir(), 'mcnai-b7-broken.docx')
+  writeFileSync(BROKEN, '这不是一个真的 docx')
+  // 转换失败时进程**应当**返回非 0（execFileSync 会抛），所以从异常里取 stdout——
+  // 退出码不为 0 本身就是断言的一部分：静默成功才是错的
+  let out = ''
+  let exitedNonZero = false
+  try {
+    out = execFileSync(join(root, 'resources/pipeline/mcn-ingest'),
+      ['convert-one', BROKEN, join(tmpdir(), 'mcnai-b7-out')], { encoding: 'utf-8' })
+  } catch (e) {
+    exitedNonZero = true
+    out = String(e.stdout ?? '')
+  }
+  check('损坏文档 → 转换进程返回非 0（不许假装成功）', exitedNonZero)
+  const lastLine = out.split('\n').filter((l) => l.startsWith('{')).pop() ?? ''
+  let ev = {}
+  try { ev = JSON.parse(lastLine) } catch { /* 下面的断言会报出来 */ }
+  check('损坏文档 → 报错而不是静默', ev.status === 'error', lastLine)
+  check('损坏文档 → 给的是人话原因', /损坏|无法解析|不支持/.test(String(ev.message ?? '')), String(ev.message))
+  rmSync(BROKEN, { force: true })
+  rmSync(join(tmpdir(), 'mcnai-b7-out'), { recursive: true, force: true })
+}
+
 await Promise.race([app.close(), new Promise((r) => setTimeout(r, 15000))])
-console.log(bad ? `\n❌ ${bad} 条不通过\n` : '\n✅ 附件直供全部通过\n')
+await new Promise((r) => setTimeout(r, 1500))
+
+// ③ 退出后临时目录必须清干净——里面是**用户的真实文档**，不该留在磁盘上过夜
+{
+  const attachRoot3 = join(tmpdir(), 'mcnai-attach')
+  const left = existsSync(attachRoot3) ? readdirSync(attachRoot3) : []
+  check('退出后对话附件临时目录已清空', left.length === 0, JSON.stringify(left.slice(0, 5)))
+}
+
+console.log(bad ? `\n❌ ${bad} 条不通过\n` : '\n✅ 附件直供 + 文档附件全部通过\n')
 process.exit(bad ? 1 : 0)

@@ -17,6 +17,7 @@ export default defineConfig({
           'smoke-resume': resolve(__dirname, 'src/main/smoke-resume.ts'),
           'smoke-steps': resolve(__dirname, 'src/main/smoke-steps.ts'),
           'smoke-cards': resolve(__dirname, 'src/main/smoke-cards.ts'),
+          'smoke-write-guard': resolve(__dirname, 'src/main/smoke-write-guard.ts'),
         },
       },
     },

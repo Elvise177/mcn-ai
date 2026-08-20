@@ -28,6 +28,7 @@ import { startBizSync } from './knowledge/bizdata'
 import { getRoutes, setRoutes, ensureRouteFolders } from './lib/routes'
 import { tasks } from './tasks/registry'
 import { updateState, installUpdateNow } from './updater'
+import { undoWrite, pruneBackups } from './agent/write-backup'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
@@ -190,8 +191,10 @@ export function registerIpc(): void {
     vaultManager.saveConflictCopy(relPath, raw)
   )
   ipcMain.handle('vault:createNote', (_e, dir: string, name: string) => vaultManager.createNote(dir, name))
+  ipcMain.handle('vault:createFolder', (_e, dir: string, name: string) => vaultManager.createFolder(dir, name))
   ipcMain.handle('vault:deleteNote', (_e, relPath: string) => vaultManager.deleteNote(relPath))
   ipcMain.handle('vault:renameNote', (_e, relPath: string, newName: string) => vaultManager.renameNote(relPath, newName))
+  ipcMain.handle('vault:reveal', (_e, relPath: string) => vaultManager.reveal(relPath))
   ipcMain.handle('vault:openFile', (_e, href: string, fromNote: string) => vaultManager.openFile(href, fromNote))
 
   // ---- auth ----
@@ -260,6 +263,13 @@ export function registerIpc(): void {
 
   // ---- 自动更新 ----
   // state 是权威快照（`update:ready` 推送在窗口 reload 期间会丢，同任务层那条约定）
+  // ---- B4：AI 写知识库的确认与撤销 ----
+  ipcMain.handle('agent:confirmWrite', (_e, id: string, allow: boolean) => {
+    agentManager.resolveWriteConfirm(id, !!allow)
+    return { ok: true }
+  })
+  ipcMain.handle('agent:undoWrite', (_e, id: string) => undoWrite(id))
+
   ipcMain.handle('update:state', () => updateState())
   ipcMain.handle('update:install', () => installUpdateNow())
 
@@ -277,7 +287,25 @@ export function registerIpc(): void {
   })
 
   ipcMain.handle('inbox:enqueue', (_e, paths: string[], subdir?: string) => inboxOrchestrator.enqueue(paths, subdir))
-  ipcMain.handle('inbox:runNow', () => void inboxOrchestrator.run())
+  /**
+   * 「立即处理」。**空投递箱不许起 pipeline**——pipeline 的后半段是对全库跑的
+   * （实体建卡 / MOC 重建 / 主题索引），空着点一下等于把整个库重过一遍：
+   * 白等几分钟、可能烧打标额度，而界面上只有一条进度条，看不出其实没有新东西。
+   * 现在直接回一句话让渲染层 toast，不动 pipeline。
+   */
+  ipcMain.handle('inbox:runNow', async () => {
+    const pending = await inboxOrchestrator.pendingCount()
+    // 上一轮被停掉且没跑完时**必须放行**：那时投递箱可能已经空了（文件在更早的阶段就
+    // 进了 `.done/`），但对全库跑的那些阶段还没做完，而取消提示指的就是这条路
+    const resumable = inboxOrchestrator.hasUnfinishedWork()
+    if (pending === 0 && !resumable) return { started: false, pending: 0, resumable: false }
+    void inboxOrchestrator.run()
+    return { started: true, pending, resumable }
+  })
+  ipcMain.handle('inbox:pending', () => inboxOrchestrator.pendingCount())
+  // B3b：旧标签补齐——查有多少 / 显式发起。**入库不再顺带做这件事**
+  ipcMain.handle('inbox:staleTags', () => inboxOrchestrator.staleTagCount())
+  ipcMain.handle('inbox:tagBackfill', () => void inboxOrchestrator.runTagBackfill())
   // 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚（H-13，设计 §5.1）
   ipcMain.handle('inbox:cancel', () => inboxOrchestrator.cancel('user'))
 }
