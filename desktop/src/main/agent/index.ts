@@ -19,7 +19,7 @@ import type { AgentTask } from '../tasks/types'
 import { conversationMessages, type ChatMessage } from './conversations'
 import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
 import { judgeWrite } from './write-guard'
-import { backupBeforeWrite } from './write-backup'
+import { backupBeforeWrite, takeUndoNotice } from './write-backup'
 import {
   countToolResults,
   isStepWorthy,
@@ -363,7 +363,12 @@ export class AgentManager {
     for (const f of staged.failed) {
       this.emit({ sessionId, kind: 'notice', text: `《${f.name}》没能带上：${f.reason}` })
     }
-    const promptWithFiles = prompt + attachmentNote(staged.paths, staged.names)
+    /**
+     * 上一轮被用户撤销掉的改动，**这一轮要明确告诉模型**——否则它上下文里still
+     * 记着"我已经改好了"，用户再让它改就回「上一轮已全部替换完，无需再次操作」。
+     * 取走即清：说一次就够。
+     */
+    const promptWithFiles = prompt + takeUndoNotice(sessionId) + attachmentNote(staged.paths, staged.names)
     await this.runTurn({
       sessionId,
       taskId,
@@ -658,7 +663,7 @@ export class AgentManager {
                 }
               }
               // 放行前先备份原文，撤销出口挂在 toast 上
-              const backupId = await backupBeforeWrite(root, verdict.rel)
+              const backupId = await backupBeforeWrite(sessionId, root, verdict.rel)
               this.emit({
                 sessionId,
                 kind: 'notice',

@@ -75,10 +75,18 @@ if (!failed.length) {
   console.log(`❌ ${failed.length}/${results.length} 项未通过——**一次列全，不用一条条重跑**：\n`)
   for (const f of failed) {
     console.log(`─── [${f.level}] ${f.name} ${'─'.repeat(Math.max(0, 50 - f.name.length))}`)
-    // 只摘失败相关的行，别把几千行日志倒出来
+    /**
+     * 摘失败相关的行。**必须带上堆栈里的定位**（`at file:///…:行号`）——
+     * 第一版只摘 `❌/Error:` 那一行，结果拿到 `locator.click: Timeout 30000ms exceeded`
+     * 却不知道是哪一步的哪个选择器，还得单独重跑一次白等两分钟（2026-08-19 踩过）。
+     */
     const lines = f.out.split('\n')
-    const hits = lines.filter((l) => /❌|✗ |Error:|失败|throw/.test(l)).slice(0, 8)
-    console.log((hits.length ? hits : lines.slice(-8)).map((l) => '  ' + l.trim()).join('\n'))
+    const isHit = (l) => /❌|✗ |Error:|失败|throw|at file:|waiting for|Call log|locator/.test(l)
+    const idx = lines.findIndex((l) => /❌|Error:/.test(l))
+    // 从第一处失败往后取一段（错误上下文通常紧跟其后），再补上最后几行
+    const window = idx >= 0 ? lines.slice(idx, idx + 20).filter(isHit) : []
+    const hits = (window.length ? window : lines.filter(isHit)).slice(0, 14)
+    console.log((hits.length ? hits : lines.slice(-10)).map((l) => '  ' + l.trimEnd()).join('\n'))
     console.log()
   }
 }

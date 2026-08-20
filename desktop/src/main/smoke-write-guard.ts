@@ -14,7 +14,7 @@ const ART = join(ROOT, '90_产物')
 
 let bad = 0
 const ok = (m: string): void => console.log(`  ✓ ${m}`)
-const fail = (m: string, got: unknown): void => {
+const fail = (m: string, got: unknown = ''): void => {
   bad++
   console.log(`  ✗ ${m} —— 实得 ${JSON.stringify(got)}`)
 }
@@ -85,7 +85,7 @@ async function undoTests(): Promise<void> {
     const rel = '80_Library/原有笔记.md'
     const original = '# 原文\n\n这段话必须能原样回来。\n'
     await fs.writeFile(join(root, rel), original, 'utf-8')
-    const id = await backupBeforeWrite(root, rel)
+    const id = await backupBeforeWrite('smoke-session', root, rel)
     await fs.writeFile(join(root, rel), '被 AI 改掉了', 'utf-8')
     const r = await undoWrite(id)
     const now = await fs.readFile(join(root, rel), 'utf-8')
@@ -95,7 +95,7 @@ async function undoTests(): Promise<void> {
   // 7b 新建文件 → 撤销应把它删掉（本来就不存在，恢复 = 不该留下）
   {
     const rel = '80_Library/AI新建的.md'
-    const id = await backupBeforeWrite(root, rel) // 此刻文件还不存在
+    const id = await backupBeforeWrite('smoke-session', root, rel) // 此刻文件还不存在
     await fs.writeFile(join(root, rel), '新建内容', 'utf-8')
     const r = await undoWrite(id)
     const gone = !(await fs.stat(join(root, rel)).catch(() => null))
@@ -106,12 +106,32 @@ async function undoTests(): Promise<void> {
   {
     const rel = '80_Library/幂等.md'
     await fs.writeFile(join(root, rel), 'A', 'utf-8')
-    const id = await backupBeforeWrite(root, rel)
+    const id = await backupBeforeWrite('smoke-session', root, rel)
     await fs.writeFile(join(root, rel), 'B', 'utf-8')
     await undoWrite(id)
     await undoWrite(id)
     const now = await fs.readFile(join(root, rel), 'utf-8')
     now === 'A' ? ok('重复撤销幂等（内容仍是 A）') : fail('重复撤销把内容弄坏了', now)
+  }
+
+  // 7c2 **撤销之后要能告诉模型**（2026-08-19 真人实测逼出来的洞）：
+  //     撤销发生在主进程，而对话上下文里模型仍记着"我已经改好了"，
+  //     于是用户撤销后再让它改，它回「上一轮已全部替换完，无需再次操作」。
+  {
+    const { takeUndoNotice } = await import('./agent/write-backup')
+    const rel = '80_Library/要被撤销的.md'
+    await fs.writeFile(join(root, rel), '原文', 'utf-8')
+    const id = await backupBeforeWrite('sess-A', root, rel)
+    await fs.writeFile(join(root, rel), '改过的', 'utf-8')
+    await undoWrite(id)
+    const notice = takeUndoNotice('sess-A')
+    notice.includes(rel) && /撤销/.test(notice)
+      ? ok('撤销后能生成给模型的告知（含文件名）')
+      : fail('撤销后没有生成告知', JSON.stringify(notice))
+    takeUndoNotice('sess-A') === ''
+      ? ok('告知取走即清（不会每轮重复念叨）')
+      : fail('告知没有被清空，会重复污染上下文')
+    takeUndoNotice('sess-B') === '' ? ok('不串会话（B 会话拿不到 A 的告知）') : fail('告知串会话了')
   }
 
   // 7d 找不到的备份 id：报错而不是崩

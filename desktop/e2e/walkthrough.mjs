@@ -362,6 +362,25 @@ const rawShot = async (cdp, name) => {
   await w3.locator('text=拖入你的第一份资料试试').waitFor({ timeout: 8000 })
   const guideBtn = await w3.locator('button:has-text("打开投递箱")').count()
   if (!guideBtn) throw new Error('空库引导缺少「打开投递箱」入口')
+  /**
+   * 「新建靠右键」这句提示必须在（2026-08-19）。
+   * 工具栏那颗「新建」撤掉之后，新建**只剩右键一条路**——对熟悉 Finder 的人是常识，
+   * 但客户不一定是。不告诉他，他会以为这软件只能"拖进来"、自己写不了东西。
+   */
+  const newHint = await w3.locator('[data-testid="empty-hint-newnote"]').innerText().catch(() => '')
+  if (!/右键/.test(newHint)) throw new Error(`空库引导没告诉用户"新建要右键"，实得「${newHint}」`)
+  /**
+   * **空白处右键**在这里验才对：空库的树是真空的，随便点哪儿都是空白。
+   * 这也是那句提示指向的动作——提示说了"右键空白处"，就得保证那儿真能右键出菜单，
+   * 否则等于把用户骗进一条死路。
+   */
+  await w3.locator('[data-testid="tree-blank"]').click({ button: 'right', position: { x: 40, y: 60 } })
+  await w3.locator('[data-testid="tree-context-menu"]').waitFor({ timeout: 5000 })
+  const blankItems = await w3.locator('[data-testid="tree-context-menu"] [role="menuitem"]').allInnerTexts()
+  if (!blankItems.includes('新建笔记') || !blankItems.includes('新建文件夹'))
+    throw new Error(`空白处右键的菜单不对：${JSON.stringify(blankItems)}`)
+  await w3.keyboard.press('Escape')
+  console.log('空白处右键 ✓', JSON.stringify(blankItems))
   await w3.waitForTimeout(600)
   await w3.screenshot({ path: join(shots, '02b-知识库-空库引导.png') })
   record('02b-知识库-空库引导')
@@ -2589,8 +2608,29 @@ try {
     console.log('笔记头部 ··· / 删除确认 ✓', JSON.stringify({ menuItems, confirmText: confirmText.split('\n')[0] }))
   }
 
-  // 应用内弹窗（替代系统 prompt 的验证）＋ 新建→删除的完整危险路径
-  await win.click('button[title="新建笔记"]')
+  /**
+   * 应用内弹窗（替代系统 prompt 的验证）＋ 新建→删除的完整危险路径。
+   *
+   * **新建走右键**（2026-08-19 起工具栏那颗「新建」已撤）：它建在"当前打开那篇笔记
+   * 所在的目录"，规则是隐形的，用户看不出会建到哪。现在统一为右键——
+   * 右键目录建在那个目录、右键树的空白处建在库根，所见即所得。
+   * 这里右键**树的空白处**（建到库根），顺带验空白处右键这条路本身是通的：
+   * 一篇笔记都没有时，它是唯一能新建东西的入口。
+   */
+  /**
+   * **右键一个目录**建（不是右键空白处）。
+   * 空白处右键那条路要在**空库**那一屏验——这个库有 300 多篇笔记、树是满的，
+   * 屏幕上根本找不到"空白"，随便挑个坐标必然落在某个笔记节点上，
+   * 弹出来的是笔记菜单（打开/重命名/删除），等「新建笔记」等到超时（2026-08-19 踩过）。
+   */
+  await win.locator('[data-testid="tree-col"] button:has-text("▸"), [data-testid="tree-col"] button:has-text("▾")').first()
+    .click({ button: 'right' })
+  await win.locator('[data-testid="tree-context-menu"]').waitFor({ timeout: 5000 })
+  const ctxItems = await win.locator('[data-testid="tree-context-menu"] [role="menuitem"]').allInnerTexts()
+  if (!ctxItems.includes('新建笔记') || !ctxItems.includes('新建文件夹'))
+    throw new Error(`右键目录的菜单不对：${JSON.stringify(ctxItems)}`)
+  console.log('右键目录菜单 ✓', JSON.stringify(ctxItems))
+  await win.locator('[data-testid="tree-context-menu"] [role="menuitem"]:has-text("新建笔记")').click()
   await snap('03b-应用内弹窗', 500)
   await win.fill('input[placeholder="笔记名称"]', 'e2e待删除笔记')
   await win.click('button:has-text("确定")')

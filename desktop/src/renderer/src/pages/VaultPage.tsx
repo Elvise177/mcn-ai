@@ -390,6 +390,17 @@ function EmptyVaultGuide({ onOpenInbox }: { onOpenInbox: () => void }) {
           <Inbox size={14} /> 打开投递箱
         </button>
       </div>
+      {/**
+       * 「新建靠右键」得说一句（2026-08-19）。
+       *
+       * 工具栏那颗「新建」已撤（它建在哪是隐形规则，用户看不出来），新建统一走右键。
+       * 对熟悉 Finder 的人这是常识，**但客户不一定是**——不告诉他，
+       * 他会以为这个软件只能"拖进来"、自己写不了东西。
+       * 放在空库这一屏：正是第一次面对空文件树、最可能想"我自己建一篇"的时刻。
+       */}
+      <div data-testid="empty-hint-newnote" className="mt-4 text-sm text-muted">
+        想自己写一篇？<span className="text-ink">右键左侧文件树的空白处</span> → 新建笔记 / 新建文件夹
+      </div>
     </div>
   )
 }
@@ -594,14 +605,6 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     if (ok) onSwitch()
   }, [confirmDiscard, onSwitch, vault.path])
 
-  const createNote = async (): Promise<void> => {
-    const name = await ui.prompt({ title: '新建笔记', placeholder: '笔记名称' })
-    if (!name) return
-    const dir = current ? current.split('/').slice(0, -1).join('/') : ''
-    const rel = await window.api.vault.createNote(dir, name)
-    openNote(rel)
-  }
-
   /**
    * 新建文件夹（2026-08-19 客户提出）。落点跟「新建笔记」同一套：
    * 当前打开的笔记在哪个目录就建在哪儿，没开笔记就建在库根。
@@ -622,11 +625,16 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
       e.preventDefault()
       e.stopPropagation()
       const at = { x: e.clientX, y: e.clientY }
+      /**
+       * 菜单项就写动词，**不要「在「XXX」下新建…」**（2026-08-19 真人指出："太奇怪了"）。
+       * Finder / VS Code 都是直接「新建文件夹」——你右键的是谁，落点就在谁身上，
+       * 再把路径写进标签是啰嗦；而且建完树上立刻能看见它落在哪，反馈本来就是即时的。
+       */
       const items: Array<{ label: string; danger?: boolean; onClick: () => void }> = isDir
         ? [
-            { label: '在这里新建笔记', onClick: () => void createNoteIn(path) },
-            { label: '在这里新建文件夹', onClick: () => void createFolderIn(path) },
-            { label: '在访达中显示', onClick: () => void window.api.vault.reveal(path) },
+            { label: '新建笔记', onClick: () => void createNoteIn(path) },
+            { label: '新建文件夹', onClick: () => void createFolderIn(path) },
+            ...(path ? [{ label: '在访达中显示', onClick: () => void window.api.vault.reveal(path) }] : []),
           ]
         : [
             { label: '打开', onClick: () => openNote(path) },
@@ -642,7 +650,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
 
   /** 在指定目录下新建笔记/文件夹——落点明确，不再"猜当前目录" */
   const createNoteIn = async (dir: string): Promise<void> => {
-    const name = await ui.prompt({ title: `在「${dir || '库根'}」下新建笔记`, placeholder: '笔记名称' })
+    const name = await ui.prompt({ title: '新建笔记', placeholder: '笔记名称' })
     if (!name) return
     try {
       openNote(await window.api.vault.createNote(dir, name))
@@ -651,7 +659,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     }
   }
   const createFolderIn = async (dir: string): Promise<void> => {
-    const name = await ui.prompt({ title: `在「${dir || '库根'}」下新建文件夹`, placeholder: '文件夹名称' })
+    const name = await ui.prompt({ title: '新建文件夹', placeholder: '文件夹名称' })
     if (!name) return
     try {
       const rel = await window.api.vault.createFolder(dir, name)
@@ -718,18 +726,6 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
       alive = false
     }
   }, [vault.path, staleAsked, inboxRunning])
-
-  const createFolder = async (): Promise<void> => {
-    const name = await ui.prompt({ title: '新建文件夹', placeholder: '文件夹名称' })
-    if (!name) return
-    const dir = current ? current.split('/').slice(0, -1).join('/') : ''
-    try {
-      const rel = await window.api.vault.createFolder(dir, name)
-      ui.toast(`已创建：${rel}`, 'ok')
-    } catch (e) {
-      ui.toast(`新建文件夹失败：${errText(e)}`, 'error')
-    }
-  }
 
   const deleteNote = async (): Promise<void> => {
     if (!current) return
@@ -898,9 +894,10 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
                 <Inbox size={12} className="inline -mt-0.5 mr-0.5" />
                 投递箱{inboxRunning ? '·忙' : ''}
               </button>
-              <button onClick={createNote} title="新建笔记" className="hover:text-accent">
-                新建
-              </button>
+              {/* 「新建」按钮已撤（2026-08-19）：它建在"当前打开那篇笔记所在的目录"，
+                  规则是隐形的——用户看不出会建到哪，正是撤掉「新建文件夹」时批评的同一个毛病。
+                  新建统一走**右键**：右键目录建在那个目录，右键树的空白处建在库根，
+                  所见即所得。工具栏这一行只留"看/切换"类操作。 */}
               {/* 「新建文件夹」按钮已撤（B5）：工具栏按钮说不清"建在哪一级"，
                   改由**右键文件树上的目录**出菜单——你右键谁就建在谁下面 */}
               {!showGraph && !vaultEmpty && (
@@ -914,7 +911,14 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
             </span>
           </div>
         </div>
-        <div className="flex-1 overflow-auto p-2">
+        {/* 空白处右键 → 在库根新建。**没有它右键这条路是残的**：一篇笔记都没有时
+            树上没有任何可右键的对象，用户会以为"这个软件建不了东西"。
+            节点自己的 onContextMenu 会 stopPropagation，所以只有真空白才走到这里 */}
+        <div
+          data-testid="tree-blank"
+          className="flex-1 overflow-auto p-2"
+          onContextMenu={(e) => onTreeContext(e, '', true)}
+        >
           {!query.trim() ? (
             <Tree nodes={tree} current={current} onOpen={openNote} depth={0} expanded={expanded} onToggle={toggleDir} onContext={onTreeContext} />
           ) : searching || !result ? (

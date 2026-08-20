@@ -18,6 +18,8 @@ const KEEP_MS = 30 * 24 * 60 * 60 * 1000
 
 interface BackupEntry {
   id: string
+  /** 哪一轮对话改的——撤销之后要告诉**那个会话**的模型（见 takeUndoNotice） */
+  sessionId: string
   /** 库根 + 相对路径：撤销时要写回同一个地方 */
   root: string
   rel: string
@@ -27,6 +29,24 @@ interface BackupEntry {
 }
 
 const mem = new Map<string, BackupEntry>()
+/** 被撤销过、还没告诉模型的文件（按会话）。取走即清——同一件事不重复念叨 */
+const undone = new Map<string, string[]>()
+
+/**
+ * 取出并清空"这个会话有哪些改动被撤销了"。发送前调一次，拼进 prompt。
+ * **取走即清**：说一次就够，每轮都重复会污染上下文、也会让模型以为反复被撤销。
+ */
+export function takeUndoNotice(sessionId: string): string {
+  const list = undone.get(sessionId)
+  if (!list?.length) return ''
+  undone.delete(sessionId)
+  return (
+    `\n\n【重要】用户**撤销**了你上一次对以下文件的修改，磁盘上已恢复成修改前的样子：\n` +
+    list.map((r) => `· ${r}`).join('\n') +
+    `\n所以你之前那些"已经改好了"的结论**对这些文件不再成立**。` +
+    `如果用户要你再改一次，就当作从没改过、重新执行，不要说"上一轮已经改完了"。`
+  )
+}
 
 function dir(): string {
   try {
@@ -39,7 +59,7 @@ function dir(): string {
 }
 
 /** 写入前调用。返回备份 id，撤销时拿它回滚 */
-export async function backupBeforeWrite(root: string, rel: string): Promise<string> {
+export async function backupBeforeWrite(sessionId: string, root: string, rel: string): Promise<string> {
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
   let before: string | null = null
   try {
@@ -47,7 +67,7 @@ export async function backupBeforeWrite(root: string, rel: string): Promise<stri
   } catch {
     before = null // 文件本来不存在 = 这是一次新建，撤销就是删掉它
   }
-  const entry: BackupEntry = { id, root, rel, before, at: Date.now() }
+  const entry: BackupEntry = { id, sessionId, root, rel, before, at: Date.now() }
   mem.set(id, entry)
   try {
     await fs.mkdir(dir(), { recursive: true })
@@ -99,6 +119,17 @@ export async function undoWrite(id: string): Promise<{ ok: boolean; error?: stri
       await fs.writeFile(abs, e.before, 'utf-8')
     }
     log('info', 'ai-write', `已撤销 AI 对 ${e.rel} 的修改`)
+    /**
+     * **撤销之后必须告诉模型**（2026-08-19 真人实测逼出来的）。
+     *
+     * 撤销发生在主进程，而对话上下文里那一轮的工具结果仍然写着"我已经把 X 换成 Y 了"。
+     * 于是用户撤销后再让它改一遍，它会回：「已经在上一轮全部替换完了，无需再次操作」
+     * ——**模型没说谎，是它看到的世界和磁盘上的不一致了**。
+     * 这里登记下来，下一次发送时随 prompt 带一句给它。
+     */
+    const list = undone.get(e.sessionId) ?? []
+    if (!list.includes(e.rel)) list.push(e.rel)
+    undone.set(e.sessionId, list)
     return { ok: true }
   } catch (err) {
     return { ok: false, error: String(err) }
