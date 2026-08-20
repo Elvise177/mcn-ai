@@ -18,7 +18,19 @@ import { UpdateBar } from './components/UpdateBar'
 
 type Page = 'workbench' | 'vault' | 'settings' | 'usage'
 
-const APP_VERSION = 'v0.1.0'
+/**
+ * 版本号**必须来自主进程**（`app.getVersion()`，即打包时的 package.json version）。
+ * 这里原来是手写常量 `'v0.1.0'`——装了 0.1.1 界面照样显示 0.1.0（2026-08-20 真人发现）。
+ * 而"看设置页版本号确认客户升没升级"是发版流程里的关键一步，写死等于把它废掉。
+ * 拿不到时显示「—」，**不要退回一个可能是错的数字**。
+ */
+const useAppVersion = (): string => {
+  const [v, setV] = useState<string>('')
+  useEffect(() => {
+    void window.api.settings.get().then((s) => setV(s.appVersion ? `v${s.appVersion}` : '—'))
+  }, [])
+  return v
+}
 
 const NAV: [Page, string, typeof Library][] = [
   ['vault', '个人知识库', Library],
@@ -36,6 +48,7 @@ const newConv = (): Conversation => ({
 })
 
 export default function App() {
+  const APP_VERSION = useAppVersion()
   const [page, setPage] = useState<Page>('workbench')
   const [convs, setConvs] = useState<Conversation[]>([])
   const [active, setActive] = useState<Conversation>(newConv)
@@ -1120,6 +1133,7 @@ function SettingsPage({
   const [aiReady, setAiReady] = useState(true)
   const [tiers, setTiers] = useState<AiTier[]>([])
   const [taps, setTaps] = useState(0)
+  const version = useAppVersion()
 
   const refresh = useCallback(() => {
     void window.api.settings.get().then((s) => {
@@ -1221,7 +1235,7 @@ function SettingsPage({
         }}
         className="max-w-xl cursor-default select-none pb-6 text-xs text-muted-soft"
       >
-        SamePage {APP_VERSION}
+        SamePage {version}
         {adminUnlocked && ' · 运维配置已解锁'}
       </div>
     </div>

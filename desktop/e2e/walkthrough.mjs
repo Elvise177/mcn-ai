@@ -732,6 +732,22 @@ await assertStandardRoute(win, '走查主实例')
   }
 
   /**
+   * **界面上的版本号必须等于真实版本**（2026-08-20 真人发现）。
+   *
+   * 它原来是渲染层里手写的常量 `const APP_VERSION = 'v0.1.0'`——
+   * 装了 0.1.1 界面照样显示 0.1.0。而"看设置页版本号确认客户升没升级"
+   * 是发版流程里的关键一步，一个永远不变的数字等于把这一步废掉，
+   * **而且它不会自己暴露**：界面看着挺正常，只有拿另一版对比才发现。
+   */
+  {
+    const real = await win.evaluate(() => window.api.settings.get().then((x) => x.appVersion ?? ''))
+    const shown = await win.locator('aside').last().innerText()
+    if (!real) bad.push('settings.get() 没有回 appVersion（主进程没暴露真实版本）')
+    else if (!shown.includes(real)) bad.push(`侧栏显示的版本号里没有真实版本 ${real}，实得「${shown.split('\n').pop()}」`)
+    else console.log(`版本号 ✓ 界面与真实版本一致（${real}）`)
+  }
+
+  /**
    * **第一版检索口径 = 本地**（2026-08-19 裁决）。
    * 出厂值必须是 `local`——云端那一支不给 file_path，模型只能猜路径（HANDOFF §3-13）。
    * 这条断言零成本，守的是"别有人顺手把默认值改回 cloud"。

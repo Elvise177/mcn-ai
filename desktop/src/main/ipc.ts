@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { ipcMain, dialog, BrowserWindow, app } from 'electron'
 import { store, setLlmKey, hasApiKey, hasLlmKey, setSecretLater, isSecretPending } from './store'
 import {
   describeTier,
@@ -54,6 +54,15 @@ export function registerIpc(): void {
     sensitiveAllowCloud: store.get('sensitiveAllowCloud'),
     /** 第一版检索口径（'local' | 'cloud'，出厂 local）。只读暴露，供走查断言与诊断报告 */
     searchBackend: store.get('searchBackend'),
+    /**
+     * **真实应用版本**（`package.json` 的 version，打包时烧进 Info.plist）。
+     *
+     * 界面上那个版本号原来是渲染层里手写的常量 `const APP_VERSION = 'v0.1.0'`——
+     * 装什么版本都显示 0.1.0（2026-08-20 真人装了 0.1.1 发现的）。
+     * 而"看设置页版本号确认客户升没升级"正是发版流程里的关键一步，
+     * 一个永远不变的数字等于把这一步废掉了。
+     */
+    appVersion: app.getVersion(),
     dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
     dingtalkSecret: store.get('dingtalkSecret') ?? '',
     dingtalkNotifyInbox: store.get('dingtalkNotifyInbox'),

@@ -52,6 +52,8 @@ interface DesktopSettings {
   sensitiveAllowCloud: boolean
   /** 第一版检索口径（'local' | 'cloud'，出厂 local）；见 store.ts 的 searchBackend */
   searchBackend?: 'local' | 'cloud'
+  /** 真实应用版本（主进程 app.getVersion()）。**别在渲染层写死版本号** */
+  appVersion?: string
 }
 
 type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'
