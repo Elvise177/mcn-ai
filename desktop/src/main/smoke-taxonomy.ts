@@ -17,7 +17,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import { spawnSync } from 'child_process'
-import { resolveConfig, MCN_PRESET, hasFeature, type VaultConfig } from './vault/taxonomy'
+import { resolveConfig, resolveEntityScanDirs, MCN_PRESET, hasFeature, type VaultConfig } from './vault/taxonomy'
 import { createVault } from './vault/wizard'
 
 let failed = 0
@@ -203,7 +203,43 @@ async function main(): Promise<void> {
     check('写进库的配置能被自己读回来（往返一致）', dump(resolveConfig(written, v)) === dump(MCN_PRESET))
   }
 
-  console.log('\n【B】TS ↔ Python 逐字比对')
+  /**
+   * 【A3】**扫描**用的实体目录（`07_sensitive_enrich` 建链靠它）。
+   *
+   * 这一路的兜底值**故意不是** `30_实体/*` 而是老库路径——读与写要的不一样。
+   * 实测 Maggie 库：老目录 177 篇实体、`30_实体/` 只有 59 篇（A-3 之后新建的）。
+   * 扫描端改用 `30_实体/*` 兜底就少认 177 篇 → 双链重演 A-3（当年从 352 掉到 2）。
+   * 这几条断言就是钉住"别好心把两套值统一了"。
+   */
+  console.log('\n【A3】扫描用实体目录：读认老库、写落中性区')
+  {
+    const noCfg = resolveEntityScanDirs({})
+    check('没配置 → 达人落老库路径', noCfg.talent === '20_公司管理/25_达人档案', noCfg.talent)
+    check('没配置 → 产品落老库路径', noCfg.product === '40_带货/产品', noCfg.product)
+    check('课程只在扫描侧存在', noCfg.program === '30_课程/课程计划', noCfg.program)
+    check('扫描兜底 ≠ 写入兜底（别统一）',
+      noCfg.talent !== MCN_PRESET.entities.talent, `${noCfg.talent} vs ${MCN_PRESET.entities.talent}`)
+    const partial = resolveEntityScanDirs({ entities: { talent: '客户/人物' } })
+    check('配了的用配置', partial.talent === '客户/人物', partial.talent)
+    check('没配的逐键落老库（不是整段丢）', partial.product === '40_带货/产品', partial.product)
+    const jerry = resolveEntityScanDirs({ entities: MCN_PRESET.entities })
+    check('配全三类的库：课程仍落老库路径', jerry.program === '30_课程/课程计划', jerry.program)
+    check('配全三类的库：达人走配置', jerry.talent === '30_实体/达人', jerry.talent)
+  }
+
+  /**
+   * 【A4】**打标提示词的黄金母本**（0.2.0 批 2）。
+   *
+   * `03_tag_llm.py` 的 SYSTEM_PROMPT 原来是一整段写死的文本——开头「你是美妆带货MCN
+   * 公司的资料管理员」、写死的三选一分类枚举、末尾写死的公司名「OMG美妆」。
+   * 第二个客户（管理咨询）的库里，每篇笔记的摘要都由一位"美妆带货MCN资料管理员"写出来。
+   *
+   * 改成从配置生成之后，**唯一能证明"老库打标口径没漂"的办法就是逐字节比对**：
+   * `e2e/golden/tag-prompt-mcn.txt` 是从 pkb-pipeline 改造前的源码里原样抠出来的 968 字节。
+   * 这条红了不是测试坏了，是那条线被碰了。
+   *
+   * 跨仓库：黄金母本存在 mcn-ai，生成方在 pkb-pipeline。两边任何一侧动了模板都会被逮到。
+   */
   const pipe = process.env.PKB_PIPELINE || join(homedir(), 'Documents/AI/pkb-pipeline')
   const py = join(pipe, 'taxonomy.py')
   let hasPy = false
@@ -213,6 +249,53 @@ async function main(): Promise<void> {
   } catch {
     /* 下面大声说明 */
   }
+
+  console.log('\n【A4】打标提示词：MCN 配置生成的结果 = 改造前原文')
+  if (hasPy) {
+    const goldenPath = join(process.cwd(), 'e2e', 'golden', 'tag-prompt-mcn.txt')
+    let golden = ''
+    try {
+      golden = await fs.readFile(goldenPath, 'utf-8')
+    } catch {
+      /* 下面报 */
+    }
+    if (!golden) {
+      failed++
+      console.log(`   ❌ 找不到黄金母本 ${goldenPath}`)
+    } else {
+      await fs.mkdir(root, { recursive: true })
+      const fx = join(root, 'preset.json')
+      // 空配置 → MCN 预设；这正是老库（没有 persona 段）的形态
+      await fs.writeFile(fx, '{}', 'utf-8')
+      const r = spawnSync('python3', [py, '--prompt', fx], { encoding: 'utf-8' })
+      const built = r.stdout ?? ''
+      check(`长度 ${built.length} = 母本 ${golden.length}`, built.length === golden.length)
+      if (built !== golden) {
+        const a = golden.split('\n')
+        const b = built.split('\n')
+        const i = a.findIndex((l, n) => l !== b[n])
+        check('逐字节相同', false, `\n        第 ${i + 1} 行\n        母本=${a[i]}\n        生成=${b[i]}`)
+      } else {
+        check('逐字节相同', true)
+      }
+      // 换成通用 persona：MCN 那几处字眼必须全部消失
+      await fs.writeFile(fx, JSON.stringify({
+        persona: { id: 'general', role: '这家公司的资料管理员', features: [] },
+        categories: { top: [{ name: '管理', desc: '经营、目标、复盘' }, { name: '业务', desc: '执行与产出' }], subExamples: ['财务人事'] },
+      }), 'utf-8')
+      const g = spawnSync('python3', [py, '--prompt', fx], { encoding: 'utf-8' }).stdout ?? ''
+      check('通用模板：不再自称美妆带货MCN', !g.includes('美妆带货MCN'), g.split('\n')[0].slice(0, 30))
+      check('通用模板：不再出现 OMG美妆', !g.includes('OMG美妆'))
+      check('通用模板：分类换成客户自己的', g.includes('"管理|业务 二选一"'),
+        g.split('\n').find((l) => l.includes('category')))
+      check('通用模板：带上分类释义', g.includes('分类含义：管理=经营、目标、复盘；业务=执行与产出'))
+    }
+  } else {
+    failed++
+    console.log('   ❌ 没有 Python 侧，黄金母本比对跳过（见下）')
+  }
+
+  console.log('\n【B】TS ↔ Python 逐字比对')
   if (!hasPy) {
     failed++
     console.log(`   ❌ 找不到 ${py}`)
@@ -231,6 +314,16 @@ async function main(): Promise<void> {
       }
       const same = out === dump(cfg)
       check(name, same, same ? '' : `\n        ts =${dump(cfg)}\n        py =${out}`)
+
+      // 扫描目录是**另一条解析路径**，两边一样会漂——同一批 fixture 也过一遍
+      const rs = spawnSync('python3', [py, '--scan-dirs', fx], { encoding: 'utf-8' })
+      const sOut = (rs.stdout ?? '').trim()
+      const sTs = dump(resolveEntityScanDirs(FIXTURES.find((f) => f.name === name)!.raw))
+      if (rs.status !== 0 || !sOut) {
+        check(`${name} · 扫描目录`, false, `python 侧失败：${(rs.stderr ?? '').trim().split('\n').pop()}`)
+      } else {
+        check(`${name} · 扫描目录`, sOut === sTs, sOut === sTs ? '' : `\n        ts =${sTs}\n        py =${sOut}`)
+      }
     }
   }
 

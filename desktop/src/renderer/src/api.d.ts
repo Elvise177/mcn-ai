@@ -30,6 +30,8 @@ interface TierHealth {
 
 interface DesktopSettings {
   vaultPath: string | null
+  /** 资料库目录名（走库配置，渲染层不许再写死 `80_Library`） */
+  libraryName: string
   relayBaseUrl: string
   hasApiKey: boolean
   /** true = 用户在设置页手填的 key（服务端下发不会覆盖它） */

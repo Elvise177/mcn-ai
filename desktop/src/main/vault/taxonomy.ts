@@ -48,6 +48,12 @@ export interface Persona {
   id: string
   /** 角色设定，直接进 SYSTEM_PROMPT，如「美妆带货MCN公司的资料管理员」 */
   role: string
+  /**
+   * 用户自己公司的名字。打标提示词里有一句「合作方…不要把公司自己（OMG美妆）写进去」——
+   * 那个括号里的名字原来是**写死的**，第二个客户的库里凭空冒出一家美妆 MCN。
+   * 没配就退化成不带括号的「不要把公司自己写进去」。
+   */
+  company?: string
   /** 该 persona 下启用的业务功能开关 */
   features: string[]
 }
@@ -74,6 +80,12 @@ export interface VaultConfig {
   talents: string
   scripts: string
   concepts: string
+  /**
+   * 投递箱内置分流「参考资料 →」的落位目录。
+   * 名字本身不带 MCN 味，但**它在 pipeline 和 desktop 各写死了一份**，
+   * 改一处漏一处就是分流落到两个地方（同 A-3 的形状）。
+   */
+  externalRefs: string
   entities: Record<EntityKind, string>
   persona: Persona
   categories: Taxonomy
@@ -93,6 +105,7 @@ export const MCN_PRESET: VaultConfig = {
   talents: '20_公司管理/25_达人档案',
   scripts: '40_带货/41_脚本库',
   concepts: '30_课程/31_方法论',
+  externalRefs: '70_外部资料',
   /**
    * 实体卡落位（A-3）。**中性的 `30_实体/`**，不复用 0 号用户那套
    * （`20_公司管理/25_达人档案` 是她自己的语义，对别的客户不成立）。
@@ -105,15 +118,21 @@ export const MCN_PRESET: VaultConfig = {
   persona: {
     id: 'mcn',
     role: '美妆带货MCN公司的资料管理员',
+    company: 'OMG美妆',
     features: ['bizdata'],
   },
+  /**
+   * 三个名字与 `03_tag_llm.py` 原来写死的枚举逐字相同。
+   *
+   * **`desc` 在 MCN 预设里刻意留空**：原提示词里就没有分类释义，
+   * 补上一段等于改提示词、等于打标口径可能漂——而这一批的验收线是
+   * 「老库口径一个字不许变」。`desc` 是给**自定义分类**用的
+   * （客户拿它向模型解释「管理」「业务」各指什么），MCN 预设不需要。
+   * 由 `smoke:taxonomy` 的黄金母本断言守着：MCN 配置生成的提示词
+   * 必须与改造前的原文**逐字节相同**。
+   */
   categories: {
-    // 三个名字与 `03_tag_llm.py` 原来写死的枚举逐字相同
-    top: [
-      { name: '个人生活类', desc: '与公司业务无关的个人事务' },
-      { name: '工作-管理类', desc: '公司经营、目标、复盘、制度、人事财务' },
-      { name: '工作-执行类', desc: '具体业务的执行与产出' },
-    ],
+    top: [{ name: '个人生活类', desc: '' }, { name: '工作-管理类', desc: '' }, { name: '工作-执行类', desc: '' }],
     subExamples: ['业务-内容经纪', '课程教学', '达人管理', '财务人事', '脚本创作'],
   },
 }
@@ -121,6 +140,35 @@ export const MCN_PRESET: VaultConfig = {
 /** 老库探测：这两个目录名是 0 号用户库的历史形态，全仓库只在这里判一次 */
 const LEGACY_INBOX = '95_待入库'
 const LEGACY_LIBRARY = '80_Library'
+
+/**
+ * 实体卡的**扫描**种类。比 `entities`（写入种类）多一个 `program`——
+ * 课程只被 `07_sensitive_enrich` 读来建链，没有建卡器往里写，所以它只出现在扫描侧。
+ */
+export type ScanKind = EntityKind | 'program'
+
+/**
+ * 老库里实体卡实际所在的目录。
+ *
+ * **这套值和 `MCN_PRESET.entities` 是故意不同的，别去"统一"它们**——
+ * 读与写要的东西不一样：
+ *
+ * · **写**（`entities`，建卡器用）→ 中性的 `30_实体/`。老库那套
+ *   `20_公司管理/25_达人档案` 是 0 号用户自己的语义，对别的客户不成立。
+ * · **读**（这里，扫描器用）→ 必须认老库目录。实测 Maggie 库：
+ *   `20_公司管理/25_达人档案` 158 篇、`40_带货/产品` 13 篇、`30_课程/课程计划` 4 篇、
+ *   `20_公司管理/合作方` 2 篇，而 `30_实体/` 只有 A-3 之后新建的 59 篇。
+ *   扫描端要是改用 `30_实体/*` 兜底，老库一下子少认 177 篇实体
+ *   → **双链当场重演 A-3**（当年就是从 352 掉到 2）。
+ *
+ * 有 layout.json 配了 entities 的库（Jerry 那种）走配置，这套值用不上。
+ */
+export const LEGACY_ENTITY_DIRS: Record<ScanKind, string> = {
+  talent: '20_公司管理/25_达人档案',
+  product: '40_带货/产品',
+  partner: '20_公司管理/合作方',
+  program: '30_课程/课程计划',
+}
 
 function str(v: unknown, fallback: string): string {
   return typeof v === 'string' && v.trim() ? v : fallback
@@ -151,10 +199,25 @@ function categories(v: unknown): Taxonomy {
 }
 
 function persona(v: unknown): Persona {
-  const o = (v ?? {}) as { id?: unknown; role?: unknown; features?: unknown }
+  /**
+   * **persona 缺整段时整段回落**，不逐字段兜底——这一条与其它字段不同，理由：
+   *
+   * 老库（0 号用户）的 layout.json 里根本没有 persona 段。要是逐字段兜底，
+   * `company` 就会取不到值（它没有出厂兜底，见下），于是老库的提示词从
+   * 「不要把公司自己（OMG美妆）写进去」变成「不要把公司自己写进去」——
+   * **老库口径当场就漂了**，而这一批的验收线正是"一个字不许变"。
+   *
+   * 反过来，persona 段**存在**就说明这个库明确表达过身份（批 3 的模板会写全），
+   * 那时 `company` 没给就是真没有，不许兜底成「OMG美妆」——
+   * 否则别家客户的提示词里会凭空出现一家美妆 MCN。
+   */
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return { ...MCN_PRESET.persona }
+  const o = v as { id?: unknown; role?: unknown; company?: unknown; features?: unknown }
+  const company = typeof o.company === 'string' && o.company.trim() ? o.company : undefined
   return {
     id: str(o.id, MCN_PRESET.persona.id),
     role: str(o.role, MCN_PRESET.persona.role),
+    ...(company ? { company } : {}),
     features: Array.isArray(o.features)
       ? o.features.filter((x): x is string => typeof x === 'string')
       : MCN_PRESET.persona.features,
@@ -192,6 +255,7 @@ export function resolveConfig(raw: unknown, root: string | null): VaultConfig {
     talents: str(o.talents, MCN_PRESET.talents),
     scripts: str(o.scripts, MCN_PRESET.scripts),
     concepts: str(o.concepts, MCN_PRESET.concepts),
+    externalRefs: str(o.externalRefs, MCN_PRESET.externalRefs),
     entities: {
       talent: str(ent.talent, MCN_PRESET.entities.talent),
       product: str(ent.product, MCN_PRESET.entities.product),
@@ -200,6 +264,18 @@ export function resolveConfig(raw: unknown, root: string | null): VaultConfig {
     persona: persona(o.persona),
     categories: categories(o.categories),
   }
+}
+
+/**
+ * **扫描**用的实体目录（`07_sensitive_enrich` 建链靠它）：
+ * layout.json 配了哪个键就用哪个，没配的落**老库路径**（不是 `30_实体/*`，理由见
+ * `LEGACY_ENTITY_DIRS`）。逐键兜底——只配了一个键的库，另外三个也得能工作。
+ */
+export function resolveEntityScanDirs(raw: unknown): Record<ScanKind, string> {
+  const ent = ((raw ?? {}) as { entities?: Partial<Record<ScanKind, string>> }).entities ?? {}
+  return Object.fromEntries(
+    (Object.keys(LEGACY_ENTITY_DIRS) as ScanKind[]).map((k) => [k, str(ent[k], LEGACY_ENTITY_DIRS[k])])
+  ) as Record<ScanKind, string>
 }
 
 /** 读一份库的原始 layout.json。读不到/坏了都回空对象——由 resolveConfig 逐字段兜底 */

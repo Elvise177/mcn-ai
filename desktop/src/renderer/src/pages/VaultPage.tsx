@@ -704,6 +704,12 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
    *
    * 只在**有库、且待升级数量值得打扰**时提示；用户选"以后再说"就本次运行不再问。
    */
+  /** 资料库目录名：拖放分区要显示"文件会落到哪"，原来这行文案写死 `80_Library` */
+  const [libraryName, setLibraryName] = useState('资料库')
+  useEffect(() => {
+    void window.api.settings.get().then((x) => setLibraryName(x.libraryName || '资料库'))
+  }, [vault.path])
+
   const [staleAsked, setStaleAsked] = useState(false)
   useEffect(() => {
     if (!vault.path || staleAsked || inboxRunning) return
@@ -831,7 +837,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         // 静态时两个投递区一模一样（中性白底灰虚线），只有文件悬在哪个区上方，
         // 哪个区才高亮——之前粉底那块会被当成"已选中"，误导用户
         <div className="absolute inset-0 z-30 flex gap-3 bg-overlay p-6">
-          {[{ name: '业务资料', desc: '公司文件 · 智能打标 → 80_Library', subdir: undefined as string | undefined }].concat(
+          {[{ name: '业务资料', desc: `公司文件 · 智能打标 → ${libraryName}`, subdir: undefined as string | undefined }].concat(
             routes.map((r) => ({ name: r.name, desc: `主题打标 · 概念建链 → ${r.dest}/`, subdir: r.name }))
           ).map((z) => (
             <div

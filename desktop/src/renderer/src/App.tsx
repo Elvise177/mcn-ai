@@ -673,6 +673,8 @@ function SensitiveSection() {
 function RoutesSection() {
   const [routes, setRoutesState] = useState<Array<{ name: string; dest: string; builtin?: boolean }>>([])
   const [newName, setNewName] = useState('')
+  // 默认落位跟内置规则走（它已经吃库配置），别在界面里再写死一份目录名
+  const builtinDest = routes.find((r) => r.builtin)?.dest ?? '70_外部资料'
   const [newDest, setNewDest] = useState('')
 
   const load = (): void => {
@@ -727,13 +729,14 @@ function RoutesSection() {
         <input
           value={newDest}
           onChange={(e) => setNewDest(e.target.value)}
-          placeholder="落位目录，如：70_外部资料/竞品"
+          placeholder={`落位目录，如：${builtinDest}/竞品`}
           className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-base outline-none focus:border-accent"
         />
         <button
           onClick={() => {
             const name = newName.trim()
-            const dest = newDest.trim() || '70_外部资料/' + name
+            // 默认落位跟内置规则走（它已经吃库配置），别再写死一份目录名
+            const dest = newDest.trim() || `${builtinDest}/${name}`
             if (!name) return ui.toast('请填写文件夹名', 'error')
             if (routes.some((x) => x.name === name)) return ui.toast('该文件夹已有规则', 'error')
             void save([...routes, { name, dest }])

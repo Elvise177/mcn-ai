@@ -16,7 +16,14 @@ export interface InboxRoute {
   builtin?: boolean
 }
 
-const BUILTIN: InboxRoute = { name: '参考资料', dest: '70_外部资料', builtin: true }
+/**
+ * 内置分流规则。落位目录走库配置（`externalRefs`）——原来这里和 `cli.py` 各写死一份
+ * `70_外部资料`，改一处漏一处就是"设置里显示落到 A、实际落到 B"。
+ */
+async function builtin(vaultRoot: string): Promise<InboxRoute> {
+  return { name: '参考资料', dest: (await readVaultConfig(vaultRoot)).externalRefs, builtin: true }
+}
+const BUILTIN_NAME = '参考资料'
 
 function layoutPath(vaultRoot: string): string {
   return join(vaultRoot, '.mcnai', 'layout.json')
@@ -27,11 +34,12 @@ const readLayout = readRawLayout
 
 export async function getRoutes(vaultRoot: string): Promise<InboxRoute[]> {
   const layout = await readLayout(vaultRoot)
+  const fallbackDest = (await readVaultConfig(vaultRoot)).externalRefs
   const raw = (layout['投递箱分流'] ?? {}) as Record<string, { 落位?: string; dest?: string }>
-  const out: InboxRoute[] = [BUILTIN]
+  const out: InboxRoute[] = [await builtin(vaultRoot)]
   for (const [name, cfg] of Object.entries(raw)) {
-    if (name === BUILTIN.name) continue
-    out.push({ name, dest: String(cfg?.落位 ?? cfg?.dest ?? '70_外部资料') })
+    if (name === BUILTIN_NAME) continue
+    out.push({ name, dest: String(cfg?.落位 ?? cfg?.dest ?? fallbackDest) })
   }
   return out
 }
@@ -42,7 +50,7 @@ export async function setRoutes(vaultRoot: string, routes: Array<{ name: string;
   for (const r of routes) {
     const name = r.name.trim().replace(/[\\/:*?"<>|.]/g, '')
     const dest = r.dest.trim().replace(/^\/+|\/+$/g, '')
-    if (!name || !dest || name === BUILTIN.name) continue
+    if (!name || !dest || name === BUILTIN_NAME) continue
     section[name] = { 落位: dest, 标签: ['外部资料', name] }
   }
   layout['投递箱分流'] = section

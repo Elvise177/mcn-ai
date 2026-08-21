@@ -25,6 +25,13 @@ import { exportDiagnostics } from './lib/diagnostics'
 import { createVault } from './vault/wizard'
 import { sendDingtalk } from './lib/dingtalk'
 import { startBizSync } from './knowledge/bizdata'
+import { readVaultConfig, hasFeature, MCN_PRESET } from './vault/taxonomy'
+
+/** 当前库的资料库目录名；没开库时给出厂值（设置页在建库之前也会读一次） */
+async function currentLibraryName(): Promise<string> {
+  const root = process.env.MCNAI_VAULT || store.get('vaultPath')
+  return root ? (await readVaultConfig(root)).library : MCN_PRESET.library
+}
 import { getRoutes, setRoutes, ensureRouteFolders } from './lib/routes'
 import { tasks } from './tasks/registry'
 import { updateState, installUpdateNow } from './updater'
@@ -37,8 +44,10 @@ export function registerIpc(): void {
 
   // 注意：这里一律不解密。`hasApiKey` 用密文存在性回答，否则每次打开设置页都可能
   // 触发一次 safeStorage 冷调用，把主进程冻住几十秒（M-29）
-  ipcMain.handle('settings:get', () => ({
+  ipcMain.handle('settings:get', async () => ({
     vaultPath: process.env.MCNAI_VAULT || store.get('vaultPath') || null,
+    /** 资料库目录名。渲染层要显示"文件会落到哪"，原来那处是写死的 `80_Library` */
+    libraryName: await currentLibraryName(),
     relayBaseUrl: store.get('relayBaseUrl'),
     hasApiKey: hasApiKey(),
     manualApiKey: store.get('manualApiKey') === true,
@@ -336,6 +345,12 @@ async function openVault(path: string): Promise<{ path: string; noteCount: numbe
   await inboxOrchestrator.configure(path)
   await artifactsWatcher.configure(path)
   await ensureRouteFolders(path)
-  if (store.get('bizSyncEnabled')) startBizSync(path)
+  /**
+   * 抖音经营数据是**MCN 专属功能**（笔记落位 `40_带货/抖音经营数据/`）。
+   * 除了用户开关，还要这个库的 persona 带 `bizdata` 才跑——否则管理咨询客户
+   * 的库里会凭空长出一个「40_带货」目录。开关写死成"只看设置"就等于
+   * 埋第二个 MCN 假设（拍板：功能开关跟 persona 走）。
+   */
+  if (store.get('bizSyncEnabled') && hasFeature(await readVaultConfig(path), 'bizdata')) startBizSync(path)
   return { path, noteCount }
 }
