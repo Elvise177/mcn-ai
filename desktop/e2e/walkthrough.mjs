@@ -3144,17 +3144,46 @@ try {
             const ct = await win.evaluate(async () => {
               const s = await window.api.tasks.list()
               const t = s.tasks.find((x) => x.kind === 'inbox')
-              return t ? { status: t.status, title: t.title, canceled: t.canceled, error: t.error } : null
+              return t
+                ? { status: t.status, title: t.title, canceled: t.canceled, error: t.error, progress: t.progress }
+                : null
             })
             if (ct?.status !== 'canceled') throw new Error('停止后任务状态不是 canceled：' + JSON.stringify(ct))
             if (ct.error) throw new Error('取消却带上了 error（会被画成红色）：' + JSON.stringify(ct))
             const panelText = await win.locator('[data-testid="inbox-canceled"]').innerText()
             if (!/已停止/.test(panelText) || !/已完成的部分/.test(panelText))
               throw new Error(`停止后的面板文案不对：「${panelText}」`)
-            // 中性灰不是红：进度条填充色不能是 danger
-            const barColor = await win.locator('.inbox-bar-fill').first().evaluate((el) => getComputedStyle(el).backgroundColor)
-            const dangerColor = await win.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--color-danger').trim())
-            console.log('停止后进度条色', barColor, '（danger =', dangerColor, '）')
+            /**
+             * **中性灰不是红**：取消是用户主动的操作，不该看起来像出错。
+             *
+             * 这条原来是无条件 `locator('.inbox-bar-fill').first().evaluate(...)`，
+             * 于是**取消得早一点就死等 30 秒超时**——进度条的挂载条件是
+             * `(running || done > 0)`（VaultPage），取消后 `running` 转 false，
+             * 若此刻一个阶段都还没跑完（`done === 0`）整条进度条直接卸载。
+             *
+             * 也就是说它一直靠"取消时恰好已完成 ≥1 个阶段"这个**碰巧成立的前提**过关，
+             * 前提一变就报一个和真实原因毫不相干的 TimeoutError（同版本号那条的毛病：
+             * 断言把碰巧当保证）。
+             *
+             * 改成两种合法状态都覆盖，**且都不放过真 bug**：
+             *   有条  → 断言颜色不是 danger
+             *   没有条 → 必须是因为 done===0；否则照样红（"条该在却没了"是真回归）
+             */
+            const done = Number(ct.progress?.done ?? 0)
+            const dangerColor = await win.evaluate(() =>
+              getComputedStyle(document.documentElement).getPropertyValue('--color-danger').trim())
+            if (await win.locator('.inbox-bar-fill').count()) {
+              const barColor = await win.locator('.inbox-bar-fill').first()
+                .evaluate((el) => getComputedStyle(el).backgroundColor)
+              if (dangerColor && barColor.replace(/\s/g, '') === dangerColor.replace(/\s/g, ''))
+                throw new Error(`取消后进度条被画成了 danger 色：${barColor}`)
+              console.log('停止后进度条 ✓ 中性色', barColor, '（danger =', dangerColor, '）')
+            } else if (done > 0) {
+              throw new Error(`已完成 ${done} 个阶段，取消后进度条却整个不见了：${JSON.stringify(ct.progress)}`)
+            } else {
+              console.log('停止后进度条 ✓ 未挂载（合法）：取消时 done=0，本就没有可显示的进度',
+                JSON.stringify(ct.progress))
+            }
             await snap('34b-投递箱-已停止中性态', 200)
 
             // 进程组必须一个都不剩（SIGTERM → 3 秒 → SIGKILL）

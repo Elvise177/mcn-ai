@@ -18,6 +18,7 @@ export default defineConfig({
           'smoke-steps': resolve(__dirname, 'src/main/smoke-steps.ts'),
           'smoke-cards': resolve(__dirname, 'src/main/smoke-cards.ts'),
           'smoke-write-guard': resolve(__dirname, 'src/main/smoke-write-guard.ts'),
+          'smoke-taxonomy': resolve(__dirname, 'src/main/smoke-taxonomy.ts'),
         },
       },
     },

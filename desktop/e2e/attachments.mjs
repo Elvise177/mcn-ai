@@ -31,10 +31,18 @@ mkdirSync(join(VAULT, '00_投递箱'), { recursive: true })
 mkdirSync(join(VAULT, '80_资料库'), { recursive: true })
 mkdirSync(USERDATA, { recursive: true })
 
-// 真图两张
-const srcDir = '/private/tmp/claude-501/-Users-tansenpeng-Documents-AI-mcn-ai/29837d68-c645-42af-a885-acc184df251b/scratchpad/full_assets'
-const d0 = readdirSync(srcDir)[0]
-const imgs = readdirSync(join(srcDir, d0)).filter((f) => /\.(png|jpg)$/i.test(f)).slice(0, 2)
+/**
+ * 真图两张，**取自仓库内已提交的素材**。
+ *
+ * 这里原来指向某次会话的 scratchpad
+ * （`/private/tmp/claude-501/…/29837d68-…/scratchpad/full_assets`）——
+ * 那个目录一被清掉，这条走查就 ENOENT 必炸，而且报的是"文件夹不存在"，
+ * 看着像环境坏了、不像测试写错了（2026-08-21 全量验收时真炸了）。
+ * **测试素材只许来自仓库**：随代码走、跟着 git 走，任何机器上都在。
+ */
+const srcDir = join(import.meta.dirname, '..', 'build', 'icon-candidates')
+const d0 = '.'
+const imgs = readdirSync(srcDir).filter((f) => /\.(png|jpg)$/i.test(f)).sort().slice(0, 2)
 const PIC = imgs.map((f, i) => {
   const p = `/tmp/mcnai-attach-pic${i + 1}${f.slice(f.lastIndexOf('.'))}`
   copyFileSync(join(srcDir, d0, f), p)

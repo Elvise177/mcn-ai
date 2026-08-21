@@ -5,6 +5,7 @@ import { type BrowserWindow } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
 import { buildEntityCards } from '../vault/entity-cards'
+import { readVaultConfig } from '../vault/taxonomy'
 import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
 import { pipelineBin } from '../lib/pipeline'
@@ -282,13 +283,8 @@ export class InboxOrchestrator {
       this.seeded = true
       this.seedFromDisk()
     }
-    let inboxName = '00_投递箱'
-    try {
-      const layout = JSON.parse(await fs.readFile(join(vaultRoot, '.mcnai', 'layout.json'), 'utf-8'))
-      if (layout.inbox) inboxName = layout.inbox
-    } catch {
-      if (existsSync(join(vaultRoot, '95_待入库'))) inboxName = '95_待入库'
-    }
+    // 配置只从 taxonomy 这一个入口读（老库探测、逐字段兜底都在里面，与 pipeline 同一套判据）
+    const inboxName = (await readVaultConfig(vaultRoot)).inbox
     this.inboxDir = join(vaultRoot, inboxName)
     await fs.mkdir(this.inboxDir, { recursive: true })
 
@@ -669,15 +665,9 @@ export class InboxOrchestrator {
     }
   }
 
-  /** 资料库目录名：与 pipeline 的 `cli.py` 同一套判据（layout.json → 老库名 → 默认） */
+  /** 资料库目录名：与 pipeline 的 `cli.py` 同一套判据（配置 → 老库探测 → 出厂值） */
   private async libraryName(root: string): Promise<string> {
-    try {
-      const layout = JSON.parse(await fs.readFile(join(root, '.mcnai', 'layout.json'), 'utf-8'))
-      if (layout.library) return String(layout.library)
-    } catch {
-      /* 没有 layout：按老库探测 */
-    }
-    return existsSync(join(root, '80_Library')) ? '80_Library' : '80_资料库'
+    return (await readVaultConfig(root)).library
   }
 
   /** 入库成功后：本轮修改过的 md 上云（私人层）。未登录直接跳过 */

@@ -29,11 +29,13 @@ mkdirSync(join(VAULT, '_assets/带图笔记'), { recursive: true })
 writeFileSync(join(VAULT, '.mcnai/layout.json'), JSON.stringify({ inbox: '00_投递箱', library: '80_资料库' }))
 mkdirSync(join(VAULT, '00_投递箱'), { recursive: true })
 
-// 真图：从前面全量抽图的产物里拿一张
-const src = '/private/tmp/claude-501/-Users-tansenpeng-Documents-AI-mcn-ai/29837d68-c645-42af-a885-acc184df251b/scratchpad/full_assets'
-const dir = readdirSync(src)[0]
-const img = readdirSync(join(src, dir)).find((f) => /\.(png|jpg)$/i.test(f))
-copyFileSync(join(src, dir, img), join(VAULT, '_assets/带图笔记', 'img01' + img.slice(img.lastIndexOf('.'))))
+/**
+ * 真图一张，**取自仓库内已提交的素材**（原来指向某次会话的 scratchpad，
+ * 那个目录被清掉后必炸——详见 attachments.mjs 里同一处的注释）。
+ */
+const src = join(import.meta.dirname, '..', 'build', 'icon-candidates')
+const img = readdirSync(src).filter((f) => /\.(png|jpg)$/i.test(f)).sort()[0]
+copyFileSync(join(src, img), join(VAULT, '_assets/带图笔记', 'img01' + img.slice(img.lastIndexOf('.'))))
 const ref = `../../_assets/带图笔记/img01${img.slice(img.lastIndexOf('.'))}`
 writeFileSync(join(VAULT, '80_资料库/工作-管理类/带图笔记.md'),
   `---\ndoc_type: 课件\nimages: 1\n---\n\n# 带图笔记\n\n正文一段。\n\n![](${ref})\n`)

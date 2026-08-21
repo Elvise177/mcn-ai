@@ -37,6 +37,7 @@ const JOBS = [
   { level: 'L1', name: 'smoke:cards', cmd: ['npm', ['run', 'smoke:cards']] },
   { level: 'L1', name: 'smoke:resume', cmd: ['npm', ['run', 'smoke:resume']] },
   { level: 'L1', name: 'smoke:write（AI 写权限）', cmd: ['npm', ['run', 'smoke:write']] },
+  { level: 'L1', name: 'smoke:taxonomy（库配置 · TS↔Py 契约）', cmd: ['npm', ['run', 'smoke:taxonomy']] },
   { level: 'L2', name: 'pipeline 冒烟（分流/转换/归档/convert-one）', cmd: ['npm', ['run', 'smoke:pipeline']] },
   { level: 'L3', name: '主走查（本地模式）', cmd: ['node', ['e2e/walkthrough.mjs']] },
   { level: 'L3', name: 'a1-enqueue（投递链路）', cmd: ['node', ['e2e/a1-enqueue.mjs']] },
