@@ -1,12 +1,12 @@
 import { promises as fs } from 'fs'
 import { join } from 'path'
-import { MCN_PRESET } from './taxonomy'
+import { MCN_PRESET, PRESETS, type PresetId, type VaultConfig } from './taxonomy'
 
 /**
  * 新建库的默认布局。
  *
  * **值本身在 `taxonomy.ts` 的 `MCN_PRESET` 里**，这里只是它的别名——
- * 出厂值全仓库只许有一份定义（批 3 会在这里接上「通用 / MCN / 自定义」三套模板）。
+ * 出厂值全仓库只许有一份定义。
  *
  * `entities` 那段是 `07_sensitive_enrich` 建链的实体清单来源。A-3 的代码级根因
  * 就在这里：07 原来写死扫 `40_带货/产品` 与 `30_课程/课程计划`，而这两个目录在
@@ -16,20 +16,29 @@ import { MCN_PRESET } from './taxonomy'
 export const DEFAULT_LAYOUT = MCN_PRESET
 
 /**
- * 配置里**哪些字段是目录**——显式列举，不许再靠"拉平取所有字符串叶子"。
+ * 建库时**真建出来**的目录——只有这两个。
  *
- * 原来的实现是递归收集全部字符串值。配置里只有目录时它是对的；
- * 2026-08-21 加了 `persona` / `categories` 之后立刻就错了——
- * 建库会 mkdir 出「mcn」「美妆带货MCN公司的资料管理员」「bizdata」
- * 「个人生活类」这一堆目录。**结构靠约定、不靠形状。**
+ * 0.2.0 批 3 之前，建库会把配置里所有目录字段都 mkdir 一遍，于是每个新客户
+ * 打开软件第一眼看到的是 `20_公司管理` `30_课程` `40_带货`——**一家美妆 MCN 的
+ * 组织架构**。管理咨询客户的库里，这三个目录到交付那天还是空的。
+ *
+ * 现在只建用户马上要用的两个，其余**按需**：
+ *
+ * | 目录 | 谁在什么时候建 |
+ * | --- | --- |
+ * | `90_产物` | 第一个产物落盘时（`ArtifactsWatcher` 惰性监听） |
+ * | `30_实体/*` | 建第一张实体卡时（`entity-cards.ts` 写卡前 mkdir） |
+ * | `concepts` | 生成第一个概念页时（`06_concepts.py`） |
+ * | `talents` | 拆出第一张达人卡时（`08_table_to_cards.py`） |
+ * | `scripts` | 没有自动写入方，用户自己建 |
+ *
+ * **去掉预建的代价是"按需"那一侧必须真的会建**——`08_table_to_cards` 原来
+ * 直接往目录里写卡、不 mkdir，靠的就是建库时已经建好。那种依赖一旦断了
+ * 只有真跑到那一步才炸，所以改这里必须同时把写入方逐个补齐（本批已补）。
  */
-const DIR_FIELDS = ['inbox', 'library', 'artifacts', 'talents', 'scripts', 'concepts'] as const
+const ALWAYS_CREATE = ['inbox', 'library'] as const
 
-export function layoutDirs(cfg: typeof MCN_PRESET): string[] {
-  return [...DIR_FIELDS.map((k) => cfg[k]), ...Object.values(cfg.entities)].filter(Boolean)
-}
-
-const WELCOME = `---
+const welcome = (cfg: VaultConfig): string => `---
 doc_type: 指南
 tags: [入门]
 ---
@@ -40,17 +49,24 @@ tags: [入门]
 
 三件事从这里开始：
 
-1. 把文件拖进「${DEFAULT_LAYOUT.inbox}」，系统自动转换、打标、建链
+1. 把文件拖进「${cfg.inbox}」，系统自动转换、打标、建链
 2. 在对话工作台直接问你的库
-3. 说"把XX做成 PPT"，产物会出现在「${DEFAULT_LAYOUT.artifacts}」
+3. 说"把XX做成 PPT"，产物会出现在「${cfg.artifacts}」
 `
 
-export async function createVault(root: string): Promise<void> {
+/**
+ * 建一个新库。
+ *
+ * @param preset 模板：`general` 通用（默认）｜`mcn` 美妆带货 MCN｜`custom` 自定义
+ *   （自定义先按通用起步，建完在设置里改——不是第三份预设）
+ */
+export async function createVault(root: string, preset: PresetId = 'general'): Promise<void> {
+  const cfg = PRESETS[preset] ?? PRESETS.general
   await fs.mkdir(root, { recursive: true })
-  for (const dir of layoutDirs(DEFAULT_LAYOUT)) {
-    await fs.mkdir(join(root, dir), { recursive: true })
+  for (const key of ALWAYS_CREATE) {
+    await fs.mkdir(join(root, cfg[key]), { recursive: true })
   }
   await fs.mkdir(join(root, '.mcnai'), { recursive: true })
-  await fs.writeFile(join(root, '.mcnai', 'layout.json'), JSON.stringify(DEFAULT_LAYOUT, null, 2))
-  await fs.writeFile(join(root, '欢迎.md'), WELCOME)
+  await fs.writeFile(join(root, '.mcnai', 'layout.json'), JSON.stringify(cfg, null, 2))
+  await fs.writeFile(join(root, '欢迎.md'), welcome(cfg))
 }

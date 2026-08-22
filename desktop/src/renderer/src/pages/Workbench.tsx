@@ -3,7 +3,7 @@ import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Che
 import { FastMarkdown } from '../components/Markdown'
 import { FileIcon } from '../components/FileIcon'
 import { ui } from '../components/ui'
-import { CHIPS } from '../config/chips'
+import { chipsFor } from '../config/chips'
 import { greetingLine } from '../lib/profile'
 import { errText } from '../lib/err'
 import { enqueueMessage, pathOfDropped } from '../lib/enqueue'
@@ -55,6 +55,14 @@ export default function Workbench({
 }) {
   // 消息以 conv prop 为准（App 统一持久化）；这里只管流式草稿/工具行/输入框
   const messages = conv.messages
+  /**
+   * 首页快捷指令按库的业务身份筛。通用模板的库里不该出现「写种草脚本」「达人复盘」——
+   * 那和 `40_带货` 目录一样，是别人家的业务（批 3 看截图时发现的）。
+   */
+  const [chips, setChips] = useState(() => chipsFor('general'))
+  useEffect(() => {
+    void window.api.settings.get().then((x) => setChips(chipsFor(x.personaId)))
+  }, [])
   const [input, setInput] = useState('')
   /**
    * 本轮附件（A-3 B'）。**放在这一层而不是 InputBox 里**：发送成功要清空、被主进程拒了
@@ -298,7 +306,7 @@ export default function Workbench({
               placeholder={vaultEmpty ? '把资料拖进来，或直接问我想做什么…' : undefined}
             />
             <div className="mt-4 flex flex-wrap justify-center gap-2">
-              {CHIPS.map((c) => (
+              {chips.map((c) => (
                 <button
                   key={c.id}
                   onClick={() => setInput(c.prompt)}

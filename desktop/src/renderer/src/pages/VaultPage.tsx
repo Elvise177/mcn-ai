@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type MutableRefObject, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { wikiLinkPlugin } from 'remark-wiki-link'
@@ -1613,6 +1613,11 @@ const GraphPanel = memo(function GraphPanel({
   ingesting: boolean
 }) {
   const [data, setData] = useState<GraphData>({ nodes: [], links: [] })
+  /** 这张图上实际出现了哪些节点类型——图例按它筛 */
+  const kindsOnGraph = useMemo(
+    () => new Set((data.nodes as Array<{ kind?: string }>).map((n) => n.kind ?? 'doc')),
+    [data]
+  )
   const boxRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 320, h: 400 })
   const hoverRef = useRef<string | null>(null)
@@ -1858,7 +1863,14 @@ const GraphPanel = memo(function GraphPanel({
           data-testid="graph-legend"
           className="pointer-events-none absolute bottom-3 left-3 z-10 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-line bg-card px-2.5 py-1.5 text-2xs text-muted"
         >
-          {GRAPH_LEGEND.map((it) => (
+          {/*
+            **只列图上真有的类型**（2026-08-21 批 3）。原来是把 GRAPH_LEGEND 整个铺出来，
+            于是一个刚建好的通用模板库，图上只有一篇「欢迎」，图例却先摆出
+            「达人 · 产品 · 合作方」——跟 `40_带货` 目录、「写种草脚本」快捷指令
+            同一类毛病：**别人家的业务，出现在新客户的第一眼里**。
+            图例本来就该描述这张图，不是描述产品的所有可能性。
+          */}
+          {GRAPH_LEGEND.filter((it) => kindsOnGraph.has(it.kind)).map((it) => (
             <span key={it.kind} data-legend={it.kind} className="flex items-center gap-1">
               <i
                 className="inline-block h-2 w-2 rounded-full"

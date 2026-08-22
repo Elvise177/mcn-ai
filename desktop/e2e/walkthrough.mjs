@@ -290,13 +290,42 @@ const rawShot = async (cdp, name) => {
   await wW.waitForTimeout(1500)
   await wW.click('text=暂不登录')
   await wW.locator('text=建立你的知识库').waitFor({ timeout: 5000 })
+
+  /**
+   * **B3-1 模板选择步**（0.2.0 批 3）。
+   *
+   * 「新建库」不再直接建，先问"你的库放什么内容"——模板决定角色设定、
+   * 分类候选集、功能开关。加这一步之前只有一套写死的 MCN 模板，
+   * 于是管理咨询客户的库里长出 `20_公司管理` `30_课程` `40_带货`。
+   *
+   * 顺带说明：这一步**打断了 H-12 原来的时序**（它点完 create 就等 busy 态）。
+   * 改走查而不是把 UI 改回去——多一步是产品决定，走查跟着产品走。
+   */
+  await wW.locator('[data-testid="wizard-create"]').click()
+  await wW.locator('[data-testid="wizard-templates"]').waitFor({ timeout: 5000 })
+  const tplNames = await wW.locator('[data-testid^="wizard-template-"]:not([data-testid$="back"])').allInnerTexts()
+  if (tplNames.length !== 3) throw new Error(`模板卡应有 3 张，实得 ${tplNames.length}：${JSON.stringify(tplNames)}`)
+  for (const id of ['general', 'mcn', 'custom']) {
+    if (!(await wW.locator(`[data-testid="wizard-template-${id}"]`).count()))
+      throw new Error(`缺模板卡 ${id}`)
+  }
+  await wW.screenshot({ path: join(shots, '40c-建库向导-模板选择.png') })
+  record('40c-建库向导-模板选择')
+  // 「返回」要能退回第一步——停在模板页上会让人以为库建了一半
+  await wW.click('[data-testid="wizard-template-back"]')
+  await wW.locator('text=建立你的知识库').waitFor({ timeout: 4000 })
+  if (await wW.locator('[data-testid="wizard-templates"]').count())
+    throw new Error('点了返回，模板页没退掉')
+  console.log('B3-1 模板选择 ✓', JSON.stringify({ 模板: tplNames.map((t) => t.split('\n')[0]) }))
+
   await wW.click('[data-testid="wizard-create"]')
+  await wW.click('[data-testid="wizard-template-general"]')
 
   // ① busy 态要有文案与 spinner（旧版只是 opacity-60，被当成卡死而反复点）
-  await wW.locator('[data-testid="wizard-create"]:has-text("正在创建/索引…")').waitFor({ timeout: 4000 })
-  if (!(await wW.locator('[data-testid="wizard-create"] .animate-spin').count()))
+  await wW.locator('[data-testid="wizard-template-general"]:has-text("正在创建/索引…")').waitFor({ timeout: 4000 })
+  if (!(await wW.locator('[data-testid="wizard-template-general"] .animate-spin').count()))
     throw new Error('建库 busy 态没有 spinner')
-  const busyDisabled = await wW.locator('[data-testid="wizard-existing"]').isDisabled()
+  const busyDisabled = await wW.locator('[data-testid="wizard-template-mcn"]').isDisabled()
   if (!busyDisabled) throw new Error('创建中另一张卡片没有禁用（会被重复点）')
   await rawShot(cdpW, '40-建库向导-创建中')
 
@@ -310,11 +339,77 @@ const rawShot = async (cdp, name) => {
     if (await wW.locator(`[data-testid="${id}"]`).isDisabled())
       throw new Error(`建库失败后 ${id} 仍然是禁用的（向导永久卡死）`)
   }
-  // 真点第二次：还能再发起（不是"只剩重启一条路"）
+  // 真点第二次：还能再发起（不是"只剩重启一条路"）。
+  // 失败后必须退回第一步——`finally` 里那句 setStep('pick') 就是守这个
+  if (await wW.locator('[data-testid="wizard-templates"]').count())
+    throw new Error('建库失败后停在模板页，用户会以为库建了一半')
   await wW.click('[data-testid="wizard-create"]')
-  await wW.locator('[data-testid="wizard-create"]:has-text("正在创建/索引…")').waitFor({ timeout: 4000 })
-  console.log('H-12 建库向导 ✓', JSON.stringify({ toast: wizToast.trim(), 失败后可再点: true }))
+  await wW.click('[data-testid="wizard-template-general"]')
+  await wW.locator('[data-testid="wizard-template-general"]:has-text("正在创建/索引…")').waitFor({ timeout: 4000 })
+  console.log('H-12 建库向导 ✓', JSON.stringify({ toast: wizToast.trim(), 失败后可再点: true, 失败后退回第一步: true }))
   await appW.close()
+}
+
+/**
+ * ---- B3-2 干净新库：通用模板建出来的库长什么样 ----
+ *
+ * 这一段验的是 Jerry **装机日的第一眼**。0.2.0 之前建库会把配置里所有目录字段
+ * 都 mkdir 一遍，于是管理咨询客户开软件看到的是一家美妆 MCN 的组织架构
+ * （`20_公司管理` `30_课程` `40_带货`），到交付那天这三个目录还是空的。
+ *
+ * 三条断言分别对应三种"MCN 味"的漏法——**它们是三次分别发现的，不是一次想全的**：
+ * ① 目录（清单扫出来的）
+ * ② 首页快捷指令「写种草脚本」「达人复盘」（看截图才发现）
+ * ③ 关系图图例「达人/产品/合作方」（看截图才发现）
+ * 教训：写死的**业务词汇**和写死的**目录路径**是同一个病，而清单只扫得到后者。
+ */
+{
+  const NEW = '/tmp/mcnai-e2e-cleanvault'
+  rmSync(NEW, { recursive: true, force: true })
+  rmSync('/tmp/mcnai-e2e-cleanud', { recursive: true, force: true })
+  const envC = {
+    ...process.env,
+    MCNAI_USER_DATA: '/tmp/mcnai-e2e-cleanud',
+    MCNAI_E2E_NEW_VAULT: NEW,
+  }
+  delete envC.MCNAI_VAULT
+  const appC = await launch(envC)
+  const wC = await appC.firstWindow()
+  await prepWindow(appC, wC)
+  await wC.waitForTimeout(1500)
+  await wC.click('text=暂不登录')
+  await wC.locator('text=建立你的知识库').waitFor({ timeout: 5000 })
+  await wC.click('[data-testid="wizard-create"]')
+  await wC.click('[data-testid="wizard-template-general"]')
+  await wC.waitForTimeout(5000)
+
+  // ① 顶层只有必需的两个目录 + 配置目录，别的一律按需
+  const top = readdirSync(NEW, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
+  const wantTop = ['.mcnai', '00_投递箱', '80_资料库']
+  if (JSON.stringify(top) !== JSON.stringify(wantTop))
+    throw new Error(`通用模板新库顶层目录不对：期望 ${JSON.stringify(wantTop)}，实得 ${JSON.stringify(top)}`)
+  const cfgC = JSON.parse(readFileSync(join(NEW, '.mcnai/layout.json'), 'utf-8'))
+  if (cfgC.persona.id !== 'general') throw new Error(`persona 不是 general：${cfgC.persona.id}`)
+  if (cfgC.persona.company) throw new Error(`通用模板不该带公司名：${cfgC.persona.company}`)
+  if (cfgC.persona.features.length) throw new Error(`通用模板不该开业务功能：${JSON.stringify(cfgC.persona.features)}`)
+
+  // ② 首页快捷指令不许出现别人家的业务词
+  const chipTexts = await wC.locator('main button').allInnerTexts()
+  const mcnWords = ['种草', '达人']
+  const leaked = chipTexts.filter((t) => mcnWords.some((w) => t.includes(w)))
+  if (leaked.length) throw new Error(`通用模板的首页出现 MCN 快捷指令：${JSON.stringify(leaked)}`)
+
+  // ③ 关系图图例只列图上真有的类型（新库只有一篇「欢迎」→ 只该有「文档」）
+  await wC.click('text=个人知识库')
+  await wC.waitForTimeout(2500)
+  const legend = await wC.locator('[data-testid="graph-legend"] span').allInnerTexts()
+  const legendBad = legend.filter((t) => ['达人', '产品', '合作方'].includes(t.trim()))
+  if (legendBad.length)
+    throw new Error(`新库图上一个实体都没有，图例却摆出 ${JSON.stringify(legendBad)}`)
+  await wC.screenshot({ path: join(shots, '40d-干净新库-通用模板.png') })
+  record('40d-干净新库-通用模板')
+  console.log('B3-2 干净新库 ✓', JSON.stringify({ 顶层: top, persona: cfgC.persona.id, 图例: legend.map((s) => s.trim()) }))
+  await appC.close()
 }
 
 // ---- 空库引导环节：指向一个全新的空库 → 知识库页中间区域应给"拖入第一份资料"引导 ----
@@ -2903,9 +2998,27 @@ try {
             // 用 copyFileSync 而不是 writeFileSync：本文件后面 1655 行有个
             // `const { writeFileSync } = await import('fs')`，同一函数作用域里的
             // 块级声明会把顶层那个 import 整个遮住，在它之前用就是 TDZ 报错
+            /**
+             * **投一批而不是投一个**（2026-08-21 改）。
+             *
+             * 原来只投 1 个文件，然后"等 Dock 出现 → reload → 断言任务还在"。
+             * 本地模式一个文件的入库两三秒就跑完，而 reload 本身要几秒——
+             * 这条断言一直是在赌"任务活得比 reload 久"，赌输了报的是
+             * 「任务层没扛住刷新」，把**时序太紧**说成**产品坏了**，方向直接带偏
+             * （和「取消后进度条」那条同一个病：把碰巧成立的前提当成保证）。
+             *
+             * 投 8 个把窗口拉宽到十几秒，这条就变成真的在验"reload 丢不丢快照"。
+             * 不用 sleep 兜——sleep 只是把赌注换个地方押。
+             */
             const rearm = join('/tmp', `mcnai-rearm-${Date.now()}.docx`)
             copyFileSync(sample, rearm)
-            await win.evaluate((pth) => window.api.inbox.enqueue([pth]), rearm)
+            const rearmBatch = [rearm]
+            for (let i = 1; i < 8; i++) {
+              const p = join('/tmp', `mcnai-rearm-${Date.now()}-${i}.docx`)
+              copyFileSync(sample, p)
+              rearmBatch.push(p)
+            }
+            await win.evaluate((ps) => window.api.inbox.enqueue(ps), rearmBatch)
             let live2 = false
             for (let i = 0; i < 120 && !live2; i++) {
               live2 = await dockOpen()
@@ -3007,8 +3120,29 @@ try {
            * 第 2 格（PII守卫 2/8），于是下面找「上云」那行必然落空，
            * 报成"阶段日志把 message 丢了"——方向完全指错（连着假红两轮才看出来）。
            */
+          /**
+           * **边跑边采样，留最后一次非空渲染**（2026-08-21 改）。
+           *
+           * 这段原来是"先循环等完成，再去 DOM 里读阶段日志"。可投递箱面板在
+           * run-end 之后**只留 4 秒**就自动收起——跑得快一点就错过窗口，
+           * 读到空数组，然后报「阶段日志把 message 丢了」。
+           * 这条断言的注释里已经记着它假红过两轮、"方向完全指错"，
+           * 那两轮修的都是**判据**（写死的 6/6、超时太短），没修**采样时机**。
+           *
+           * 它要验的其实是"阶段日志渲染出来时带不带 message"——那就在**渲染的时候**采，
+           * 不必等跑完。留最后一次非空快照，时序依赖直接消失。
+           */
+          let logRows = []
           for (let i = 0; i < 600; i++) {
             const panelUp = (await win.locator('.inbox-bar-fill').count()) > 0
+            if (panelUp) {
+              const rows = await win.evaluate(() =>
+                [...document.querySelectorAll('[data-testid="inbox-panel"] .fade-up')].map((el) =>
+                  (el.textContent ?? '').replace(/\s+/g, '')
+                )
+              )
+              if (rows.length) logRows = rows
+            }
             const busy = (await win.locator('span:has-text("处理中")').count()) > 0
             const text = panelUp
               ? await win.locator('.inbox-bar-fill').locator('xpath=../..').innerText().catch(() => '')
@@ -3031,6 +3165,8 @@ try {
                 )
               : false
             if (panelUp && (cloudRowUp || finished || !busy)) break
+            // 面板已经收起（run-end 后 4 秒自动收）就别再等了——该采的已经采到了
+            if (!panelUp && logRows.length) break
             await win.waitForTimeout(500)
           }
           /**
@@ -3042,11 +3178,7 @@ try {
            * 屏幕上就是几行一模一样的「上云」。
            * 本地模式没登录，cloud_sync 是 `skipped` 带 message「未登录」，正好验同一条链路。
            */
-          const logRows = await win.evaluate(() =>
-            [...document.querySelectorAll('[data-testid="inbox-panel"] .fade-up')].map((el) =>
-              (el.textContent ?? '').replace(/\s+/g, '')
-            )
-          )
+          if (!logRows.length) throw new Error('整轮跑下来投递箱面板一行阶段日志都没渲染过')
           const cloudRow = logRows.find((t) => t.startsWith('上云'))
           if (!cloudRow || cloudRow === '上云')
             throw new Error(`阶段日志把 message 丢了（只剩光秃秃的阶段名）：${JSON.stringify(logRows)}`)
@@ -3229,15 +3361,42 @@ try {
     const widthOf = (testId) =>
       win.locator(`[data-testid="${testId}"]`).evaluate((el) => el.offsetWidth)
 
-    const treeBefore = await widthOf('tree-col')
-    await dragBy('divider-tree', 90)
-    const treeAfter = await widthOf('tree-col')
-    if (Math.abs(treeAfter - treeBefore - 90) > 12)
-      throw new Error(`拖文件树分隔线宽度没跟上：${treeBefore} → ${treeAfter}（期望 +90）`)
+    /**
+     * **合成鼠标拖拽会偶发地整个不生效**——mousedown/move/up 三个事件里任何一个
+     * 落在窗口失焦或主线程正忙的一刻，这一拖就没了，宽度纹丝不动。
+     * 2026-08-21 实测：同一份代码单跑绿、在 verify 全量里红（那轮机器同时在跑别的）。
+     *
+     * 所以重试三次，**但不放宽判据**：真把分隔线拖坏了，三次都不会动，照样红。
+     * 这跟 try/catch 一裹了事是两回事——后者会把真回归一起吞掉。
+     */
+    /**
+     * `dx` 是**鼠标位移**，`want` 是**该列宽度的期望变化**——两者符号不一定相同：
+     * 图谱在右侧，分隔线往左拖（dx 为负）它反而变宽（want 为正）。
+     * 第一版把两者当成一回事，图谱那条直接判错。
+     */
+    const dragUntilMoved = async (testId, colId, dx, want = dx) => {
+      let before = 0
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        before = await widthOf(colId)
+        await dragBy(testId, dx)
+        const after = await widthOf(colId)
+        if (Math.abs(after - before - want) <= 12) return { before, after, attempt }
+        if (attempt < 3) {
+          console.log(`   ↻ ${testId} 第 ${attempt} 次拖拽没生效（${before} → ${after}），重试`)
+          await win.waitForTimeout(600)
+        }
+      }
+      const after = await widthOf(colId)
+      throw new Error(`拖 ${testId} 三次都没生效：${before} → ${after}（期望 ${want > 0 ? '+' : ''}${want}）`)
+    }
+    const treeDrag = await dragUntilMoved('divider-tree', 'tree-col', 90)
+    const treeBefore = treeDrag.before
+    const treeAfter = treeDrag.after
 
-    const graphBefore = await widthOf('graph-col')
-    await dragBy('divider-graph', -80) // 图谱在右侧：往左拖 = 变宽
-    const graphAfter = await widthOf('graph-col')
+    // 图谱在右侧：往左拖 = 变宽
+    const graphDrag = await dragUntilMoved('divider-graph', 'graph-col', -80, 80)
+    const graphBefore = graphDrag.before
+    const graphAfter = graphDrag.after
     if (Math.abs(graphAfter - graphBefore - 80) > 12)
       throw new Error(`拖图谱分隔线宽度没跟上：${graphBefore} → ${graphAfter}（期望 +80）`)
     await snap('18-三栏-拖拽分隔线后', 300)

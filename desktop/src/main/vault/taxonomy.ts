@@ -137,6 +137,38 @@ export const MCN_PRESET: VaultConfig = {
   },
 }
 
+/**
+ * **通用模板**——给不是 MCN 的客户（0.2.0 批 3）。
+ *
+ * 与 MCN 预设的差别只在"业务身份"那几项：角色设定中性、没有公司名、
+ * 关掉 `bizdata`、分类换成任何行业都成立的三类。**目录字段保持一致**——
+ * 目录名是不是「80_资料库」跟行业无关，客户想改自己去配（`library` 是可配字段）。
+ *
+ * 分类的 `desc` 这里**是写满的**，与 MCN 预设相反：MCN 那套要跟改造前的提示词
+ * 逐字节一致所以留空，通用这套是新写的，本来就该把每一类是什么说清楚——
+ * 平铺投递的文件全靠它判断。
+ */
+export const GENERAL_PRESET: VaultConfig = {
+  ...MCN_PRESET,
+  persona: {
+    id: 'general',
+    role: '这家公司的资料管理员',
+    features: [],
+  },
+  categories: {
+    top: [
+      { name: '管理', desc: '公司经营、目标、复盘、制度、人事财务' },
+      { name: '业务', desc: '具体业务的执行与产出' },
+      { name: '个人', desc: '与公司业务无关的个人事务' },
+    ],
+    subExamples: ['财务人事', '团队培训', '客户项目', '内部制度'],
+  },
+}
+
+/** 建库模板。`custom` 不是第三份预设——它是"先拿通用起步，建完自己去改配置" */
+export const PRESETS = { general: GENERAL_PRESET, mcn: MCN_PRESET, custom: GENERAL_PRESET } as const
+export type PresetId = keyof typeof PRESETS
+
 /** 老库探测：这两个目录名是 0 号用户库的历史形态，全仓库只在这里判一次 */
 const LEGACY_INBOX = '95_待入库'
 const LEGACY_LIBRARY = '80_Library'

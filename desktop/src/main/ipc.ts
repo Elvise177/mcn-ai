@@ -23,9 +23,16 @@ import { vaultManager } from './vault'
 import { log } from './lib/logger'
 import { exportDiagnostics } from './lib/diagnostics'
 import { createVault } from './vault/wizard'
+import type { PresetId } from './vault/taxonomy'
 import { sendDingtalk } from './lib/dingtalk'
 import { startBizSync } from './knowledge/bizdata'
 import { readVaultConfig, hasFeature, MCN_PRESET } from './vault/taxonomy'
+
+/** 当前库的 persona id；没开库时按通用给（首跑那几屏也会读一次） */
+async function currentPersonaId(): Promise<string> {
+  const root = process.env.MCNAI_VAULT || store.get('vaultPath')
+  return root ? (await readVaultConfig(root)).persona.id : 'general'
+}
 
 /** 当前库的资料库目录名；没开库时给出厂值（设置页在建库之前也会读一次） */
 async function currentLibraryName(): Promise<string> {
@@ -48,6 +55,8 @@ export function registerIpc(): void {
     vaultPath: process.env.MCNAI_VAULT || store.get('vaultPath') || null,
     /** 资料库目录名。渲染层要显示"文件会落到哪"，原来那处是写死的 `80_Library` */
     libraryName: await currentLibraryName(),
+    /** 库的业务身份 id（general|mcn|custom）。首页快捷指令按它筛选 */
+    personaId: await currentPersonaId(),
     relayBaseUrl: store.get('relayBaseUrl'),
     hasApiKey: hasApiKey(),
     manualApiKey: store.get('manualApiKey') === true,
@@ -161,7 +170,7 @@ export function registerIpc(): void {
     return openVault(r.filePaths[0])
   })
 
-  ipcMain.handle('vault:createNew', async () => {
+  ipcMain.handle('vault:createNew', async (_e, preset: PresetId = 'general') => {
     // MCNAI_E2E_VAULT_FAIL（值 = 先卡住多少毫秒）只给走查用：验 H-12 的「失败/耗时」分支。
     // 真让 createVault 失败得造只读盘，而系统保存框一弹起来 Playwright 就没法继续了。
     // 生产不读这个变量（同 MCNAI_SUPABASE_URL 的用法，见 HANDOFF §4-21/§4-22）
@@ -177,7 +186,7 @@ export function registerIpc(): void {
     // 生产不读这个变量（判据同 HANDOFF §4-22：真触发它需要驱动原生对话框）
     const e2eNew = process.env.MCNAI_E2E_NEW_VAULT
     if (e2eNew) {
-      await createVault(e2eNew)
+      await createVault(e2eNew, preset)
       return openVault(e2eNew)
     }
     const r = await dialog.showSaveDialog({
@@ -187,7 +196,7 @@ export function registerIpc(): void {
       buttonLabel: '创建',
     })
     if (r.canceled || !r.filePath) return null
-    await createVault(r.filePath)
+    await createVault(r.filePath, preset)
     return openVault(r.filePath)
   })
 

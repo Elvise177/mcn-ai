@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { promises as fs } from 'fs'
+import { promises as fs, existsSync } from 'fs'
 import { join, relative, basename } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
 import { shell, type BrowserWindow } from 'electron'
@@ -10,6 +10,7 @@ import { vaultManager } from '../vault'
 import { tasks } from '../tasks/registry'
 import { getIngested, markIngested, type IngestedEntry } from '../tasks/persist'
 import { log } from '../lib/logger'
+import { readVaultConfig } from '../vault/taxonomy'
 
 export interface Artifact {
   path: string
@@ -54,8 +55,27 @@ export class ArtifactsWatcher {
 
   async configure(vaultRoot: string): Promise<void> {
     await this.watcher?.close()
-    this.dir = join(vaultRoot, '90_产物')
-    await fs.mkdir(this.dir, { recursive: true })
+    this.dir = join(vaultRoot, (await readVaultConfig(vaultRoot)).artifacts)
+    /**
+     * **不再 mkdir 产物目录**（0.2.0 批 3）。
+     *
+     * 这一行原来是 `await fs.mkdir(this.dir)`，于是不管这个库有没有产物，
+     * 一开库就凭空长出一个空的 `90_产物`——批 3 要的"干净新库"就被它破坏了。
+     *
+     * chokidar 盯一个不存在的目录在 macOS 上不可靠，所以改成两段：
+     * 目录已经在 → 直接盯它；还不在 → 先浅盯库根等它出现（产物由渲染器
+     * 或 render_pptx 写出时自然创建），出现的那一刻再切过去盯真正的目录。
+     */
+    if (!existsSync(this.dir)) {
+      const root = vaultRoot
+      const boot = chokidar.watch(root, { depth: 0, ignoreInitial: true, ignored: /(^|\/)\./ })
+      boot.on('addDir', (p: string) => {
+        if (p !== this.dir) return
+        void boot.close().then(() => this.configure(root))
+      })
+      this.watcher = boot
+      return
+    }
     this.watcher = chokidar.watch(this.dir, {
       ignored: /(^|\/)\./,
       ignoreInitial: true,
@@ -70,7 +90,9 @@ export class ArtifactsWatcher {
   }
 
   async list(): Promise<Artifact[]> {
-    if (!this.dir) return []
+    // 产物目录是**按需创建**的（批 3），没有产物时它根本不存在——
+    // 直接 readdir 会 ENOENT，而"还没有产物"是完全正常的状态，不是错误
+    if (!this.dir || !existsSync(this.dir)) return []
     const out: Artifact[] = []
     const walk = async (d: string): Promise<void> => {
       for (const e of await fs.readdir(d, { withFileTypes: true })) {

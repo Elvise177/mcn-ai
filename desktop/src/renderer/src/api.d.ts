@@ -32,6 +32,8 @@ interface DesktopSettings {
   vaultPath: string | null
   /** 资料库目录名（走库配置，渲染层不许再写死 `80_Library`） */
   libraryName: string
+  /** 库的业务身份 id：general | mcn | custom */
+  personaId: string
   relayBaseUrl: string
   hasApiKey: boolean
   /** true = 用户在设置页手填的 key（服务端下发不会覆盖它） */
@@ -364,7 +366,7 @@ interface Window {
     }
     vault: {
       pickExisting: () => Promise<VaultOpenResult | null>
-      createNew: () => Promise<VaultOpenResult | null>
+      createNew: (preset?: 'general' | 'mcn' | 'custom') => Promise<VaultOpenResult | null>
       openStored: () => Promise<VaultOpenResult | null>
       tree: () => Promise<VaultTreeNode[]>
       graph: () => Promise<GraphData>

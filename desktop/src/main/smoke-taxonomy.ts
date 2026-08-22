@@ -17,7 +17,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import { spawnSync } from 'child_process'
-import { resolveConfig, resolveEntityScanDirs, MCN_PRESET, hasFeature, type VaultConfig } from './vault/taxonomy'
+import { resolveConfig, resolveEntityScanDirs, MCN_PRESET, GENERAL_PRESET, hasFeature, type VaultConfig } from './vault/taxonomy'
 import { createVault } from './vault/wizard'
 
 let failed = 0
@@ -189,18 +189,32 @@ async function main(): Promise<void> {
    * 「美妆带货MCN公司的资料管理员」「bizdata」「个人生活类」一堆垃圾目录。
    * 这条断言把"结构靠约定不靠形状"钉住。
    */
-  console.log('\n【A2】建库只建目录，不把 persona/分类名当目录')
+  console.log('\n【A2】建库只建必需目录，不把 persona/分类名当目录')
   {
-    const v = join(root, 'wizard')
-    await createVault(v)
-    const got = (await fs.readdir(v, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name).sort()
-    const want = ['.mcnai', '00_投递箱', '20_公司管理', '30_实体', '30_课程', '40_带货', '80_资料库', '90_产物']
-    check('顶层目录与预期一致', dump(got) === dump(want), dump(got))
-    for (const bad of ['mcn', 'bizdata', '个人生活类', MCN_PRESET.persona.role, 'vault']) {
-      check(`没有把「${bad}」建成目录`, !got.includes(bad))
+    /**
+     * **批 3 起只建两个目录**（`00_投递箱` + `<library>`），其余按需。
+     * 这条断言在批 1 写的时候期望的是 8 个目录——批 3 改了 `createVault`
+     * 之后它立刻红了，红得**完全正确**：它就该是唯一一个在"建库产出变了"
+     * 时报警的地方。改断言不是消警，是把新的约定钉下来。
+     */
+    for (const [preset, expectCfg] of [['general', GENERAL_PRESET], ['mcn', MCN_PRESET]] as const) {
+      const v = join(root, `wizard-${preset}`)
+      await createVault(v, preset)
+      const got = (await fs.readdir(v, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name).sort()
+      const want = ['.mcnai', '00_投递箱', '80_资料库']
+      check(`[${preset}] 顶层只有必需目录`, dump(got) === dump(want), dump(got))
+      for (const bad of ['mcn', 'bizdata', '个人生活类', MCN_PRESET.persona.role, 'vault', '90_产物', '40_带货']) {
+        check(`[${preset}] 没有把「${bad}」建成目录`, !got.includes(bad))
+      }
+      const written = JSON.parse(await fs.readFile(join(v, '.mcnai', 'layout.json'), 'utf-8'))
+      check(`[${preset}] 写进库的配置能被自己读回来（往返一致）`,
+        dump(resolveConfig(written, v)) === dump(expectCfg))
     }
-    const written = JSON.parse(await fs.readFile(join(v, '.mcnai', 'layout.json'), 'utf-8'))
-    check('写进库的配置能被自己读回来（往返一致）', dump(resolveConfig(written, v)) === dump(MCN_PRESET))
+    // 通用模板不许带上 MCN 的身份字段
+    const g = JSON.parse(await fs.readFile(join(root, 'wizard-general', '.mcnai', 'layout.json'), 'utf-8'))
+    check('通用模板没有公司名', !g.persona.company, String(g.persona.company))
+    check('通用模板不开 bizdata', !g.persona.features.length, dump(g.persona.features))
+    check('通用模板用自己的分类', dump(g.categories.top.map((c: { name: string }) => c.name)) === dump(['管理', '业务', '个人']))
   }
 
   /**

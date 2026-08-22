@@ -56,7 +56,7 @@ const api = {
   },
   vault: {
     pickExisting: () => ipcRenderer.invoke('vault:pickExisting'),
-    createNew: () => ipcRenderer.invoke('vault:createNew'),
+    createNew: (preset?: 'general' | 'mcn' | 'custom') => ipcRenderer.invoke('vault:createNew', preset),
     openStored: () => ipcRenderer.invoke('vault:openStored'),
     tree: () => ipcRenderer.invoke('vault:tree'),
     graph: () => ipcRenderer.invoke('vault:graph'),
