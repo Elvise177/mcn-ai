@@ -169,5 +169,24 @@ app.on('before-quit', (e) => {
   quitting = true
   e.preventDefault()
   log('info', 'main', '退出前清理投递箱 pipeline 进程组')
-  void inboxOrchestrator.cancel('quit').finally(() => app.exit(0))
+  void inboxOrchestrator.cancel('quit').finally(() => {
+    /**
+     * **收尾必须走 `app.quit()` 而不是 `app.exit(0)`**（0.1.2 修）。
+     *
+     * `app.exit(0)` 是立即终止：它跳过 electron-updater 挂在退出流程上的安装动作。
+     * 后果是——投递箱正在跑的时候用户点「立即重启」，应用是退了，**更新没装上**，
+     * 下次打开还是老版本。`autoInstallOnAppQuit` 那句"重启生效"也跟着变成假话。
+     *
+     * `quitting` 已经置位，所以再次进 before-quit 会在第一行直接 return，
+     * 不会又拦一次；正常退出流程走完，更新才装得上。
+     *
+     * 仍然留 `app.exit(0)` 兜底：Electron 43 起 watcher 不关就退不掉，
+     * 万一还有别的东西挂住进程，3 秒后强制终止——**宁可少装一次更新，也不能退不掉**。
+     */
+    setTimeout(() => {
+      log('warn', 'main', 'app.quit() 3 秒没退掉，强制终止（这次更新不会被安装）')
+      app.exit(0)
+    }, 3000).unref?.()
+    app.quit()
+  })
 })

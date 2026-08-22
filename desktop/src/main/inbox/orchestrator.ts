@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
 import { join, basename, extname, dirname } from 'path'
-import { type BrowserWindow } from 'electron'
+import { shell, type BrowserWindow } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
 import { buildEntityCards } from '../vault/entity-cards'
@@ -14,7 +14,14 @@ import { hasSensitiveMark } from '../lib/sensitive'
 import { notifyDingtalk } from '../lib/dingtalk'
 import { tasks } from '../tasks/registry'
 import { appendUsage } from '../usage'
-import { INBOX_FLOW, type InboxEvent, type InboxTask } from '../tasks/types'
+import {
+  INBOX_FLOW,
+  computeInboxProgress,
+  judgeBackfill,
+  type BackfillVerdict,
+  type InboxEvent,
+  type InboxTask,
+} from '../tasks/types'
 import { getLastInboxRun, setLastInboxRun } from '../tasks/persist'
 
 export type { InboxEvent }
@@ -27,7 +34,7 @@ export type { InboxEvent }
  * `02_convert` 连 fail 都不算（只有认识的扩展名转换失败才进 `.failed/`），
  * 结果就是一堆原件永远躺在投递箱里，而用户以为入库了。
  */
-const SUPPORTED_EXT = new Set(['.md', '.txt', '.docx', '.pdf', '.xlsx', '.pptx'])
+export const SUPPORTED_EXT = new Set(['.md', '.txt', '.doc', '.docx', '.pdf', '.xlsx', '.pptx'])
 
 /** 与 `02_convert.py` 的 `JUNK_DIRS` 对齐 */
 const JUNK_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', '__MACOSX', '__pycache__'])
@@ -117,21 +124,9 @@ export class InboxOrchestrator {
    */
   private tagProgress: { done: number; total: number } | null = null
 
+  /** 进度计算在 `tasks/types.ts` 的纯函数里（抽出去是为了能零花费测，见那边的注释） */
   private computeProgress(): { done: number; total: number; label: string } {
-    let done = 0
-    let label = ''
-    for (const ev of this.stages) {
-      if (ev.type !== 'stage' || !ev.stage) continue
-      const i = INBOX_FLOW.findIndex(([k]) => k === ev.stage)
-      if (i < 0) continue
-      done = Math.max(done, i + 1)
-      label = INBOX_FLOW[i][1]
-    }
-    // 停在打标这一阶段时，把阶段名换成带篇数的——用户要看见它在动
-    if (this.tagProgress && label === '智能打标') {
-      label = `智能打标 · 第 ${this.tagProgress.done + 1}/${this.tagProgress.total} 篇`
-    }
-    return { done, total: INBOX_FLOW.length, label: label || '准备中' }
+    return computeInboxProgress(this.stages, this.tagProgress)
   }
 
   /** 把阶段事件翻译成任务状态。任务是唯一真相源，legacy 事件只是它的副本 */
@@ -235,6 +230,27 @@ export class InboxOrchestrator {
         stages: [...this.stages],
       })
     }
+  }
+
+  /**
+   * 在访达里打开最近一次的 `.failed/` 目录（0.1.2）。
+   *
+   * **磁盘上那份 `失败原因.txt` 才是持久记录**——投递箱面板会自动收起、
+   * 应用也会重启，而"哪些文件没进来、为什么"是用户过几天还要回头查的东西。
+   * 界面上的清单只是它的快捷入口，真相在盘上。
+   */
+  async openFailedDir(): Promise<{ ok: boolean; error?: string }> {
+    if (!this.inboxDir) return { ok: false, error: '还没有打开知识库' }
+    const root = join(this.inboxDir, '.failed')
+    if (!existsSync(root)) return { ok: false, error: '还没有失败记录' }
+    // 取最新的那一天（目录名是 YYYYMMDD）
+    const days = (await fs.readdir(root)).filter((d) => /^\d{8}$/.test(d)).sort()
+    const target = days.length ? join(root, days[days.length - 1]) : root
+    const reason = join(target, '失败原因.txt')
+    // 有原因文件就选中它——直接把人带到那句话上，而不是丢进一个文件夹里自己找
+    if (existsSync(reason)) shell.showItemInFolder(reason)
+    else shell.showItemInFolder(target)
+    return { ok: true }
   }
 
   /** 重启后把上一轮结果塞回 recent —— 面板上仍能看到「上次 6/6 完成」 */
@@ -384,30 +400,51 @@ export class InboxOrchestrator {
    * 全库补齐（B3b）：把还没达到当前 schema 的笔记补打一遍。
    * **用户显式发起**，作为一条独立任务跑，不挡入库、可取消（复用同一套 kill 进程组）。
    */
-  async runTagBackfill(): Promise<void> {
-    if (!this.vaultRoot || this.running) return
+  async runTagBackfill(): Promise<BackfillVerdict> {
+    /**
+     * **不许再静默 return**（0.1.2）。这三个前提原来是三行裸 `return`，
+     * 一句日志都不落、一个事件都不发——用户点了「现在升级」界面毫无变化，
+     * 真实客户卡在这儿问我们是不是坏了。判据抽进 `judgeBackfill`（纯函数，可零花费测），
+     * 结果一路返回到渲染层弹 toast。
+     */
     const llmKey = getLlmKey()
-    if (!llmKey) return
+    const staleNow = this.vaultRoot ? await this.staleTagCount() : 0
+    const verdict = judgeBackfill({
+      vaultRoot: this.vaultRoot,
+      running: this.running,
+      hasKey: !!llmKey,
+      staleCount: staleNow,
+    })
+    if (!verdict.ok) {
+      log('info', 'inbox', `打标补齐没有开始：${verdict.reason} —— ${verdict.message}`)
+      return verdict
+    }
     this.running = true
     this.tagProgress = null
     const id = this.taskId
     tasks.start({
       id,
       kind: 'inbox',
-      key: this.vaultRoot,
+      // 同上：no-vault 已经被 judgeBackfill 挡掉了，TS 跟不过来这层保证
+      key: this.vaultRoot!,
       status: 'running',
       title: '正在升级旧笔记的标签',
       cancelable: true,
       files: [],
       stages: [],
-      progress: { done: 0, total: 1, label: '准备中' },
+      // 分母一开始就给真数：停在「准备中 0/1」和"没反应"在用户眼里是一回事。
+      // staleTagCount() 已经在 judgeBackfill 那步数过了，这里不再多跑一次子进程
+      progress: { done: 0, total: staleNow, label: `准备升级 ${staleNow} 篇` },
     })
-    await new Promise<void>((resolve) => {
+    const outcome = await new Promise<BackfillVerdict>((resolve) => {
       const child = spawn(
         pipelineBin(),
         [
           '--vault', this.vaultRoot!, '--tag-backfill', '--max-cost', '10',
-          '--llm-key', llmKey, '--llm-base-url', store.get('llmBaseUrl'), '--llm-model', store.get('llmModel'),
+          // `llmKey!`：非空是 judgeBackfill 保证的（no-key 已经在上面 return 了），
+          // 但那层保证 TS 跟不过来，不收窄的话整个数组变成 (string|null)[]，
+          // spawn 的重载解析失败 → child 被归约成 never，报的错跟真因毫不相干
+          '--llm-key', llmKey!, '--llm-base-url', store.get('llmBaseUrl'), '--llm-model', store.get('llmModel'),
         ],
         { stdio: ['ignore', 'pipe', 'pipe'], detached: true }
       )
@@ -446,15 +483,20 @@ export class InboxOrchestrator {
         tasks.finish(id, canceled ? 'canceled' : 'succeeded')
         this.running = false
         this.canceledBy = null
-        resolve()
+        resolve({ ok: true, canceled, done: this.tagProgress?.done ?? 0 })
       })
-      child.on('error', () => {
+      child.on('error', (e: Error) => {
         this.child = null
-        tasks.finish(id, 'failed')
+        // 起不来也要**响亮**：原来只 finish('failed')，任务条闪一下就没，用户什么都没看见
+        const msg = e instanceof Error ? e.message : String(e)
+        log('error', 'inbox', `打标补齐启动失败：${msg}`)
+        tasks.patch(id, { title: `标签升级失败：${msg}` } as Partial<InboxTask>)
+        tasks.finish(id, 'failed', msg)
         this.running = false
-        resolve()
+        resolve({ ok: true, failed: msg })
       })
     })
+    return outcome
   }
 
   /** 上一轮是不是被用户停掉且没跑完（「立即处理」据此放行，见 canceledIncomplete） */

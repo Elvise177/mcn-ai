@@ -52,7 +52,18 @@ if (!existsSync(SRC)) {
 }
 
 // ---- 期望值：自己遍历源树算，规则与 orchestrator 的 SUPPORTED_EXT / JUNK 对齐 ----
-const SUPPORTED = new Set(['.md', '.txt', '.docx', '.pdf', '.xlsx', '.pptx'])
+/**
+ * 支持的扩展名**从应用里读真值**，不在这儿抄一份（2026-08-22 改）。
+ *
+ * 原来这里写死 `['.md','.txt','.docx','.pdf','.xlsx','.pptx']`——0.1.2 给生产加了
+ * `.doc` 之后，这份抄件算出的期望值比生产少一个，报成
+ * 「整包拖入没有全部入队：实收 97，期望 96」。**产品是对的，抄的那份过期了**，
+ * 而报错长得像丢文件——入库链路最吓人的那种故障。
+ *
+ * 同一份清单原来散在四处（orchestrator / attachments / pipeline 的 CONVERTERS / 这里）。
+ * 生产那三处靠交叉注释互相提醒，测试这份改成运行时读 `settings.supportedExt`。
+ */
+let SUPPORTED = new Set()
 const JUNK_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', '__MACOSX', '__pycache__'])
 const junk = (n) => n.startsWith('.') || n.startsWith('~$') || JUNK_DIRS.has(n) || n.endsWith('.app')
 
@@ -77,9 +88,7 @@ const scan = (dir, rel) => {
     }
   }
 }
-scan(SRC, '')
-const maxSrcDepth = Math.max(...[...expected.keys()].map((p) => p.split('/').length))
-say(`源树：应入箱 ${expected.size} 个　不支持格式 ${expUnsupported}　隐藏/空 ${expJunk}　最深 ${maxSrcDepth} 层`)
+// 扫源树挪到应用起来之后——SUPPORTED 要从生产读真值（见它的注释）
 
 // ---- 隔离实例 ----
 rmSync(USERDATA, { recursive: true, force: true })
@@ -94,6 +103,17 @@ const app = await electron.launch({
 })
 const win = await app.firstWindow()
 await win.waitForLoadState('domcontentloaded')
+
+// 支持的扩展名取生产真值，然后才扫源树算期望
+{
+  const exts = await win.evaluate(() => window.api.settings.get().then((s) => s.supportedExt))
+  if (!Array.isArray(exts) || !exts.length) throw new Error('settings.supportedExt 没拿到，走查无法算期望值')
+  SUPPORTED = new Set(exts)
+  say(`支持的扩展名（取自主进程）：${exts.join(' ')}`)
+}
+scan(SRC, '')
+const maxSrcDepth = Math.max(...[...expected.keys()].map((p) => p.split('/').length))
+say(`源树：应入箱 ${expected.size} 个　不支持格式 ${expUnsupported}　隐藏/空 ${expJunk}　最深 ${maxSrcDepth} 层`)
 // 与主走查同一套：关掉过渡动画，否则截图会糊在淡入中间帧（看着像对比度坏了）
 await win.setViewportSize({ width: 1440, height: 920 })
 await (await app.context().newCDPSession(win)).send('Emulation.setEmulatedMedia', {

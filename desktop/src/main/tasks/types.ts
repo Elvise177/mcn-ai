@@ -128,3 +128,85 @@ export const INBOX_FLOW: Array<[string, string]> = [
   ['build_cards', '实体建卡'],
   ['cloud_sync', '上云'],
 ]
+
+/**
+ * 投递箱进度计算——**纯函数，抽出来是为了能零花费测**。
+ *
+ * 它原来是 `InboxOrchestrator` 的私有方法，于是唯一能验它的办法是真跑一轮真实打标
+ * （几十分钟 + 真金白银）。结果就是那条 `label === '智能打标'` 的死判据从上线起
+ * 没被任何测试碰过，直到 2026-08-21 花 ¥0.88 真跑 Jerry 的 166 个文件才暴露：
+ * **界面整整 18 分钟停在「PII守卫 2/8」**，而后台一直在稳步打标。
+ *
+ * 教训：**只在真实调用下才走到的分支，要么抽成纯函数、要么就是没人测。**
+ * "以后记得跑真调用"不是办法——它贵、慢，而且没人会为一行 label 去跑。
+ *
+ * @param stages   收到的阶段事件（只看 `type==='stage'` 且 `stage` 在 INBOX_FLOW 里的）
+ * @param tagProgress 打标的篇级进度；有值就说明打标正在跑
+ */
+export function computeInboxProgress(
+  stages: Array<{ type?: string; stage?: string }>,
+  tagProgress: { done: number; total: number } | null
+): { done: number; total: number; label: string } {
+  let done = 0
+  let label = ''
+  for (const ev of stages) {
+    if (ev.type !== 'stage' || !ev.stage) continue
+    const i = INBOX_FLOW.findIndex(([k]) => k === ev.stage)
+    if (i < 0) continue
+    done = Math.max(done, i + 1)
+    label = INBOX_FLOW[i][1]
+  }
+  if (tagProgress) {
+    const i = INBOX_FLOW.findIndex(([k]) => k === 'tag_llm')
+    // 打标已经过去了（后面的阶段事件到了）就别再顶回来
+    if (i >= 0 && done <= i + 1) {
+      done = Math.max(done, i + 1)
+      // total 为 0 时不许说「第 1/0 篇」——那是句荒唐话，用户会以为出错了。
+      // 这一格刚起步、还没数出总数的那一瞬间就是这个状态（断言逮到的）
+      label = tagProgress.total > 0
+        ? `智能打标 · 第 ${Math.min(tagProgress.done + 1, tagProgress.total)}/${tagProgress.total} 篇`
+        : '智能打标'
+    }
+  }
+  return { done, total: INBOX_FLOW.length, label: label || '准备中' }
+}
+
+/** 打标补齐能不能开跑；不能跑时**必须说清为什么**（0.1.2） */
+export type BackfillVerdict =
+  /**
+   * `ok:true` 是**跑完之后**才回的（IPC 一路 await 到子进程 close），
+   * 所以渲染层可以直接拿它弹完成 toast，不用再订阅任务事件。
+   * `canceled` / `failed` 也在这条路上回来——"跑完了"和"被停了"在用户那里是两句话。
+   */
+  | { ok: true; canceled?: boolean; failed?: string; done?: number }
+  | { ok: false; reason: 'no-vault' | 'busy' | 'no-key' | 'nothing'; message: string }
+
+/**
+ * 补齐能不能开跑——**纯函数，抽出来是为了能零花费测**（见 `computeInboxProgress` 上面那条铁律）。
+ *
+ * 0.1.2 之前这段逻辑是 `runTagBackfill` 开头的**三行裸 return**：
+ *
+ * ```ts
+ * if (!this.vaultRoot || this.running) return   // ①②
+ * if (!getLlmKey()) return                      // ③
+ * ```
+ *
+ * 一句日志都不落、一个事件都不发。用户看到「有 156 篇可以升级」点了「现在升级」，
+ * 界面**没有任何变化**——真实客户就卡在这儿问我们是不是坏了。
+ *
+ * 而同一个文件里的 `run()` 遇到没 key 是**降级成 `--skip-llm` 照跑**的：
+ * 同一个仓库两套处理，补齐这条选了最沉默的那种。
+ */
+export function judgeBackfill(s: {
+  vaultRoot: string | null
+  running: boolean
+  hasKey: boolean
+  staleCount: number
+}): BackfillVerdict {
+  if (!s.vaultRoot) return { ok: false, reason: 'no-vault', message: '还没有打开知识库' }
+  if (s.running) return { ok: false, reason: 'busy', message: '投递箱正在处理，等它跑完再升级' }
+  if (!s.hasKey)
+    return { ok: false, reason: 'no-key', message: '还没有配置 AI 打标的密钥，请先登录或在设置里填写' }
+  if (s.staleCount <= 0) return { ok: false, reason: 'nothing', message: '所有笔记的标签都是最新的' }
+  return { ok: true }
+}

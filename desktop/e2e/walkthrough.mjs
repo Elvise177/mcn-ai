@@ -309,8 +309,8 @@ const rawShot = async (cdp, name) => {
     if (!(await wW.locator(`[data-testid="wizard-template-${id}"]`).count()))
       throw new Error(`缺模板卡 ${id}`)
   }
-  await wW.screenshot({ path: join(shots, '40c-建库向导-模板选择.png') })
-  record('40c-建库向导-模板选择')
+  await wW.screenshot({ path: join(shots, '40f-建库向导-模板选择.png') })
+  record('40f-建库向导-模板选择')
   // 「返回」要能退回第一步——停在模板页上会让人以为库建了一半
   await wW.click('[data-testid="wizard-template-back"]')
   await wW.locator('text=建立你的知识库').waitFor({ timeout: 4000 })
@@ -406,8 +406,8 @@ const rawShot = async (cdp, name) => {
   const legendBad = legend.filter((t) => ['达人', '产品', '合作方'].includes(t.trim()))
   if (legendBad.length)
     throw new Error(`新库图上一个实体都没有，图例却摆出 ${JSON.stringify(legendBad)}`)
-  await wC.screenshot({ path: join(shots, '40d-干净新库-通用模板.png') })
-  record('40d-干净新库-通用模板')
+  await wC.screenshot({ path: join(shots, '40g-干净新库-通用模板.png') })
+  record('40g-干净新库-通用模板')
   console.log('B3-2 干净新库 ✓', JSON.stringify({ 顶层: top, persona: cfgC.persona.id, 图例: legend.map((s) => s.trim()) }))
   await appC.close()
 }

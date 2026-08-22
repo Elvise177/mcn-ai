@@ -93,6 +93,7 @@ const inbox = {
   staleTags: () => ipcRenderer.invoke('inbox:staleTags'),
   /** B3b：显式发起一次全库标签升级（独立任务，可停止） */
   tagBackfill: () => ipcRenderer.invoke('inbox:tagBackfill'),
+  openFailed: () => ipcRenderer.invoke('inbox:openFailed'),
   cancel: () => ipcRenderer.invoke('inbox:cancel'),
 }
 const auth = {

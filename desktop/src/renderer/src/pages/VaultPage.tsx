@@ -203,11 +203,25 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
   const events = task?.stages ?? []
   // A-4：pipeline 把没产出笔记的文件名放在 convert_failures 事件里，这里摊平成一张清单。
   // 只给数字没法处理——用户要知道是哪几个文件才能决定补什么
-  const failures = events.flatMap((e) =>
-    e.stage === 'convert_failures'
-      ? [...((e as { failed?: string[] }).failed ?? []), ...((e as { unsupported?: string[] }).unsupported ?? [])]
-      : []
-  )
+  /**
+   * 每条**带上原因**（0.1.2）。原来只摊平出文件名，用户看到一串光秃秃的路径
+   * 仍然不知道为什么没进来——尤其那三份扫描 PDF，文件打开好好的，
+   * 界面只说"没有生成笔记"，方向完全指错。
+   * `reasons` 是 pipeline 在 `convert_failures` 事件里给的（转换失败那批）；
+   * 格式不支持那批原因就是扩展名本身，在这儿拼。
+   */
+  const failures = events.flatMap((e) => {
+    if (e.stage !== 'convert_failures') return []
+    const ev = e as { failed?: string[]; unsupported?: string[]; reasons?: Record<string, string> }
+    const why = ev.reasons ?? {}
+    return [
+      ...(ev.failed ?? []).map((rel) => ({ rel, reason: why[rel] || '转换没有产出内容' })),
+      ...(ev.unsupported ?? []).map((rel) => ({
+        rel,
+        reason: `暂不支持 ${rel.slice(rel.lastIndexOf('.')) || '这种'} 格式`,
+      })),
+    ]
+  })
   /**
    * **连续的同一阶段折成一行，并把 message 显示出来**（2026-08-18 真人测试反馈）。
    *
@@ -316,10 +330,31 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
       )}
       {failures.length > 0 && (
         <div data-testid="inbox-failures" className="border-b border-line bg-warning-soft px-4 py-2 text-sm">
-          <div className="mb-1 font-medium">以下文件没有生成笔记，原件已移到「投递箱/.failed/」：</div>
+          <div className="mb-1 flex items-center gap-2">
+            <span className="font-medium">{failures.length} 个文件没能进知识库，原件都还在</span>
+            {/*
+              **常驻入口**：面板会自动收起、应用也会重启，而"哪些文件没进来、为什么"
+              是用户过几天还要回头查的东西。盘上的 `.failed/失败原因.txt` 才是持久记录，
+              这个按钮只是把人直接带到那句话上。
+            */}
+            <button
+              data-testid="inbox-open-failed"
+              onClick={() => {
+                void window.api.inbox.openFailed().then((r) => {
+                  if (!r.ok) ui.toast(r.error || '打不开失败文件夹', 'error')
+                })
+              }}
+              className="rounded-full border border-line px-2 py-0.5 text-xs hover:bg-card"
+            >
+              查看原件与原因
+            </button>
+          </div>
           <ul className="ml-4 list-disc text-muted">
             {failures.map((f) => (
-              <li key={f} className="truncate">{f}</li>
+              <li key={f.rel} className="truncate" title={`${f.rel} —— ${f.reason}`}>
+                {f.rel}
+                <span className="text-2xs"> —— {f.reason}</span>
+              </li>
             ))}
           </ul>
         </div>
@@ -726,7 +761,19 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         okText: '现在升级',
         cancelText: '以后再说',
       })
-      if (go) void window.api.inbox.tagBackfill()
+      if (!go) return
+      /**
+       * **结果必须接住**（0.1.2）。原来是 `void window.api.inbox.tagBackfill()`——
+       * 主进程里三行裸 return 里的任何一条命中，界面上都毫无变化，
+       * 真实客户点了「现在升级」以为软件坏了。
+       * 现在没开成就把原因直接说出来（没库 / 投递箱忙 / 没密钥 / 本来就没有待升级的）。
+       */
+      const r = await window.api.inbox.tagBackfill()
+      if (!r.ok) return ui.toast(r.message, r.reason === 'nothing' ? 'info' : 'error')
+      // 这条 Promise 在子进程结束时才 resolve，所以到这儿就是**跑完了**
+      if (r.failed) ui.toast(`标签升级失败：${r.failed}`, 'error')
+      else if (r.canceled) ui.toast('标签升级已停止，已完成的部分保留', 'info')
+      else ui.toast(`标签升级完成，共 ${r.done ?? 0} 篇`, 'ok')
     })
     return () => {
       alive = false

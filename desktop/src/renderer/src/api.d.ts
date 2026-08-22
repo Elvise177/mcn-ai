@@ -34,6 +34,8 @@ interface DesktopSettings {
   libraryName: string
   /** 库的业务身份 id：general | mcn | custom */
   personaId: string
+  /** 能入库的扩展名（真相源在主进程，走查读它、界面提示也该用它） */
+  supportedExt: string[]
   relayBaseUrl: string
   hasApiKey: boolean
   /** true = 用户在设置页手填的 key（服务端下发不会覆盖它） */
@@ -318,6 +320,18 @@ interface SearchResult {
   fuzzy?: boolean
 }
 
+/** 更新状态。`phase` 是 0.1.2 加的——原来只有 ready 一个布尔，下载全程界面零显示 */
+interface UpdateState {
+  ready: boolean
+  version: string | null
+  disabledReason: string | null
+  phase: 'idle' | 'checking' | 'downloading' | 'ready' | 'error'
+  /** 下载百分比（0-100），只有 phase==='downloading' 时有意义 */
+  percent: number
+  /** 失败原因；下载中失败才会有值（后台例行查更新失败只写日志，不打扰） */
+  error: string | null
+}
+
 interface Window {
   api: {
     settings: {
@@ -408,7 +422,13 @@ interface Window {
       /** B3b：还有多少篇笔记的标签是旧版本生成的 */
       staleTags: () => Promise<number>
       /** B3b：显式发起全库标签升级（独立任务，可停止） */
-      tagBackfill: () => Promise<void>
+      /** 补齐开没开成；没开成时 message 要能直接给用户看 */
+      tagBackfill: () => Promise<
+        | { ok: true; canceled?: boolean; failed?: string; done?: number }
+        | { ok: false; reason: 'no-vault' | 'busy' | 'no-key' | 'nothing'; message: string }
+      >
+      /** 在访达里打开最近一次的 `.failed/`（盘上那份「失败原因.txt」才是持久记录） */
+      openFailed: () => Promise<{ ok: boolean; error?: string }>
       /** 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚 */
       cancel: () => Promise<boolean>
     }
@@ -472,11 +492,9 @@ interface Window {
     }
     update: {
       /** disabledReason 非空 = 这台机器根本不查更新（dev 形态 / 更新源还是占位） */
-      state: () => Promise<{ ready: boolean; version: string | null; disabledReason: string | null }>
+      state: () => Promise<UpdateState>
       install: () => Promise<{ ok: boolean; error?: string }>
-      onReady: (
-        cb: (s: { ready: boolean; version: string | null; disabledReason: string | null }) => void
-      ) => () => void
+      onReady: (cb: (s: UpdateState) => void) => () => void
     }
     diag: {
       export: () => Promise<string>

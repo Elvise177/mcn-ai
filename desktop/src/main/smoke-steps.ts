@@ -1,4 +1,5 @@
 import { countToolResults, isStepWorthy, pickStepArgs, shortToolName, toolResultText } from './agent/steps'
+import { computeInboxProgress, judgeBackfill } from './tasks/types'
 import { describeStep, durationHint, scanTarget } from '../renderer/src/config/steps'
 
 /**
@@ -227,6 +228,75 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   check('真文件名照常显示', pickStepArgs('Read', { file_path: '80_资料库/工作-管理类/年框.md' }).file ===
     '80_资料库/工作-管理类/年框.md')
   check('库根下的裸文件名也认', pickStepArgs('Read', { file_path: '欢迎.md' }).file === '欢迎.md')
+}
+
+/**
+ * ---- 投递箱进度标签（0.1.2）----
+ *
+ * 为什么在这里：`computeInboxProgress` 原来是 orchestrator 的私有方法，
+ * 唯一能验它的办法是真跑一轮真实打标（几十分钟 + 真金白银），
+ * 于是那条 `label === '智能打标'` 的死判据从上线起没被任何测试碰过。
+ * 2026-08-21 花 ¥0.88 真跑 Jerry 的 166 个文件才暴露：
+ * **界面整整 18 分钟停在「PII守卫 2/8」**，而后台一直在稳步打标。
+ *
+ * 抽成纯函数之后，同样的场景在这里几毫秒就验完，一分钱不花。
+ */
+{
+  console.log('\n【投递箱进度标签】')
+  const stage = (s: string) => ({ type: 'stage' as const, stage: s })
+
+  // ① 打标进行中：上一个**阶段事件**还停在 pii_guard（篇级进度刻意不进 stages），
+  //    界面必须已经显示「智能打标 · 第 n/N 篇」，而不是停在「PII守卫」
+  const running = computeInboxProgress([stage('convert'), stage('pii_guard')], { done: 3, total: 166 })
+  check('打标中：标签切到智能打标并带篇数', running.label === '智能打标 · 第 4/166 篇', running.label)
+  check('打标中：阶段推进到第 3 格', running.done === 3, String(running.done))
+
+  // ② 没有篇级进度时按阶段事件走（老行为不变）
+  const plain = computeInboxProgress([stage('convert'), stage('pii_guard')], null)
+  check('无篇级进度：显示 PII守卫', plain.label === 'PII守卫', plain.label)
+
+  // ③ 打标已经过去：后面的阶段来了，不许被篇数标签顶回去
+  const later = computeInboxProgress(
+    [stage('convert'), stage('pii_guard'), stage('tag_llm'), stage('sensitive_enrich')],
+    { done: 166, total: 166 }
+  )
+  check('打标之后：标签跟着后续阶段走', later.label === '实体建链', later.label)
+  check('打标之后：进度不被拉回', later.done === 5, String(later.done))
+
+  // ④ 一个文件都没有时不许出现「第 1/0 篇」这种话
+  const zero = computeInboxProgress([stage('pii_guard')], { done: 0, total: 0 })
+  check('总数为 0 时不显示荒唐篇数', !/\/0 篇/.test(zero.label), zero.label)
+}
+
+
+/**
+ * ---- 打标补齐的开跑判据（0.1.2）----
+ *
+ * 原来是 `runTagBackfill` 开头的三行裸 return，一句日志都不落、一个事件都不发。
+ * 用户看到「有 156 篇可以升级」点了「现在升级」，界面**没有任何变化**。
+ * 抽成纯函数之后这四种拒绝理由在这里几毫秒验完，不用起应用、不用真打标。
+ */
+{
+  console.log('\n【打标补齐判据】')
+  const base = { vaultRoot: '/v', running: false, hasKey: true, staleCount: 156 }
+  const ok = judgeBackfill(base)
+  check('前提齐全 → 放行', ok.ok === true)
+  for (const [name, patch, reason] of [
+    ['没开库', { vaultRoot: null }, 'no-vault'],
+    ['投递箱在跑', { running: true }, 'busy'],
+    ['没有打标密钥', { hasKey: false }, 'no-key'],
+    ['本来就没有待升级的', { staleCount: 0 }, 'nothing'],
+  ] as const) {
+    const v = judgeBackfill({ ...base, ...patch })
+    check(`${name} → 拒绝且给出 ${reason}`, v.ok === false && v.reason === reason,
+      v.ok ? 'ok' : v.reason)
+    check(`${name} → 有能直接给用户看的话`, v.ok === false && v.message.length > 4,
+      v.ok ? '' : v.message)
+  }
+  // 多个前提同时不满足时，**先报最根本的那个**：没开库就别说"没有密钥"
+  const both = judgeBackfill({ vaultRoot: null, running: true, hasKey: false, staleCount: 0 })
+  check('多个前提都不满足时报最根本的', both.ok === false && both.reason === 'no-vault',
+    both.ok ? '' : both.reason)
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

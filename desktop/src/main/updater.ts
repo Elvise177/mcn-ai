@@ -28,9 +28,26 @@ const FIRST_CHECK_DELAY_MS = 20_000
 /** 之后的复查间隔 */
 const RECHECK_INTERVAL_MS = 4 * 60 * 60 * 1000
 
-type UpdateState = { ready: boolean; version: string | null; disabledReason: string | null }
+/**
+ * `phase` 是 0.1.2 加的：原来只有 `ready` 一个布尔，于是**下载全程界面上什么都不出**。
+ * 227MB 的包在客户网速下就是十几分钟全黑——查更新、发现新版、下载中，一律零显示，
+ * 直到下完才"啪"地出现一条。真实客户在这段沉默里以为软件坏了。
+ */
+type UpdatePhase = 'idle' | 'checking' | 'downloading' | 'ready' | 'error'
+type UpdateState = {
+  ready: boolean
+  version: string | null
+  disabledReason: string | null
+  phase: UpdatePhase
+  /** 下载百分比（0-100），只有 phase==='downloading' 时有意义 */
+  percent: number
+  /** 失败原因。**要说出来**——原来的取向是"更新故障永不打扰用户"，被真实客户证伪了：沉默本身就是打扰 */
+  error: string | null
+}
 
-let state: UpdateState = { ready: false, version: null, disabledReason: null }
+let state: UpdateState = {
+  ready: false, version: null, disabledReason: null, phase: 'idle', percent: 0, error: null,
+}
 let win: BrowserWindow | null = null
 let timer: NodeJS.Timeout | null = null
 
@@ -89,8 +106,32 @@ export function initUpdater(window: BrowserWindow): void {
     debug: () => {},
   }
 
+  autoUpdater.on('checking-for-update', () => {
+    // 已经下完就别把状态倒回去（4 小时一次的复查会再触发这个事件）
+    if (state.phase === 'ready') return
+    state = { ...state, phase: 'checking', error: null }
+    push()
+  })
+
+  autoUpdater.on('update-available', (info) => {
+    state = { ...state, phase: 'downloading', percent: 0, version: info.version, error: null }
+    log('info', 'updater', `发现新版本 ${info.version}，开始下载`)
+    push()
+  })
+
+  autoUpdater.on('update-not-available', () => {
+    if (state.phase === 'ready') return
+    state = { ...state, phase: 'idle', error: null }
+    push()
+  })
+
+  autoUpdater.on('download-progress', (p) => {
+    state = { ...state, phase: 'downloading', percent: Math.round(p.percent ?? 0) }
+    push()
+  })
+
   autoUpdater.on('update-downloaded', (info) => {
-    state = { ready: true, version: info.version, disabledReason: null }
+    state = { ready: true, version: info.version, disabledReason: null, phase: 'ready', percent: 100, error: null }
     log('info', 'updater', `新版本已下载完成：${info.version}`)
     push()
     if (timer) {
@@ -99,9 +140,24 @@ export function initUpdater(window: BrowserWindow): void {
     }
   })
 
-  // 更新链路的失败**永远不上界面**：客户在离线/内网环境里照常干活，
-  // 一条查不到更新的红条只会让他去查网络。
-  autoUpdater.on('error', (e) => log('warn', 'updater', e instanceof Error ? e.message : String(e)))
+  /**
+   * **下载失败要响亮报错**（0.1.2 改）。
+   *
+   * 原来的取向是"更新链路的失败永远不上界面——客户在离线/内网环境里照常干活，
+   * 一条红条只会让他去查网络"。这个取向被真实客户证伪了：他点了更新、等了很久、
+   * 什么都没发生，然后来问我们。**沉默不是不打扰，沉默是让人怀疑软件坏了。**
+   *
+   * 折中：只有**已经开始下载之后**的失败才上界面（用户此刻正等着它）；
+   * 后台例行查更新失败仍然只写日志，不打扰正在干活的人。
+   */
+  autoUpdater.on('error', (e) => {
+    const msg = e instanceof Error ? e.message : String(e)
+    log('warn', 'updater', msg)
+    if (state.phase === 'downloading') {
+      state = { ...state, phase: 'error', error: msg }
+      push()
+    }
+  })
 
   const check = (): void => {
     autoUpdater.checkForUpdates().catch((e) => log('warn', 'updater', `查更新失败：${String(e)}`))
@@ -116,8 +172,17 @@ export function installUpdateNow(): { ok: boolean; error?: string } {
   if (!state.ready) return { ok: false, error: '还没有下载好的更新' }
   try {
     const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
+    log('info', 'updater', `用户点了立即重启，开始安装 ${state.version}`)
     // isSilent=false（安装器可见）、isForceRunAfter=true（装完自动开回来）
-    setImmediate(() => autoUpdater.quitAndInstall(false, true))
+    setImmediate(() => {
+      try {
+        autoUpdater.quitAndInstall(false, true)
+      } catch (e) {
+        // setImmediate 里的抛错外面 catch 不到，只能在这儿记——
+        // 客户报「一直卡在正在重启」时，日志里有没有这一行是判断方向的关键
+        log('error', 'updater', `quitAndInstall 抛错：${e instanceof Error ? e.message : String(e)}`)
+      }
+    })
     return { ok: true }
   } catch (e) {
     log('error', 'updater', e instanceof Error ? e : String(e))

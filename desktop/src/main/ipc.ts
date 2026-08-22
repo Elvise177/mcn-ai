@@ -11,7 +11,7 @@ import {
 import { invalidateTierHealth, tierHealth } from './ai/health'
 import { summarize, currentMonth, listMonths } from './usage'
 import { getPricing, setPricing } from './usage/pricing'
-import { inboxOrchestrator } from './inbox/orchestrator'
+import { inboxOrchestrator, SUPPORTED_EXT } from './inbox/orchestrator'
 import { agentManager } from './agent'
 import { pickAttachments } from './agent/attachments'
 import { login, logout, authState, provisionKeys, getProvisionError, cancelLogin } from './auth'
@@ -57,6 +57,13 @@ export function registerIpc(): void {
     libraryName: await currentLibraryName(),
     /** 库的业务身份 id（general|mcn|custom）。首页快捷指令按它筛选 */
     personaId: await currentPersonaId(),
+    /**
+     * 能入库的扩展名。**暴露出来是为了让走查读真值**——
+     * `e2e/a1-enqueue.mjs` 原来自己抄了一份，0.1.2 加 `.doc` 之后
+     * 它算出的期望值比生产少一个，报成"整包拖入没有全部入队"，
+     * 方向完全指错（产品是对的，抄的那份过期了）。
+     */
+    supportedExt: [...SUPPORTED_EXT],
     relayBaseUrl: store.get('relayBaseUrl'),
     hasApiKey: hasApiKey(),
     manualApiKey: store.get('manualApiKey') === true,
@@ -332,7 +339,9 @@ export function registerIpc(): void {
   ipcMain.handle('inbox:pending', () => inboxOrchestrator.pendingCount())
   // B3b：旧标签补齐——查有多少 / 显式发起。**入库不再顺带做这件事**
   ipcMain.handle('inbox:staleTags', () => inboxOrchestrator.staleTagCount())
-  ipcMain.handle('inbox:tagBackfill', () => void inboxOrchestrator.runTagBackfill())
+  // **不许 void**：`void promise` 把结果和异常一起丢掉，渲染层永远拿不到"为什么没开始"
+  ipcMain.handle('inbox:tagBackfill', () => inboxOrchestrator.runTagBackfill())
+  ipcMain.handle('inbox:openFailed', () => inboxOrchestrator.openFailedDir())
   // 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚（H-13，设计 §5.1）
   ipcMain.handle('inbox:cancel', () => inboxOrchestrator.cancel('user'))
 }

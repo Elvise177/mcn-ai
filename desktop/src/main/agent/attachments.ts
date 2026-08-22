@@ -22,7 +22,9 @@ const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif']
  * 其余边界一律照旧：不打标、不建卡、不上云、不进投递箱，会话结束随临时目录清掉。
  * 用户真想长期保存，那条路是把文件拖进窗口（投递箱），提示里会说这句话。
  */
-const DOC_EXT = ['docx', 'pdf', 'xlsx', 'pptx', 'md', 'txt']
+// `.doc` 是 0.1.2 加的（走 macOS 自带 textutil）——支持列表在三处，改一处漏两处：
+// 这里、`inbox/orchestrator.ts` 的 SUPPORTED_EXT、pipeline 的 `02_convert.CONVERTERS`
+const DOC_EXT = ['doc', 'docx', 'pdf', 'xlsx', 'pptx', 'md', 'txt']
 /** 超过这个体积就别走"临时参考"这条路了——转换慢、上下文也塞不下，提示改走入库 */
 const DOC_MAX_BYTES = 20 * 1024 * 1024
 
