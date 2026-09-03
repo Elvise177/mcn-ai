@@ -125,6 +125,9 @@
   --font-mono: 'SF Mono', Menlo, monospace;
   --leading-base: 1.65;
   --leading-tight: 1.35;
+  /* 按钮/列表单行（DESIGN-scale §5 新增）：对应组件里最常用的 Tailwind `leading-5`(20px@14) 场景，
+     介于 tight 与 base 之间。`leading-6` 归 base、`leading-4` 归 tight，存量替换在批 4 */
+  --leading-snug: 1.45;
 
   /* ===== 字号 ===== */
   --text-2xs: 10px;
@@ -141,15 +144,18 @@
      所以真正压住份量的是字号 */
   --text-display: 38px;
 
-  /* ===== 间距（4px 栅格 + 外壳语义尺寸） ===== */
+  /* ===== 间距：8 点栅格 7 档（DESIGN-scale §1，2026-09-02 定稿） =====
+     只有这 7 档：1/2/3/4/6/8/12。原来的 --space-5(20) / --space-10(40) 已删——
+     刻度表把 20px 系并入 24、40px 系并入 48，没有一处是「8/12 都不合适所以选 20」的记录。
+     tailwind.config.js 里 p-1/p-2/…/p-12 映到这些变量（值与 Tailwind 默认逐像素相同，
+     所以现阶段零视觉变化）；半步类（p-1.5/p-2.5/p-5/p-10）仍吃 Tailwind 默认，
+     等批 4 把 560 处存量脚本化替换完，再把 spacing 改成**整体覆盖**并加走查白名单断言。 */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
-  --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
-  --space-10: 40px;
   --space-12: 48px;
   --size-sidebar: 240px;
   --size-artifact-panel: 300px;
@@ -187,6 +193,9 @@
   /* ===== 阴影 ===== */
   --shadow-card: 0 1px 2px rgba(61, 57, 47, 0.04);
   --shadow-pop: 0 8px 28px rgba(61, 57, 47, 0.12);
+  /* 模态框 / 右键菜单等强遮挡浮层（DESIGN-scale §4 第 3 档）：与 pop 同一暖灰色相，再深一档。
+     现状 2 处蹭 Tailwind `shadow-lg`（WriteConfirm、VaultPage 右键菜单），批 4 换成 shadow-modal */
+  --shadow-modal: 0 16px 48px rgba(61, 57, 47, 0.18), 0 2px 8px rgba(61, 57, 47, 0.08);
 
   /* ===== 动效 ===== */
   --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
