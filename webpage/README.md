@@ -83,6 +83,18 @@ npm run check-costs     # 统计本月 AI 成本
 | `ANTHROPIC_API_KEY` | 否 | V2+ 直连 Anthropic 预留 |
 | `OPENAI_API_KEY` | 否 | V2+ 直连 OpenAI 预留 |
 
+**桌面客户端下发（`/api/v1/client-config`，契约 v2，2026-09-03）**——所有登录用户同一份，桌面端不持任何写死的 base URL：
+
+| 变量名 | 必填 | 缺省 | 说明 |
+|--------|------|------|------|
+| `CLIENT_LLM_API_KEY` | 是 | — | DeepSeek key：投递箱打标 + **标准档**对话（`CLIENT_TIER_STANDARD_API_KEY` 未配时回落到它） |
+| `CLIENT_RELAY_API_KEY` | 是 | — | 中转站 key：**增强档**对话（`CLIENT_TIER_ENHANCED_API_KEY` 未配时回落到它）；老客户端的对话线路 |
+| `CLIENT_TIER_STANDARD_BASE_URL` / `_MODEL` / `_FAST_MODEL` / `_API_KEY` | 否 | `https://api.deepseek.com/anthropic` / `deepseek-v4-pro` / `deepseek-v4-flash` / 回落 `CLIENT_LLM_API_KEY` | 标准档线路 |
+| `CLIENT_TIER_ENHANCED_BASE_URL` / `_MODEL` / `_FAST_MODEL` / `_API_KEY` | 否 | `https://api.inferera.com` / `claude-opus-5` / `claude-opus-5` / 回落 `CLIENT_RELAY_API_KEY` | 增强档线路（限额子 key 随网关单一并做） |
+| `CLIENT_RELAY_BASE_URL` / `CLIENT_LLM_BASE_URL` / `CLIENT_LLM_MODEL` | 否 | `https://api.inferera.com` / `https://api.deepseek.com` / `deepseek-v4-flash` | v1 字段：老客户端 + 打标配置 |
+
+换线路 = 改环境变量 + 重新部署，桌面端**重新登录**即生效，不用发版。
+
 > 本地开发复制 `.env.local.example` 即可。生产环境在 Vercel 项目 Settings → Environment Variables 中配置相同变量名。
 
 ---

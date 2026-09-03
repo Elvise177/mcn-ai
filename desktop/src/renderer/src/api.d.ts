@@ -7,15 +7,20 @@ interface AiTier {
   label: string
   /** 悬停 tooltip：只讲能力与消耗差异 */
   blurb: string
-  /** 以下三项只在管理员区可见可改（运维应急口） */
+  /** 以下三项只在管理员区可见可改（运维应急口）；baseUrl 空串 = 服务端没下发、运维也没填 */
   baseUrl: string
   model: string
   fastModel: string
   keyField: string
+  /** 这一档自己的 key 在不在（没有回落） */
   hasKey: boolean
-  /** 用的是回落来的共享 key（增强档没配独立 key 时复用中转站那把） */
-  usingSharedKey: boolean
-  /** 出厂映射被运维改过 */
+  /** 地址与 key 都齐 */
+  configured: boolean
+  /** 没配齐时的一句人话（「…线路未配置，请联系管理员」） */
+  unavailableReason?: string
+  /** 地址/模型来自服务端下发 */
+  provisioned: boolean
+  /** 服务端下发的值被运维改过 */
   overridden: boolean
 }
 

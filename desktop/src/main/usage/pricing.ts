@@ -153,7 +153,10 @@ export const DEFAULT_PRICING: PricingConfig = {
   usdCny: 7.2,
 }
 
-/** baseUrl → 线路键。`api.inferera.com` 是 aihubmix 的备用域名（§4-17 已查实同一家） */
+/**
+ * baseUrl → 线路键。键名 `aihubmix` 是用量 jsonl 里已落盘的 `route` 值，**不改名**（历史账不能断）；
+ * 它的语义现在是「中转站」：`api.inferera.com` 与 `aihubmix.com` 同一家、同一套价（§4-17 已查实）
+ */
 export function routeOf(baseUrl: string | undefined | null): string {
   const h = String(baseUrl ?? '').toLowerCase()
   if (h.includes('api.deepseek.com')) return 'deepseek'

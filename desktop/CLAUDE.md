@@ -25,8 +25,9 @@ npm run build && node e2e/walkthrough.mjs   # 截图在 e2e/shots/，AI 必须 R
   「投递箱进度条」时已经是 `上云 7/7`，紧接着 reload 断言就因任务已结束而失败）
 - 引擎层改动跑对应 smoke：`smoke-vault.js <vault>`（索引/图谱/检索）、`smoke:agent`（AI 链路打包冒烟）、
   `smoke:provider`（**改模型/线路必跑**：逐条线路跑单轮/多轮 resume/abort/工具调用/流式/make-ppt，
-  并断言服务端实际用的模型就是钉死的那个；需 `SMOKE_INFERERA_KEY` / `SMOKE_DEEPSEEK_KEY` /
-  `SMOKE_AIHUBMIX_KEY`，线路以档位形式配置，见 `src/main/ai/tiers.ts`）
+  并断言服务端实际用的模型就是钉死的那个；需 `SMOKE_DEEPSEEK_KEY`（标准档出厂）/
+  `SMOKE_ENHANCED_KEY`（增强档出厂 = inferera 中转站 + claude-opus-5）/ `SMOKE_INFERERA_KEY`（标准档走中转站，可选），
+  线路以档位形式配置，见 `src/main/ai/tiers.ts`。**增强档单轮 ≈¥7**，最小集也先报预算再跑）
 - 截图里发现的问题先修完再交付，不许把 GUI 验收留给用户
 - **断言不许把"碰巧成立的前提"当成保证**（2026-08-19～21 连栽四次，全是同一个病）：
 

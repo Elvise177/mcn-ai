@@ -46,7 +46,7 @@ import { undoWrite, pruneBackups } from './agent/write-backup'
 
 /** IPC channel 约定：请求-响应走 handle；流式下行用 webContents.send（vault:changed 等） */
 export function registerIpc(): void {
-  // 老用户迁移只跑一次：升级前配好的全局线路搬成"标准档"的映射，行为不变（见 ai/tiers.ts）
+  // 档位迁移只跑一次：v2 清掉 v1 迁移写入的标准档覆盖，线路改跟服务端下发走（见 ai/tiers.ts）
   migrateTiers()
 
   // 注意：这里一律不解密。`hasApiKey` 用密文存在性回答，否则每次打开设置页都可能
@@ -70,8 +70,8 @@ export function registerIpc(): void {
     llmBaseUrl: store.get('llmBaseUrl'),
     hasLlmKey: hasLlmKey(),
     tiers: listTiers(),
-    /** 普通模式的「AI 服务：已就绪 ✓」只看默认档（标准）那把 key 在不在 */
-    aiReady: describeTier('standard').hasKey,
+    /** 普通模式的「AI 服务：已就绪 ✓」= 默认档（标准）地址与 key 都齐 */
+    aiReady: describeTier('standard').configured,
     keyWritePending: isSecretPending(describeTier('standard').keyField),
     apiBaseUrl: store.get('apiBaseUrl'),
     showCost: store.get('showCost'),

@@ -105,6 +105,14 @@ try {
   }
   check('中转站 key 已下发', !!s.hasApiKey)
   check('打标 key 已下发', !!s.hasLlmKey)
+  {
+    // 契约 v2：两档线路随登录下发，客户端不持写死地址
+    const t = (await win.evaluate(() => window.api.ai.tiers())).tiers
+    const std = t.find((x) => x.id === 'standard')
+    const enh = t.find((x) => x.id === 'enhanced')
+    check('标准档已下发且为官方直连', !!std?.configured && std.provisioned && std.baseUrl.startsWith('https://api.deepseek.com'), JSON.stringify(std))
+    check('增强档已下发且为中转站 inferera', !!enh?.configured && enh.provisioned && enh.baseUrl.startsWith('https://api.inferera.com'), JSON.stringify(enh))
+  }
   await snap('60b-新装-登录后')
 
   step('【3】建库向导：新建模板库（A-3 那个 bug 就长在这条路上）')

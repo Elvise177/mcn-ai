@@ -755,8 +755,9 @@ function RoutesSection() {
 /**
  * 管理员区里的单个档位映射。
  *
- * 定位是**运维应急**：换模型串、临时把某一档切到备用线路（如 inferera）。
+ * 定位是**运维应急**：换模型串、临时把某一档切到别的线路。
  * 界面上的两档语义不变——改的是"这一档走哪条线"，不是"这一档是什么档"。
+ * 地址/模型的常态来源是**服务端下发**（登录时拉），这里填了值才覆盖；清空 = 回到下发值。
  */
 function TierConfigRow({ tier, onChanged }: { tier: AiTier; onChanged: () => void }) {
   const [draft, setDraft] = useState({ baseUrl: tier.baseUrl, model: tier.model, fastModel: tier.fastModel })
@@ -782,7 +783,7 @@ function TierConfigRow({ tier, onChanged }: { tier: AiTier; onChanged: () => voi
         value={draft[key]}
         onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
         onBlur={() => void saveConfig()}
-        placeholder={key === 'baseUrl' ? 'https://…' : ''}
+        placeholder={key === 'baseUrl' ? '（等待服务端下发；填了值即覆盖）' : ''}
         className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
       />
     </div>
@@ -792,18 +793,25 @@ function TierConfigRow({ tier, onChanged }: { tier: AiTier; onChanged: () => voi
     <div data-testid={`tier-config-${tier.id}`} className="space-y-2 rounded-lg bg-bg p-4">
       <div className="flex items-center gap-2">
         <span className="text-base font-medium">{tier.label}</span>
-        {tier.usingSharedKey ? (
-          // 回落态要说清楚：这一档用的是中转站那把共享 key，不是它自己的
-          <span className="text-xs text-muted" data-testid={`tier-shared-key-${tier.id}`}>
-            复用中转站密钥
-          </span>
-        ) : tier.hasKey ? (
+        {tier.hasKey ? (
           <span className="text-xs text-muted">key 已配置</span>
         ) : (
           <span className="text-xs text-warn">未配置 key</span>
         )}
+        {!tier.baseUrl && (
+          <span className="text-xs text-warn" data-testid={`tier-no-route-${tier.id}`}>
+            未下发线路
+          </span>
+        )}
+        {tier.provisioned && <span className="text-xs text-muted">服务端下发</span>}
         {tier.overridden && <span className="text-xs text-muted">已被运维改过</span>}
       </div>
+      {!tier.configured && (
+        // 没配齐就把用户在选择器/发送时会看到的那句话原样摆在这：两处说法必须一致
+        <div className="text-sm text-warn" data-testid={`tier-unconfigured-${tier.id}`}>
+          {tier.unavailableReason}
+        </div>
+      )}
       {field('base URL', 'baseUrl')}
       {field('主模型', 'model')}
       {field('轻量模型', 'fastModel')}
@@ -947,7 +955,8 @@ function PricingRow({ tiers }: { tiers: AiTier[] }) {
   if (!p) return null
   const ROUTE_ZH: Record<string, string> = {
     deepseek: 'DeepSeek 官方',
-    aihubmix: 'aihubmix 中转站',
+    // 键名 `aihubmix` 是用量 jsonl 里已落盘的 route 值，不改（历史用量账不能断）；只改标签
+    aihubmix: '中转站',
     custom: '自定义线路',
   }
   return (

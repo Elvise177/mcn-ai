@@ -4,7 +4,7 @@ import { log } from '../lib/logger'
 /**
  * 档位线路的可用性探测。
  *
- * 为什么要有：增强档走的是外部中转线路，它挂掉的时候用户看到的是"发出去没反应"，
+ * 为什么要有：线路挂掉的时候用户看到的是"发出去没反应"，
  * 而真正该发生的是**选择器里那一档直接置灰**，根本不让人踩进去。
  *
  * 三条约束：
@@ -13,7 +13,12 @@ import { log } from '../lib/logger'
  *  2. **探测必须便宜**：`max_tokens: 1` 的一次 messages 请求，几乎不产生输出 token，
  *     但能同时验到「地址通不通 / key 认不认 / 模型名收不收」三件事——
  *     只 ping 根路径的话，key 过期这种最常见的失效形态压根测不出来。
- *  3. **没 key 不发请求**：直接判不可用，省一次往返（绝大多数机器的增强档就是这个状态）。
+ *  3. **没配齐不发请求**：地址或 key 缺一个都直接判不可用，原因就是「线路未配置，请联系管理员」。
+ *
+ * **两档同一口径（2026-09-03）**：标准档也真探。此前"标准档只看有没有 key"，
+ * 是因为它挂了没有另一档可退；现在线路是服务端下发的，管理员区「检测线路」
+ * 是开账号检查清单里的一步，两档都要给出真实结论。选择器仍只问增强档（标准档不置灰），
+ * 所以日常路径上的请求数不变。
  */
 
 export interface TierHealth {
@@ -35,7 +40,10 @@ const inflight = new Map<TierId, Promise<TierHealth>>()
 
 /**
  * 走查专用开关（生产不读，判据同 HANDOFF §4-22）：造"线路探测失败"需要真的把
- * aihubmix 打挂或断网，走查里做不到。`down` = 强制不可用，`up` = 强制可用（跳过真实请求）。
+ * 中转站打挂或断网，走查里做不到。`down` = 强制不可用，`up` = 强制可用（跳过真实请求）。
+ * **开关优先于一切，包括配没配齐**：走查主实例没有增强档 key，却要靠 `up` 把选择器打开，
+ * 验"能选、能记住、失败有出口"（发送仍会被主进程预检拦下——预检不看这个开关）。
+ * "没配齐 → 置灰 + 明示"那条分支由 45e 的独立实例（不给开关）单独验。
  */
 function e2eOverride(): 'up' | 'down' | null {
   const v = process.env.MCNAI_E2E_TIER_HEALTH
@@ -56,11 +64,10 @@ async function probe(tier: TierId): Promise<TierHealth> {
   }
 
   const t = describeTier(tier)
-  if (!t.baseUrl) return { tier, ok: false, reason: '未配置线路地址', checkedAt: now, cached: false }
-  if (!t.hasKey) return { tier, ok: false, reason: '这条线路还没配置密钥', checkedAt: now, cached: false }
+  if (!t.configured) return { tier, ok: false, reason: t.unavailableReason, checkedAt: now, cached: false }
 
   const { apiKey, baseUrl, model } = resolveTierForRequest(tier)
-  if (!apiKey) return { tier, ok: false, reason: '这条线路还没配置密钥', checkedAt: now, cached: false }
+  if (!apiKey) return { tier, ok: false, reason: t.unavailableReason, checkedAt: now, cached: false }
 
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), PROBE_TIMEOUT_MS)
@@ -84,34 +91,21 @@ async function probe(tier: TierId): Promise<TierHealth> {
         : res.status === 429
           ? '线路繁忙，请稍后再试'
           : `线路返回 ${res.status}`
-    log('warn', 'ai-health', `${tier} 探测失败：${reason}`)
+    log('warn', 'ai-health', `${tier} 探测失败：${reason}（${baseUrl}）`)
     return { tier, ok: false, reason, checkedAt: Date.now(), cached: false }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     const reason = ctl.signal.aborted ? '线路响应超时' : '连不上这条线路'
-    log('warn', 'ai-health', `${tier} 探测失败：${reason}（${msg}）`)
+    log('warn', 'ai-health', `${tier} 探测失败：${reason}（${baseUrl}：${msg}）`)
     return { tier, ok: false, reason, checkedAt: Date.now(), cached: false }
   } finally {
     clearTimeout(timer)
   }
 }
 
-/** 取某一档的可用性。默认吃 5 分钟缓存；`force` 只给管理员区的「重新检测」用 */
+/** 取某一档的可用性。默认吃 5 分钟缓存；`force` 只给管理员区的「检测线路」用 */
 export async function tierHealth(id: TierId, force = false): Promise<TierHealth> {
   const tier = normalizeTier(id)
-  // 标准档是兜底线路，不做主动探测：它挂了也没有"另一档"可退，
-  // 探测只会在每次开应用时多一次请求，换不来任何一个能点的按钮
-  if (tier === 'standard') {
-    const t = describeTier(tier)
-    return {
-      tier,
-      ok: t.hasKey && !!t.baseUrl,
-      reason: t.hasKey ? undefined : '这条线路还没配置密钥',
-      checkedAt: Date.now(),
-      cached: false,
-    }
-  }
-
   const hit = cache.get(tier)
   if (!force && hit && Date.now() - hit.checkedAt < CACHE_MS) return { ...hit, cached: true }
 
@@ -128,7 +122,7 @@ export async function tierHealth(id: TierId, force = false): Promise<TierHealth>
   return p
 }
 
-/** 配置一变（改了地址/模型/key）缓存立刻作废，否则用户改完还要等 5 分钟才看到效果 */
+/** 配置一变（改了地址/模型/key/服务端下发）缓存立刻作废，否则用户改完还要等 5 分钟才看到效果 */
 export function invalidateTierHealth(id?: TierId): void {
   if (id) cache.delete(normalizeTier(id))
   else cache.clear()

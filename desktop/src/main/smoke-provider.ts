@@ -4,15 +4,15 @@
  * 覆盖：单轮对话 / 多轮 resume / abort / 工具调用(search_knowledge) / 流式输出 / make-ppt 全流程
  *
  * 线路以**档位**的形式配置（档位层是对话链路的唯一取数口，见 ai/tiers.ts）：
- * inferera / deepseek / custom 三条落在标准档，aihubmix 落在增强档。
+ * deepseek（出厂）/ inferera / custom 三条落在标准档，enhanced（inferera + claude-opus-5，出厂）落在增强档。
  *
  * 运行（在 desktop/ 下）：
  *   npm run smoke:provider
  * 等价于：
  *   npm run build && SMOKE_VAULT=/tmp/mcnai-e2e-vault \
- *   SMOKE_INFERERA_KEY=<中转站key> SMOKE_DEEPSEEK_KEY=<deepseek key> \
+ *   SMOKE_DEEPSEEK_KEY=<deepseek key> SMOKE_ENHANCED_KEY=<中转站key> \
  *   ./node_modules/.bin/electron out/main/smoke-provider.js
- * 只想跑一条：加 SMOKE_ONLY=deepseek（或 inferera / custom / aihubmix）
+ * 只想跑一条：加 SMOKE_ONLY=deepseek（或 enhanced / inferera / custom）
  * 只想跑几项：SMOKE_CASES=single,abort,tools（可选 single/resume/abort/tools/ppt/env）
  *   —— **控制真实调用成本**用的：新增线路只需要验"能不能通、模型有没有被换掉、
  *      能不能停、工具能不能调"，没改动的链路靠既有基线，不为仪式感跑全套
@@ -87,14 +87,14 @@ function cases(): Case[] {
       fastModel: process.env.SMOKE_FAST_MODEL || 'deepseek-v4-flash',
     })
   }
-  if (process.env.SMOKE_AIHUBMIX_KEY) {
+  if (process.env.SMOKE_ENHANCED_KEY) {
     all.push({
-      id: 'aihubmix',
-      label: 'aihubmix（增强档出厂映射）',
+      id: 'enhanced',
+      label: '增强档（inferera 中转站 + claude-opus-5，出厂映射）',
       tier: 'enhanced',
       field: 'encryptedAihubmixKey',
-      baseUrl: process.env.SMOKE_AIHUBMIX_BASE || 'https://aihubmix.com',
-      key: process.env.SMOKE_AIHUBMIX_KEY,
+      baseUrl: process.env.SMOKE_ENHANCED_BASE || 'https://api.inferera.com',
+      key: process.env.SMOKE_ENHANCED_KEY,
       // 增强档的模型串是钉死的：这条断言（result.modelUsage 必须原样返回它）
       // 就是"真路由到 opus 而不是被中转站换成别的"的唯一证据
       model: process.env.SMOKE_ENHANCED_MODEL || 'claude-opus-5',
@@ -294,7 +294,7 @@ async function main(): Promise<void> {
   const list = cases()
   if (!list.length) {
     console.error(
-      'SMOKE FAIL: 一条线路的 key 都没给（SMOKE_INFERERA_KEY / SMOKE_DEEPSEEK_KEY / SMOKE_AIHUBMIX_KEY / SMOKE_CUSTOM_KEY）'
+      'SMOKE FAIL: 一条线路的 key 都没给（SMOKE_DEEPSEEK_KEY / SMOKE_ENHANCED_KEY / SMOKE_INFERERA_KEY / SMOKE_CUSTOM_KEY）'
     )
     app.exit(1)
     return

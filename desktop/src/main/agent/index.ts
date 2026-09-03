@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { app, type BrowserWindow } from 'electron'
 import { z } from 'zod'
 import { agentEnv } from '../ai/provider'
-import { resolveTierForRequest, normalizeTier, DEFAULT_TIER, type TierId } from '../ai/tiers'
+import { resolveTierForRequest, normalizeTier, unconfiguredReason, DEFAULT_TIER, type TierId } from '../ai/tiers'
 import { appendUsage, tokensOf, type UsageTaskType } from '../usage'
 import { routeOf } from '../usage/pricing'
 import { vaultManager } from '../vault'
@@ -403,9 +403,9 @@ export class AgentManager {
     const root = vaultManager.currentRoot
     if (!root) return bail('请先在「个人知识库」打开一个库')
     // 档位层给出地址/模型/key：模型显式指定，绝不依赖端点的自动映射（见 ai/tiers.ts）
+    // 地址或 key 缺一个都不发：文案对客户只说"找管理员"（线路是服务端下发的，用户自己填不了）
     const provider = resolveTierForRequest(tier)
-    if (!provider.apiKey) return bail(`「${provider.label}」线路还没配置密钥，请联系管理员`)
-    if (!provider.baseUrl) return bail(`「${provider.label}」线路还没配置地址，请联系管理员`)
+    if (!provider.apiKey || !provider.baseUrl) return bail(unconfiguredReason(provider.label))
 
     // 这一轮真的调过哪些工具 → 决定用量记录里的任务类型（做 PPT / 做文档 / 纯对话）
     const toolsUsed = new Set<string>()

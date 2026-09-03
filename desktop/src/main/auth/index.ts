@@ -6,6 +6,8 @@ import Store from 'electron-store'
 import { tasks } from '../tasks/registry'
 import { clearSyncQueue, getSyncQueue } from '../tasks/persist'
 import { SecretVault, type SecretBackend } from '../secrets'
+import { log } from '../lib/logger'
+import type { TierProvision } from '../ai/tiers'
 
 /** Supabase 公开配置（anon key 设计上可公开，RLS 才是安全边界）；从 webpage 同项目取。
     MCNAI_SUPABASE_URL 只给 e2e 用：把它指到黑洞地址才能验"云端不可达"那条登录分支（M-01） */
@@ -167,7 +169,8 @@ function notifyProvisionFailed(msg: string): void {
 export async function provisionKeys(): Promise<ProvisionResult> {
   try {
     const { store, setApiKey, setLlmKey, setSecretLater, hasApiKey, hasLlmKey } = await import('../store')
-    const { ensureStandardUsable } = await import('../ai/tiers')
+    const { setTierProvision, describeTier, TIER_IDS, shortLabel } = await import('../ai/tiers')
+    const { invalidateTierHealth } = await import('../ai/health')
     const token = await getAccessToken()
     if (!token) return { ok: false, error: '未登录，无法获取服务端配置' }
     const res = await fetch(`${store.get('apiBaseUrl')}/api/v1/client-config`, {
@@ -179,13 +182,15 @@ export async function provisionKeys(): Promise<ProvisionResult> {
       return { ok: false, error: msg }
     }
     const cfg = (await res.json()) as {
+      contractVersion?: number
+      /** v1 字段：relay* 是中转站（老客户端的对话线路），llm* 是投递箱打标配置（与档位无关，继续认） */
       relayBaseUrl?: string
       relayApiKey?: string | null
       llmBaseUrl?: string
       llmModel?: string
       llmApiKey?: string | null
-      /** 增强档（aihubmix）的 key；服务端还没下发时就是 undefined，管理员区可手填 */
-      aihubmixApiKey?: string | null
+      /** v2（2026-09-03）：档位线路按档下发；客户端不持任何写死的 base URL */
+      tiers?: Partial<Record<'standard' | 'enhanced', Partial<TierProvision> & { apiKey?: string | null }>>
     }
     // 写前判重在 setApiKey 内部（指纹比对，零 Keychain 触碰）：老用户每次启动都会走到这里，
     // 值没变就一次都不写——M-29 的"登录/启动冻几十秒"绝大多数就是这条路径重复写同一把 key
@@ -199,14 +204,37 @@ export async function provisionKeys(): Promise<ProvisionResult> {
       if (cfg.llmBaseUrl) store.set('llmBaseUrl', cfg.llmBaseUrl)
       if (cfg.llmModel) store.set('llmModel', cfg.llmModel)
     }
-    // 增强档的 key 走同一条 safeStorage + M-29 判重路径（服务端没下发就跳过，不报错）
-    if (cfg.aihubmixApiKey) {
-      if (setSecretLater('encryptedAihubmixKey', cfg.aihubmixApiKey) !== 'unchanged') wrote.push('aihubmixApiKey')
+    // ---- 契约 v2：档位线路 + 每档自己的 key ----
+    if (!cfg.tiers) {
+      // 服务端还是 v1：不猜线路（猜就是把写死的地址搬回客户端），明说
+      const msg = '服务端配置版本过旧，未下发对话线路，请联系管理员升级服务端'
+      notifyProvisionFailed(msg)
+      return { ok: false, error: msg }
     }
-    // 标准档没有可用 key、而中转站那把在 → 把标准档指过去（会打日志，不是静默兜底）
-    ensureStandardUsable()
+    setTierProvision({
+      standard: cfg.tiers.standard?.baseUrl ? (cfg.tiers.standard as TierProvision) : undefined,
+      enhanced: cfg.tiers.enhanced?.baseUrl ? (cfg.tiers.enhanced as TierProvision) : undefined,
+    })
+    invalidateTierHealth() // 线路可能刚换，5 分钟缓存作废
+    // 每档的 key 写进这一档自己的槽位（标准档 = encryptedLlmKey，与打标共用一把 DeepSeek key；
+    // 用户手填过标准档 key 的不覆盖——上面 llmApiKey 那段已经按 manualLlmKey 处理过同一把）
+    for (const id of TIER_IDS) {
+      const k = cfg.tiers[id]?.apiKey
+      if (!k) continue
+      const field = describeTier(id).keyField
+      if (field === 'encryptedLlmKey' && store.get('manualLlmKey') && hasLlmKey()) continue
+      if (setSecretLater(field, k) !== 'unchanged') wrote.push(`tier:${id}`)
+    }
+    // 没配齐的档位明示（不静默）：标准档缺 = 整个对话不可用，报错；只缺增强档 = 提示但不算失败
+    const missing = TIER_IDS.map((id) => describeTier(id)).filter((t) => !t.configured)
+    if (missing.some((t) => t.id === 'standard')) {
+      const msg = missing.map((t) => `${shortLabel(t.label)}线路未配置`).join('、') + '，请联系管理员'
+      notifyProvisionFailed(msg)
+      return { ok: false, error: msg }
+    }
+    if (missing.length) log('warn', 'auth', `服务端下发后仍有档位未配齐：${missing.map((t) => shortLabel(t.label)).join('、')}`)
     if (!hasApiKey() && !hasLlmKey()) {
-      const msg = '服务端未下发 AI Key，请在设置页手动填写'
+      const msg = '服务端未下发 AI Key，请联系管理员'
       notifyProvisionFailed(msg)
       return { ok: false, error: msg }
     }

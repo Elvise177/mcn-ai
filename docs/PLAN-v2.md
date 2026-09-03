@@ -158,6 +158,8 @@
 
 走查影响：F4 每条一张截图（约 7 张）；F3 需 E2E_CHAT 登录态造一次上云失败（404 前缀法，同 51 步），≈ ¥0.5；F1 用 `MCNAI_E2E_THROW=1` 造渲染异常。
 
+**并入批 2 的挂账（2026-09-03，来自档位线路契约 v2 那单，HANDOFF §0-新f）**：`smoke:provider` 跑完汇总后 `app.exit()` 不退出，进程挂 11 分钟（标准档 3/3 早已通过）。疑与 Electron 43 的 `before-quit`/chokidar watcher 同源；修法二选一：汇总后先 `vaultManager.close()`/`agentManager.abortAll()` 再 exit，或加 30s 硬超时 `process.exit`。零真实调用可验（`SMOKE_CASES=env` 只跑环境隔离那项）。
+
 ### 批 3 · 高频功能补齐（4 天）
 
 | 项 | 做法 |

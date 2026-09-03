@@ -93,6 +93,18 @@ try {
   console.log(s.hasApiKey ? '✅ 中转站 key 已自动下发（Keychain）' : '❌ 中转站 key 未下发')
   console.log(s.hasLlmKey ? '✅ DeepSeek key 已自动下发' : '❌ DeepSeek key 未下发')
   if (!s.hasApiKey) await fail('key 未下发')
+  // 契约 v2（2026-09-03）：两档线路也是下发的，客户端不持写死地址。标准档 = 官方直连、增强档 = 中转站
+  {
+    const t = (await win.evaluate(() => window.api.ai.tiers())).tiers
+    const std = t.find((x) => x.id === 'standard')
+    const enh = t.find((x) => x.id === 'enhanced')
+    const bad = []
+    if (!std?.configured || !std.provisioned || !std.baseUrl.startsWith('https://api.deepseek.com')) bad.push(`标准档 ${JSON.stringify(std)}`)
+    if (!enh?.configured || !enh.provisioned || !enh.baseUrl.startsWith('https://api.inferera.com')) bad.push(`增强档 ${JSON.stringify(enh)}`)
+    if (/aihubmix/i.test(std?.baseUrl + enh?.baseUrl)) bad.push('线路里仍有 aihubmix')
+    if (bad.length) await fail('服务端下发的档位线路不对：' + bad.join('；'))
+    console.log(`✅ 两档线路已下发：标准 ${std.baseUrl} / ${std.model}，增强 ${enh.baseUrl} / ${enh.model}`)
+  }
   await win.screenshot({ path: join(shots, '11-登录即用-key就绪.png') })
 
   // 3. 零配置直接对话（用下发的 key 走真实模型；对话页即首页无需切换）

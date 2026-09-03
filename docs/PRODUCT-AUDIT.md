@@ -89,7 +89,7 @@
 | a10 | 经营数据落位路径由服务端下发、persona feature 门控，桌面端无从校验 | `bizdata.ts:19,31-33`、`ipc.ts:372` | 用户/运维 | 加成本（跨仓库） | 中 |
 | a11 | embedding 模型与 1536 维写死在迁移与常量里，换模型=全量重灌 | `010:59`、`012:12`、`embeddings.ts:12-13` | 运维 | 不挡（但成本恒高，团队版数据量放大后更贵） | 大 |
 | a12 | 云端 layers `['platform','org','private']` 桌面端只写 private；org 层 schema 就绪、写入链路空 | `search/route.ts:32`、`ingest/route.ts:47` | — | 不挡 · **大**（org 层是团队版主战场） · 不挡 | 中 |
-| a13 | client-config 契约漂移：客户端读 `aihubmixApiKey`，服务端从不返回；注释写「低配额子 key」实际是主 key | `auth/index.ts:188,203` vs `client-config/route.ts:16-22,8` | 运维 | 加成本（网关会重写） | 小 |
+| a13 | ~~client-config 契约漂移：客户端读 `aihubmixApiKey`，服务端从不返回；注释写「低配额子 key」实际是主 key~~ ✅ **2026-09-03 已修**：契约 v2 按档位下发 `tiers.standard/enhanced`（含 key），死字段删除；「低配额子 key」记进网关单 | `auth/index.ts` / `client-config/route.ts` | 运维 | — | — |
 | a14 | 文档漂移：`updater.ts:23` 与 HANDOFF §0 待办 #7 仍写占位 `.invalid`，而 `electron-builder.yml:72` 已是真实 OSS 地址，判据恒假 | 同左 | 开发（误导接手人） | 不挡 | 小（改文档） |
 
 **已收口、不再是债的**（复查确认）：`layout.json` 5 处读取（taxonomy 收口）、`apiBaseUrl`（store 单一真相）、版本号（`app.getVersion()`）、Supabase URL/anon key 三级来源、组件层颜色字面量（实测 0 处）。

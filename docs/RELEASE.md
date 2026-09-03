@@ -120,8 +120,8 @@ cd desktop && MCNAI_APP_BIN="$PWD/release/mac-arm64/mcn-ai.app/Contents/MacOS/mc
 - **Supabase 未被暂停**：免费版闲置 7 天自动暂停，暂停后域名 NXDOMAIN。
   `curl -sI --max-time 8 https://yqozqfrmdddmfrpavrsn.supabase.co | head -1`
   能回状态行就是醒着的（根路径 404 属正常）
-- **aihubmix 余额**：这把 key 同时供着网页版的向量与聊天，打穿 = 桌面版 + 网页版一起挂，
-  而第一个感知渠道是客户报障（HANDOFF §3-6）。发版前查一次
+- **中转站余额**（`CLIENT_RELAY_API_KEY`，第一版也是增强档的 key）：这把 key 同时供着网页版的向量与聊天，
+  打穿 = 桌面版 + 网页版一起挂，而第一个感知渠道是客户报障（HANDOFF §3-6）。发版前查一次
 - **XProtect 预检**：✅ **2026-08-19 已做**（规则 v5356 / yara 4.5.8）——整包 452 个文件
   （含 PyInstaller 那 146 个）与 dmg 本身**零命中**。跑法：
 
@@ -135,6 +135,43 @@ cd desktop && MCNAI_APP_BIN="$PWD/release/mac-arm64/mcn-ai.app/Contents/MacOS/mc
   但 PyInstaller 那 89MB 仍是杀软最爱误报的一类，别省这一步
 - **老 macOS / Intel 仍未验**：全部验证跑在本机 **macOS 15.7.3 / arm64**。
   **只出 arm64——Intel Mac 装不了**。更旧的 macOS 版本没有实机验过
+
+## 1b. 开账号检查清单（2026-09-03 起，每个新账号 / 每台新装机照做）
+
+**背景**：Jerry 机器上增强档打到了代码里写死的老域名（HANDOFF §0-新f）。契约 v2 起线路全部由服务端下发、
+客户端不持写死地址，所以"账号能不能用"完全取决于服务端这一份配置 + 客户端有没有拉到。
+服务端配置对所有账号相同（没有按账号的配置），下面的核对**每个账号建完都要做一遍**，
+因为要核的是"这台机器拉到了没有"。
+
+**第一步：服务端（Vercel → Settings → Environment Variables，改一次全员生效）**
+
+| 档 | 线路（base URL） | 模型 / 轻量模型 | key |
+|---|---|---|---|
+| 标准 | `CLIENT_TIER_STANDARD_BASE_URL`，缺省 `https://api.deepseek.com/anthropic` | `deepseek-v4-pro` / `deepseek-v4-flash` | `CLIENT_TIER_STANDARD_API_KEY`，缺省回落 `CLIENT_LLM_API_KEY` |
+| 增强 | `CLIENT_TIER_ENHANCED_BASE_URL`，缺省 `https://api.inferera.com` | `claude-opus-5` / `claude-opus-5` | `CLIENT_TIER_ENHANCED_API_KEY`，缺省回落 `CLIENT_RELAY_API_KEY` |
+
+缺省值写在 `webpage/app/api/v1/client-config/route.ts`；**任何一档不许出现 aihubmix.com**。
+改过变量要重新部署，之后客户端**重新登录**即生效，不用发版。
+
+**第二步：客户端（对方机器上，登录之后）**
+
+1. 设置页 → 版本号点 7 次进管理员区 → 「模型档位」两张卡片，逐档核对三项：
+
+   | 核对项 | 标准档应为 | 增强档应为 |
+   |---|---|---|
+   | 线路 | `https://api.deepseek.com/anthropic`，标「服务端下发」 | `https://api.inferera.com`，标「服务端下发」 |
+   | 模型 / 轻量模型 | `deepseek-v4-pro` / `deepseek-v4-flash` | `claude-opus-5` / `claude-opus-5` |
+   | key | 「key 已配置」 | 「key 已配置」 |
+
+   看到「未下发线路」或「…线路未配置，请联系管理员」= 这台机器没拉到配置：先点普通模式「模型服务」卡片的
+   「重新连接」（= 重新拉 client-config），仍不行就退出重新登录，再不行查服务端变量。
+   看到「已被运维改过」= 这台机器上有人手填过覆盖，**覆盖优先于下发**，确认是不是故意的。
+2. **两档各点一次「检测线路」**，都要落「线路可用 ✓」。它是一次 `max_tokens:1` 的真实请求，
+   能同时验地址通不通 / key 认不认 / 模型名收不收；「密钥无效」= key 错，「连不上」= 对方网络到这个域名不通
+   （Jerry 那次就是这一种，换域名解决）。
+3. 回到对话页，档位选择器里「增强」**不置灰**，新建对话发一句"你好"（标准档，≈¥0.01）看到回答即通过。
+
+**第三步：记录**——在 HANDOFF 的装机记录里写下账号、日期、两档检测结果。
 
 ## 2. 名字已统一为 SamePage（2026-08-19，推翻同日「维持 mcn-ai」那条裁决）
 

@@ -113,14 +113,25 @@ try {
   const loginGate = await win.locator('input[placeholder="邮箱"]').count()
   check('没有被踢回登录门', loginGate === 0)
 
-  console.log('\n【6】tierMigrated=true 的机器不再二次迁移')
+  console.log('\n【6】档位迁移 v2（2026-09-03）：v1 写入的标准档覆盖被清、线路改跟服务端下发走')
   const tiers = await win.evaluate(() => window.api.ai.tiers()) // → { tiers: [...] }
   const std = tiers.tiers.find((t) => t.id === 'standard')
-  check('标准档映射原样保留（没被出厂映射覆盖）',
-    std?.baseUrl === expect.tierOverrides?.standard?.baseUrl,
-    `期望 ${expect.tierOverrides?.standard?.baseUrl} 实得 ${std?.baseUrl}`)
-  check('config 里的 tierOverrides 没被改写',
-    JSON.stringify(after.tierOverrides) === JSON.stringify(expect.tierOverrides))
+  const enh = tiers.tiers.find((t) => t.id === 'enhanced')
+  // v1 迁移写出来的形态：中转站 + encryptedApiKey 四字段。真实 userData 里是这个形态就该被清；
+  // 不是（管理员手改过）就该原样保留——两种合法状态都断言，不许 try/catch 一裹
+  const beforeStd = expect.tierOverrides?.standard
+  const looksV1 = !!beforeStd && beforeStd.keyField === 'encryptedApiKey' && /inferera|aihubmix/.test(beforeStd.baseUrl ?? '')
+  check('tierMigrated2 已落盘', after.tierMigrated2 === true, `实得 ${after.tierMigrated2}`)
+  if (looksV1) {
+    check('v1 迁移写入的标准档覆盖已清', !after.tierOverrides?.standard, JSON.stringify(after.tierOverrides?.standard))
+    check('标准档不再是运维覆盖', !std?.overridden, JSON.stringify(std))
+  } else {
+    check('非 v1 形态的覆盖原样保留', JSON.stringify(after.tierOverrides?.standard) === JSON.stringify(beforeStd))
+  }
+  // 登录态机器启动会拉一次 client-config：两档线路应已下发（服务端未部署契约 v2 时这里会红，红得对）
+  check('标准档线路已由服务端下发（官方直连）', !!std?.provisioned && std.baseUrl.startsWith('https://api.deepseek.com'), JSON.stringify(std))
+  check('增强档线路已由服务端下发（中转站 inferera）', !!enh?.provisioned && enh.baseUrl.startsWith('https://api.inferera.com'), JSON.stringify(enh))
+  check('没有任何 aihubmix 地址', !/aihubmix/i.test(String(std?.baseUrl) + String(enh?.baseUrl)))
 
   console.log('\n【7】计价存档不倒退')
   check(`pricing.rev 不小于升级前（${expect.pricing?.rev}）`,

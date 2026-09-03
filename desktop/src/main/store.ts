@@ -2,7 +2,7 @@ import './env-hooks'
 import Store from 'electron-store'
 import { SecretVault, type SecretBackend, type WriteOutcome } from './secrets'
 import type { ProviderId } from './ai/provider'
-import type { TierId, TierOverride } from './ai/tiers'
+import type { TierId, TierOverride, TierProvision } from './ai/tiers'
 import type { PricingConfig } from './usage/pricing'
 
 interface StoreSchema {
@@ -21,7 +21,7 @@ interface StoreSchema {
   encryptedLlmKey?: string
   /** 自定义 provider（Kimi/智谱等）的 key */
   encryptedCustomKey?: string
-  /** 增强档（aihubmix 线路）的 key，与其他线路同一套 safeStorage + M-29 判重 */
+  /** 增强档的 key（槽位名沿用历史值，不改——改名要动 safeStorage 里已落盘的密文），与其他线路同一套 safeStorage + M-29 判重 */
   encryptedAihubmixKey?: string
   /** 对话链路用哪个 provider（模型层解耦，见 ai/provider.ts）。
       档位层上线后它只剩迁移期的历史配置读口，对话链路已改走 ai/tiers.ts */
@@ -30,8 +30,15 @@ interface StoreSchema {
   aiOverrides: Partial<Record<ProviderId, { baseUrl?: string; model?: string; fastModel?: string }>>
   /** 档位 → 线路映射的运维覆盖（管理员区可改，界面两档语义不变，见 ai/tiers.ts） */
   tierOverrides: Partial<Record<TierId, TierOverride>>
-  /** 老用户迁移只跑一次：把升级前生效的全局线路搬成标准档映射 */
+  /**
+   * 服务端下发的档位线路（client-config 契约 v2，见 ai/tiers.ts）。
+   * **客户端不持任何写死的 base URL**：这里为空 = 线路未配置，界面明示、不静默回落
+   */
+  tierProvision?: Partial<Record<TierId, TierProvision>>
+  /** 老用户迁移 v1（2026-08-17）只跑一次：把升级前生效的全局线路搬成标准档映射 */
   tierMigrated?: boolean
+  /** 迁移 v2（2026-09-03）只跑一次：清掉 v1 迁移写入的那份标准档覆盖，管理员手改的保留 */
+  tierMigrated2?: boolean
   /** 用量计价（各档美元单价 + 汇率）：运维配置，管理员区可改。
       `usage/pricing.ts` 的 getPricing() 会把默认值补齐落盘，
       scripts/usage-report.mjs 直接读这一份，避免单价两处维护 */

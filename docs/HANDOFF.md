@@ -6,6 +6,68 @@
 
 ---
 
+## 0-新f. 档位线路跟服务端走（client-config 契约 v2，2026-09-03，未发版，随下一版出）
+
+**起因**：Jerry 机器日志 `「增强」未配独立密钥，回落到共享密钥 encryptedApiKey（https://aihubmix.com）`。
+查实：**不是配置问题**——`client-config` 从不下发增强档任何字段（PRODUCT-AUDIT a13），所有机器的增强档都长这样
+（我本机同一行 08-21 起 5 次）；地址是 `tiers.ts` 写死的 `aihubmix.com`、key 是服务端下发的中转站那把，
+客户机上 aihubmix.com 走不通。本机实测中转站 key 打 `aihubmix.com` 与 `api.inferera.com` 都 200 且 model 原样回
+`claude-opus-5`，"走不通"是客户机网络侧的现象。用户拍板：**出厂 = 备用域名 inferera，aihubmix 从所有默认值/兜底/断言清除**。
+
+### 拍板（四条）
+
+1. 用量线路键 `aihubmix` **保留键名**（jsonl 已落盘的 `route` 值，历史账不能断），只把界面标签改成「中转站」。
+2. 迁移覆盖清理**只清 v1 迁移写入的那份**（四字段形态与 `describeProvider()` 逐一相等，或线路自愈的两字段形态），管理员手改的保留——大头那台靠它。
+3. Vercel 变量：列出名与值（key 占位），**改前先读出当前生产值存档**，没有改前值不许改。
+4. 增强档 key 第一版复用中转站那把（服务端回落 `CLIENT_RELAY_API_KEY`），限额子 key 记进网关单一并做。
+
+### 契约 v2（`webpage/app/api/v1/client-config/route.ts`）
+
+- 新增 `contractVersion: 2` 与 `tiers.standard / tiers.enhanced`，各含 `baseUrl / model / fastModel / apiKey`，
+  值来自 `CLIENT_TIER_<STANDARD|ENHANCED>_<BASE_URL|MODEL|FAST_MODEL|API_KEY>`，缺省写在路由里
+  （标准 = `https://api.deepseek.com/anthropic` + `deepseek-v4-pro/flash`，回落 `CLIENT_LLM_API_KEY`；
+  增强 = `https://api.inferera.com` + `claude-opus-5`，回落 `CLIENT_RELAY_API_KEY`）。**所有登录用户同一份，没有按账号的配置。**
+- **v1 字段保留**（`relayBaseUrl/relayApiKey/llmBaseUrl/llmModel/llmApiKey`）：0.1.2 及更早客户端只认这几个；`llm*` 三项此外仍是投递箱打标配置。
+  **废弃时机**：用户本人 / 大头 / Jerry 三台都升到含契约 v2 的版本之后，再删 `relay*` 两项（`llm*` 因打标继续保留）。
+- **部署顺序**：先部署 webpage，再发桌面版。新客户端遇到 v1 服务端会明示「服务端配置版本过旧，未下发对话线路」，不猜线路。
+
+### 客户端（`desktop/src/main/ai/tiers.ts` 重写）
+
+- `TIER_PRESETS` **没有 base URL**；地址 = `tierOverrides`（运维覆盖）> `tierProvision`（服务端下发）> 空。模型串留语义兜底，下发的优先。
+- `ResolvedTier` 新增 `configured / unavailableReason / provisioned`，删 `usingSharedKey`；`FALLBACK_KEY_FIELD`、`ensureStandardUsable` 整段删除——每档只认自己那把 key，**没有任何回落**。
+- 未配齐的统一文案 `unconfiguredReason()`：「增强线路未配置，请联系管理员」——发送预检、探测原因、选择器说明栏、管理员区四处同一句（走查 45e 逐处断言一致）。
+- 迁移 v2（`migrateTiersV2`，`tierMigrated2` 只跑一次）：清 v1 写入的标准档覆盖并打 warn；手改形态打 info 保留；没跑过 v1 的机器直接标两个 flag、什么都不写。
+- `provisionKeys`：认 `cfg.tiers`，`setTierProvision` **整份替换**（服务端不再下发某档 = 那档未配置），每档 key 写进自己槽位（标准档 = `encryptedLlmKey`，与打标共用，`manualLlmKey` 仍尊重），之后 `invalidateTierHealth()`。标准档没配齐 → provision 失败并通知；只缺增强档 → warn 不算失败。
+- `health.ts`：**两档同一口径真探**（此前标准档只看有没有 key）；`configured=false` 直接回未配置原因。`MCNAI_E2E_TIER_HEALTH` 开关**优先于一切**（含配没配齐）——走查主实例没有增强档 key，靠 `up` 打开选择器验"能选/能记住/失败有出口"，第一版把 configured 判在开关前面，主实例 45c 立刻红。
+- 界面：管理员区标「服务端下发」/「未下发线路」/「已被运维改过」，未配齐时原样摆那句话（`tier-unconfigured-<id>`）；base URL 输入框 placeholder 改「等待服务端下发」；`aiReady` = 标准档 `configured`。
+
+### 服务端改前存档（2026-09-03，用测试账号真实登录读生产 `https://www.makeupai.top/api/v1/client-config`，key 打码）
+
+```json
+{ "relayBaseUrl": "https://api.inferera.com", "relayApiKey": "sk-8…(51 位)",
+  "llmBaseUrl": "https://api.deepseek.com", "llmModel": "deepseek-v4-flash", "llmApiKey": "sk-d…(35 位)" }
+```
+
+= 生产只配了 `CLIENT_RELAY_API_KEY` 与 `CLIENT_LLM_API_KEY` 两个变量，地址三项全走路由缺省；**生产两把 key 与本地 `.env.local` 里的不是同一把**（前缀 `sk-8/sk-d` vs `sk-f/sk-e`）。
+契约 v2 的缺省链回落到这两个既有变量，所以**首版不需要新增任何 Vercel 变量**，只需重新部署；本地 dev server 用同一账号实测输出已含 `contractVersion:2` + `tiers.*`。
+
+### 验收
+
+- 走查：所有隔离实例起前 `seedProvision()` 种"服务端已下发"形态（值与路由缺省一致，路由是真相源）；10h 断言增强档 `api.inferera.com` + 两档标「服务端下发」+ 不含 aihubmix；45b 先把增强档配齐再验"探测失败置灰"；**45e 改写**：v1 形态覆盖被清（含 config 落盘与 warn 日志）→ 增强档无 key 不回落、四处同一句话、日志无回落 → 手改覆盖保留（第三次启动）。截图 `45e-老用户机-增强线路未配置` 替换旧的 `45e-老用户机-增强档回落可用`。
+- `login-provision.mjs` / `fresh-install.mjs`：登录后断言两档 `configured && provisioned` 且地址正确；`upgrade-path.mjs`【6】改成迁移 v2 两种合法状态各断言。**这三条要服务端部署契约 v2 后才会绿。**
+- `smoke:provider`：用例 `aihubmix` 改名 `enhanced`（`SMOKE_ENHANCED_KEY/BASE`，缺省 inferera）。
+- 装机：`docs/RELEASE.md` §1b「开账号检查清单」（线路/模型/key 三项逐档核对 + 两档各点一次「检测线路」）。
+
+### 本轮实测结果（2026-09-03）
+
+- 主走查本地模式**全绿**（第五轮；前四轮红在：探测 configured 判在 e2e 开关之前 → 主实例 45c 红；45e 独立实例误带 `up` 开关；R3 用"写回原值"还原地址在新模型下成了同值覆盖 → 10h「已被运维改过」，产品侧改成"填的等于下发值不算覆盖"）。10h/45b/45e 截图人眼看过。
+- `upgrade-path.mjs`（拷本机真实 userData）：迁移 v2 三条 ✓（v1 覆盖已清、`tierMigrated2` 落盘、标准档不再是覆盖）；"两档线路已下发"两条 ❌ = 生产服务端还是 v1，**部署后应绿**。这就是"用户本人机器"的改前/改后：改前 `tierOverrides.standard = {inferera, v4-pro/flash, encryptedApiKey}`，改后清空、等下发。
+- `smoke:provider` 标准档最小集 `SMOKE_ONLY=deepseek SMOKE_CASES=single,abort,tools` **3/3 通过**（16.5s / 4.8s / 31.3s，`modelUsage` 含 `deepseek-v4-pro`，工具真调 3 次），花费按上次口径 ≈¥0.5。
+- **增强档真实调用未跑**：单轮 ≈¥7（RELEASE-CHECK §1.2），超出本批 ¥1 预算，待拍板。线路层已用中转站 key 做过 `max_tokens:1` 探测（200、model 原样回 `claude-opus-5`），走查 10h 的「检测线路」在主实例也真点过一次。
+- **挂账**：`smoke:provider` 跑完汇总后 `app.exit()` 不退出，进程挂了 11 分钟（本单没动它的退出逻辑，疑与 Electron 43 的 `before-quit`/watcher 那条同源，见 §0-新 R2），下次跑要盯着或加硬超时。
+
+---
+
 ## 0-新d. PLAN-v2 批 0 + 批 1「架构止血」（2026-09-02 执行，未发版）
 
 > 方案见 `docs/PLAN-v2.md`（已批准），事实底座 `docs/PRODUCT-AUDIT.md`。本批全是底层改动，**随下一版一起出**。
@@ -212,7 +274,7 @@ v4-pro 输入低估 **2.23 倍**、输出低估 1.70 倍，缓存读倍率 0.1 �
 - 全量入库上云：**61 篇非敏感上云、37 篇敏感按设置仅存本地**，进度事件 `20/61 → 40/61 → 60/61`（A-7 的 50 篇截断已解）
 - 三方对账 **①②③ 一致**（账本 = 用量页 = usage-report = ¥3.4246）
 
-> 线路纪律（永久）：DeepSeek 一律官方直连 `api.deepseek.com`；aihubmix 只给增强档 `claude-opus-5`。
+> 线路纪律（永久）：DeepSeek 一律官方直连 `api.deepseek.com`；增强档 `claude-opus-5` 走中转站 `api.inferera.com`（2026-09-03 起 aihubmix.com 从所有默认值清除，见 §0-新f）。
 > 真实调用前必须打印 `ai.tiers()` 的实际 base URL 核对，走查里有永久断言守这条。
 
 ### 发布前全面自测（2026-08-19，报告见 `docs/RELEASE-CHECK.md`）
@@ -966,7 +1028,7 @@ Electron App（macOS arm64，v0.1.0）
 
 - **make-ppt 在 `claude-opus-5`（增强档）上的表现未验**：本单只对新增线路做了最小真实调用集（单轮 / abort / 工具调用），make-ppt 那条链路的 skills 层零改动，没有为它跑真实产出。风险点是 §3 bug#3 的老毛病（爱反复检索 → 撞 `maxTurns`）在换模型后行为不同——opus 检索次数通常更少，理论上更安全，但没有实测数据。**要验的话**：`SMOKE_ONLY=aihubmix SMOKE_CASES=ppt npm run smoke:provider`，一次调用的量级
 - **增强档的轻量模型串暂时也是 `claude-opus-5`**：aihubmix 上只有它做过真路由验证。等验过一个便宜模型名（如 haiku 系）之后，在管理员区把增强档的「轻量模型」换掉即可省一大笔——这是个明确的待办省钱开关，不是设计终点
-- ~~**服务端 `client-config` 还没有下发 `aihubmixApiKey`**~~ ✅ **2026-08-17 作废**：查实 `api.inferera.com` 就是 aihubmix 的备用域名、`CLIENT_RELAY_API_KEY` 就是 aihubmix 的 key，所以**根本不需要下发第二把**。增强档改为「独立槽位优先、空则回落到中转站那把」（见 §4-26），登录过的机器天然可用。`provisionKeys` 里认 `aihubmixApiKey` 的那段保留——将来真要给增强档单独配一把限额 key，服务端补上字段就能直接用
+- ~~**服务端 `client-config` 还没有下发 `aihubmixApiKey`**~~ ✅ **2026-09-03 按契约 v2 下发**：`tiers.enhanced.apiKey`（第一版回落 `CLIENT_RELAY_API_KEY`），回落设计整条作废，见 §0-新f
 
 ---
 
@@ -1034,14 +1096,14 @@ Electron App（macOS arm64，v0.1.0）
 21. **`MCNAI_SUPABASE_URL` 只给 e2e 用（2026-08-16）**：验 M-01 的"云端不可达"分支需要把 Supabase 指到别处。踩过的坑：指一个**不可达 IP** 不行（`192.0.2.1` 实测 fetch 9ms 就报 ENETUNREACH，走不到 10s 超时那条分支），要验超时得起一个**连得上但只收不答的黑洞 socket**；验"连不上"才用 `127.0.0.1:9`。生产不读这个变量以外的任何来源，默认值仍写死在 `auth/index.ts`。
 22b. **跑走查前先清场：别的 mcn-ai 实例不能盯着同一个库（2026-08-17 踩坑）**。`npm run dev` 起的实例如果 vaultPath 恰好也是走查库（`/tmp/mcnai-e2e-vault`），两边的投递箱 watcher 会抢着起 pipeline。表现极具误导性：走查跑到**最后一条**（before-quit 孤儿检查）才失败，报「有孤儿进程」，而那个进程属于另一个实例、本来就该活着——12 分钟才撞到，结论还完全指错方向。现在 `walkthrough.mjs` 开头会扫 `ps`，发现有 `mcn-ingest` 挂在这个库上就**第一秒拒跑并打印是谁**。
 22. **走查专用开关一览（只给 e2e，生产不读）**：`MCNAI_USER_DATA` / `MCNAI_VAULT`（隔离实例）、`MCNAI_APP_BIN`（打包形态回归）、`MCNAI_SUPABASE_URL`（§4-21）、`MCNAI_E2E_VAULT_FAIL=<毫秒>`（让 `vault:createNew` 先卡住再抛错，验 H-12 的失败分支——系统保存框一弹起来 Playwright 就没法继续，这条路只能这么走）、`MCNAI_E2E_TIER_HEALTH=up|down`（强制档位线路探测的结论：`down` 验"增强档置灰+暂时不可用"，`up` 让走查能在没有 aihubmix key 的机器上真的选到增强档——真造这两个分支得把线路打挂或断网）。加新开关的判据：**这条分支在界面上必须能验，而真实触发它需要造只读盘/断网/改系统设置这类走查里做不到的环境**；能用真实故障造出来的（如 M-02 用 chmod 000、M-05 删文件）一律不给开关。
-23. **会话级档位：语义写死、映射留运维口（2026-08-17）**。用户看到的只有「标准（推荐）／增强」两档与"能力/消耗"的差别，**界面上不出现供应商名与模型名**——老板要判断的是"这次值不值得多花钱"，不是"这条线后面挂的是谁"。出厂映射：标准=DeepSeek 官方 `deepseek-v4-pro/flash`，增强=aihubmix `claude-opus-5`。映射（base URL / 主模型串 / 轻量模型串 / 各线路 key）全部下沉到设置页的隐藏管理员区，定位是**运维应急**（换模型串、临时切备用线路如 inferera）。
+23. **会话级档位：语义写死、映射留运维口（2026-08-17）**。用户看到的只有「标准（推荐）／增强」两档与"能力/消耗"的差别，**界面上不出现供应商名与模型名**——老板要判断的是"这次值不值得多花钱"，不是"这条线后面挂的是谁"。出厂映射：标准=DeepSeek 官方 `deepseek-v4-pro/flash`，增强=~~aihubmix~~ **中转站 `api.inferera.com`** `claude-opus-5`（**2026-09-03 起地址不再写在客户端，全部由 client-config 契约 v2 下发**，见 §0-新f）。映射（base URL / 主模型串 / 轻量模型串 / 各线路 key）全部下沉到设置页的隐藏管理员区，定位是**运维应急**（换模型串、临时切线路），覆盖优先于下发。
     - **档位是会话级的**：存在 conversation 对象上随对话落盘，新会话一律回到标准档。做成全局设置的话，"上次开了增强"会一直粘着，是最容易把钱烧掉又没人察觉的形态。
     - **增强档的轻量串也钉死 `claude-opus-5`**：aihubmix 上只有它做过真路由验证（响应 model 字段原样返回）。写一个没验过的便宜模型名进去，赌输的形态恰好是"静默降级"，正是这层要防的东西。真要省，管理员区把轻量串换成验过的名字即可（**这是一个明确的省钱开关，验过就该拧**）。
     - **老用户迁移**（`ai/tiers.ts` 的 `migrateTiers`，只跑一次）：机器上配过库或落过任意一把 key = 老用户 → 把升级前生效的那条线路（`describeProvider()`）原样搬成标准档映射，升级不改变现有行为；全新安装才走出厂映射。另有 `ensureStandardUsable()`：标准档一把 key 都没有而中转站那把还在时，自动把标准档指向中转站并**打一条 warn**（不是静默兜底）——覆盖"服务端只下发了 relayApiKey"的新装机。
     - **`resolveTierForRequest` 只在无窗口时才吃 `ANTHROPIC_AUTH_TOKEN`**（走查现场抓到的坑）：开发机上常年挂着自己的 key，有窗口时也吃的话，"这一档没配密钥"那条预检分支在走查里永远触发不到——实测增强档明明没 key，请求还是真的发了出去。无头冒烟（smoke-chat/smoke-agent）没有窗口，照旧从 env 取。
 24. **线路健康检查：只探增强档、缓存 5 分钟、`max_tokens:1`（2026-08-17）**。标准档是兜底线路，探它没有意义——它挂了也没有"另一档"可退，只会在每次开应用时多一次请求。增强档不可用时选择器里**直接置灰**，而不是让人选了之后在发送时才撞一鼻子灰。探测用一次 `max_tokens:1` 的 messages 请求而不是 ping 根路径：key 过期这种最常见的失效形态，只 ping 地址压根测不出来。会话进行中失败仍走原有错误重试路径，气泡里额外给一颗「切换到标准模式重试」——只给「重试」的话，用户会在同一条挂掉的线路上反复撞。
 25. **用量记录：写入侧不挑字段，归一化全放汇总侧（2026-08-17）**。三条线的 usage 口径都不一样（snake_case vs camelCase、有没有 cache_* 分项、有没有 modelUsage），在写入侧归一化等于把"当时以为对的口径"腌进历史数据，以后想换算法只能重跑。所以 jsonl 里存的是原样的完整 usage 对象，缺则 null；`summarize()` 与 `scripts/usage-report.mjs` 各自归一（两边同一套正则，改一处要改两处）。另外两条：**只记跑成功的那一轮**（失败轮 token 基本是 0，记进去会让「本月对话 N 次」把故障也算成用量）；**写失败静默降级**（记账挡不住主流程）。pipeline 的智能打标拿不到 token，就只记次数（`calls:1`，页面显示「—」）。
-26. **增强档的 key：独立槽位优先，空则回落到中转站那把（2026-08-17，返工方案①）**。依据是当天查实的两件事：**`api.inferera.com` 是 aihubmix 的备用域名**、**`CLIENT_RELAY_API_KEY` 与网页版的 `AIHUBMIX_API_KEY` 是同一把**（哈希一致）。也就是说**任何登录过的机器硬盘上早就躺着一把能开 `claude-opus-5` 的 key**，再下发第二把纯属多余，还多一处要维护的密钥——所以 webpage 侧那条"加 `aihubmixApiKey` 下发"的改动直接取消了。
+26. ~~**增强档的 key：独立槽位优先，空则回落到中转站那把（2026-08-17，返工方案①）**~~ **2026-09-03 整条作废（§0-新f）**：回落被 Jerry 机器证明是坏形态（key 是中转站的、地址却钉在代码里的老域名），现在每档只认自己那把 key、线路由服务端按档下发，"未配独立密钥"明示「增强线路未配置，请联系管理员」。下面保留作历史记录。依据是当天查实的两件事：**`api.inferera.com` 是 aihubmix 的备用域名**、**`CLIENT_RELAY_API_KEY` 与网页版的 `AIHUBMIX_API_KEY` 是同一把**（哈希一致）。也就是说**任何登录过的机器硬盘上早就躺着一把能开 `claude-opus-5` 的 key**，再下发第二把纯属多余，还多一处要维护的密钥——所以 webpage 侧那条"加 `aihubmixApiKey` 下发"的改动直接取消了。
     - 实现在 `ai/tiers.ts` 的 `FALLBACK_KEY_FIELD`：增强档 → `encryptedApiKey`。`describeTier` 里 **`keyField` 始终是这一档自己的槽位**（管理员区那颗「保存」写的是它），回落只影响 `hasKey` 与 `resolveTierForRequest` 读哪一把——否则给增强档填 key 会把中转站那把覆盖掉
     - **回落打日志，不做静默兜底**：`「增强」未配独立密钥，回落到共享密钥 encryptedApiKey（https://aihubmix.com）`，一个进程只打一次（它挂在发消息与线路探测两条高频路径上）。"钱从哪把 key 上扣的"必须查得到
     - 管理员区那一档标「复用中转站密钥」，与「key 已配置 / 未配置 key」并列成三态

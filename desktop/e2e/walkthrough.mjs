@@ -24,6 +24,8 @@ rmSync(join(shots, 'ZZ-失败现场.png'), { force: true }) // 上一轮失败�
 // 每次重置隔离环境：userData 清空（保证登录门可见），vault 副本重拷（保证确定性）
 const userData = '/tmp/mcnai-e2e-userdata'
 rmSync(userData, { recursive: true, force: true })
+// 主实例：种上"服务端已下发"的档位线路（helper 定义在下面，调用发生在 launch 之前即可）
+const seedMainProvision = () => seedProvision(userData)
 const vaultCopy = process.env.E2E_VAULT || '/tmp/mcnai-e2e-vault'
 if (!process.env.E2E_VAULT) {
   const src = join(homedir(), 'Documents', 'AI', 'maggie-vault')
@@ -123,6 +125,25 @@ const launch = (env) =>
     args: packagedBin ? [] : [root],
     env,
   })
+
+/**
+ * 服务端下发的档位线路（client-config 契约 v2，2026-09-03）。
+ *
+ * 客户端**不持任何写死的 base URL**：线路只来自登录时下发的 `tierProvision`。
+ * 走查是本地模式（不登录），所以每个隔离实例起来之前把"服务端已下发"的形态直接写进 config.json——
+ * 值与 `webpage/app/api/v1/client-config/route.ts` 的缺省一致，那一头才是真相源。
+ * 不种的话两档地址为空、`assertStandardRoute` 在第一次真实调用前就会红——这正是它该红的形态。
+ */
+const PROVISIONED_TIERS = {
+  standard: { baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', fastModel: 'deepseek-v4-flash' },
+  enhanced: { baseUrl: 'https://api.inferera.com', model: 'claude-opus-5', fastModel: 'claude-opus-5' },
+}
+const seedProvision = (dir, extra = {}) => {
+  mkdirSync(dir, { recursive: true })
+  const p = join(dir, 'config.json')
+  const cur = existsSync(p) ? JSON.parse(readFileSync(p, 'utf-8')) : {}
+  writeFileSync(p, JSON.stringify({ ...cur, tierMigrated: true, tierMigrated2: true, tierProvision: PROVISIONED_TIERS, ...extra }))
+}
 
 /**
  * 线路纪律闸门（2026-08-18 起，永久断言）。
@@ -246,6 +267,7 @@ const rawShot = async (cdp, name) => {
 // ---- 首跑引导环节：全新 userData 且不给库 → 登录门 → 建库引导 → 跳过 → 对话页 ----
 {
   rmSync('/tmp/mcnai-e2e-firstrun', { recursive: true, force: true })
+  seedProvision('/tmp/mcnai-e2e-firstrun')
   const env2 = { ...process.env, MCNAI_USER_DATA: '/tmp/mcnai-e2e-firstrun' }
   delete env2.MCNAI_VAULT
   const app2 = await launch(env2)
@@ -392,6 +414,7 @@ const rawShot = async (cdp, name) => {
   const NEW = '/tmp/mcnai-e2e-cleanvault'
   rmSync(NEW, { recursive: true, force: true })
   rmSync('/tmp/mcnai-e2e-cleanud', { recursive: true, force: true })
+  seedProvision('/tmp/mcnai-e2e-cleanud')
   const envC = {
     ...process.env,
     MCNAI_USER_DATA: '/tmp/mcnai-e2e-cleanud',
@@ -457,6 +480,7 @@ const rawShot = async (cdp, name) => {
   rmSync(emptyVault, { recursive: true, force: true })
   mkdirSync(emptyVault, { recursive: true })
   rmSync('/tmp/mcnai-e2e-emptyuser', { recursive: true, force: true })
+  seedProvision('/tmp/mcnai-e2e-emptyuser')
   const app3 = await launch({
     ...process.env,
     MCNAI_USER_DATA: '/tmp/mcnai-e2e-emptyuser',
@@ -582,6 +606,7 @@ const rawShot = async (cdp, name) => {
 
   const loginUser = '/tmp/mcnai-e2e-login-timeout'
   rmSync(loginUser, { recursive: true, force: true })
+  seedProvision(loginUser)
   const a3 = await launch({
     ...process.env,
     MCNAI_USER_DATA: loginUser,
@@ -625,6 +650,7 @@ const rawShot = async (cdp, name) => {
   //     绝不能说"邮箱或密码不对"——那会让用户一遍遍改密码，永远想不到去看网络
   const refuseUser = '/tmp/mcnai-e2e-login-refused'
   rmSync(refuseUser, { recursive: true, force: true })
+  seedProvision(refuseUser)
   const a4 = await launch({
     ...process.env,
     MCNAI_USER_DATA: refuseUser,
@@ -651,11 +677,14 @@ const rawShot = async (cdp, name) => {
 
 // ---- 会话级模型档位 · 不可用分支：增强档线路探测失败时必须置灰 + 说「暂时不可用」----
 // 用独立实例把探测强制判死（MCNAI_E2E_TIER_HEALTH=down，走查专用开关，生产不读）：
-// 真造这个分支得把 aihubmix 打挂或断网，走查里做不到（判据同 HANDOFF §4-22）。
+// 真造这个分支得把中转站打挂或断网，走查里做不到（判据同 HANDOFF §4-22）。
 // 主实例反过来强制为可用，那边验的是"能选、能记住、失败有出口"。
+// 这台实例顺手把增强档配齐（线路已下发 + 一把假 key），让"置灰"确定来自探测结论而不是"没配齐"
+// （开关优先，两种原因界面文案不同：「暂时不可用」vs「线路未配置」，后者由 45e 验）。
 {
   const downUser = '/tmp/mcnai-e2e-tier-down'
   rmSync(downUser, { recursive: true, force: true })
+  seedProvision(downUser)
   const aD = await launch({
     ...process.env,
     MCNAI_USER_DATA: downUser,
@@ -668,6 +697,13 @@ const rawShot = async (cdp, name) => {
   await skipD.waitFor({ timeout: 20000 })
   await skipD.click()
   await wD.locator('[data-testid="tier-selector"]').waitFor({ timeout: 20000 })
+  // 先把增强档配齐（假 key 只进内存缓存，探测被开关强制判死，不会真发请求）
+  await wD.evaluate((k) => window.api.settings.setKey(k, 'enhanced'), 'sk-e2e-tier-down-fake-key')
+  for (let i = 0; i < 40; i++) {
+    const t = await wD.evaluate(() => window.api.ai.tiers())
+    if (t.tiers.find((x) => x.id === 'enhanced').configured) break
+    await wD.waitForTimeout(250)
+  }
   await wD.click('[data-testid="tier-selector"]')
   await wD.locator('[data-testid="tier-menu"]').waitFor({ timeout: 8000 })
   const enh = wD.locator('[data-testid="tier-option-enhanced"]')
@@ -687,33 +723,38 @@ const rawShot = async (cdp, name) => {
   await aD.close()
 }
 
-// ---- 老用户升级机（大头那台的形态）：只有中转站 key，增强档必须靠**回落**可用 ----
-// 实测依据：api.inferera.com 是 aihubmix 的备用域名，服务端下发的 CLIENT_RELAY_API_KEY
-// 与网页版的 AIHUBMIX_API_KEY 是同一把，所以登录过的机器天然就能开增强档（见 ai/tiers.ts）。
-// 这一屏同时把 migrateTiers 的老用户分支也验了——之前它只在真机上跑过。
+// ---- 老用户升级机（大头那台的形态，2026-09-03 改写）：v1 迁移过的标准档覆盖要被 v2 清掉、
+// 增强档没有独立 key 时**不回落**，而是置灰 + 明示「增强线路未配置，请联系管理员」 ----
+// 2026-08-17 的旧设计是"增强档回落到中转站那把 key"，Jerry 机器上抓到的正是它的坏形态：
+// key 是中转站的、地址却钉在代码里的老域名。契约 v2 起线路跟服务端走、每档只认自己的 key。
 {
   const legacyUser = '/tmp/mcnai-e2e-legacy'
   rmSync(legacyUser, { recursive: true, force: true })
+  // **不给 MCNAI_E2E_TIER_HEALTH**：这一屏验的就是"没配齐 → 置灰 + 明示"，开关会把它压掉
   const envL = {
     ...process.env,
     MCNAI_USER_DATA: legacyUser,
     MCNAI_VAULT: vaultCopy,
-    MCNAI_E2E_TIER_HEALTH: 'up',
   }
+  delete envL.MCNAI_E2E_TIER_HEALTH
 
-  // 第一次启动只为把 vaultPath 落进 store（= 这台机器"以前用过"的判据）
+  // 第一次启动只为把 vaultPath 落进 store（= 这台机器"以前用过"）
   const a1 = await launch(envL)
   const w1 = await a1.firstWindow()
   await w1.waitForTimeout(2500)
   await a1.close()
 
-  // 抹掉迁移标记，模拟"这台机器是从旧版升上来的"：下次启动 migrateTiers 会走老用户分支
+  // 模拟"0.1.2 那版 v1 迁移过的老机器"：标准档覆盖正是 v1 写出来的四字段形态（中转站 + encryptedApiKey），
+  // 服务端已下发契约 v2 的线路，但 v2 迁移还没跑过
   const cfgPath = join(legacyUser, 'config.json')
   const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'))
   if (!cfg.vaultPath) throw new Error('第一次启动没把 vaultPath 落盘，老用户判据不成立')
-  delete cfg.tierMigrated
-  delete cfg.tierOverrides
-  writeFileSync(cfgPath, JSON.stringify(cfg))
+  const V1_SHAPE = { baseUrl: 'https://api.inferera.com', model: 'deepseek-v4-pro', fastModel: 'deepseek-v4-flash', keyField: 'encryptedApiKey' }
+  delete cfg.tierMigrated2
+  writeFileSync(
+    cfgPath,
+    JSON.stringify({ ...cfg, tierMigrated: true, aiProvider: 'inferera', relayBaseUrl: 'https://api.inferera.com', tierOverrides: { standard: V1_SHAPE }, tierProvision: PROVISIONED_TIERS })
+  )
 
   const a2 = await launch(envL)
   const w2 = await a2.firstWindow()
@@ -723,38 +764,40 @@ const rawShot = async (cdp, name) => {
   await skipL.click()
   await w2.locator('[data-testid="tier-selector"]').waitFor({ timeout: 20000 })
 
-  // 迁移：标准档沿用旧线路（中转站），key 槽位也跟着搬过去
+  // ① 迁移 v2：v1 写入的覆盖被清、标准档改跟服务端下发走（官方直连）、key 槽位回到自己的
   const migrated = await w2.evaluate(() => window.api.ai.tiers())
   const std = migrated.tiers.find((t) => t.id === 'standard')
-  if (std.keyField !== 'encryptedApiKey' || !std.baseUrl.includes('inferera'))
-    throw new Error('老用户迁移没生效：' + JSON.stringify(std))
+  if (!std.baseUrl.startsWith(OFFICIAL_DEEPSEEK) || std.keyField !== 'encryptedLlmKey' || std.overridden || !std.provisioned)
+    throw new Error('迁移 v2 没把 v1 写入的标准档覆盖清掉：' + JSON.stringify(std))
+  const cfgAfter = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+  if (cfgAfter.tierMigrated2 !== true || cfgAfter.tierOverrides?.standard)
+    throw new Error('迁移 v2 没落盘：' + JSON.stringify({ tierMigrated2: cfgAfter.tierMigrated2, std: cfgAfter.tierOverrides?.standard }))
 
-  // 这台机器只有中转站那把 key（模拟服务端下发过、但从没配过增强档的独立 key）
-  await w2.evaluate((k) => window.api.settings.setKey(k, 'standard'), 'sk-e2e-legacy-relay-key-0123456789')
-  // 这里是**直接调 IPC**、不走界面那颗保存按钮，所以不会有 toast——等 toast 会一直等到超时
-  // （第一版就是这么挂住的）。落盘是后台任务，但明文立刻进内存缓存，hasKey 马上就该翻真
-  let tiersNow = null
-  let enh = null
-  for (let i = 0; i < 40; i++) {
-    tiersNow = await w2.evaluate(() => window.api.ai.tiers())
-    enh = tiersNow.tiers.find((t) => t.id === 'enhanced')
-    if (enh.hasKey) break
-    await w2.waitForTimeout(500)
-  }
-  if (!enh.hasKey) throw new Error('只有 relay key 时增强档仍判为没有密钥（回落没生效）')
-  if (!enh.usingSharedKey) throw new Error('增强档没有标出"复用中转站密钥"')
+  // ② 增强档没有独立 key：hasKey=false、configured=false、原因就是那句给客户看的话；**不许回落**
+  const enh = migrated.tiers.find((t) => t.id === 'enhanced')
+  if (enh.hasKey || enh.configured) throw new Error('增强档没配 key 却判为可用（回落回来了？）：' + JSON.stringify(enh))
+  if (enh.unavailableReason !== '增强线路未配置，请联系管理员') throw new Error(`增强档未配置的文案不对：「${enh.unavailableReason}」`)
+  const hz = await w2.evaluate(() => window.api.ai.tierHealth('enhanced', true))
+  if (hz.ok || hz.reason !== enh.unavailableReason) throw new Error('探测口径与档位描述不一致：' + JSON.stringify(hz))
+  // 中转站那把 key 明明在（老机器都有），也不能拿来给增强档用
+  await w2.evaluate((k) => window.api.settings.setKey(k, 'standard'), 'sk-e2e-legacy-standard-key-0123456789')
+  await w2.waitForTimeout(500)
+  const enh2 = (await w2.evaluate(() => window.api.ai.tiers())).tiers.find((t) => t.id === 'enhanced')
+  if (enh2.hasKey) throw new Error('给标准档填了 key，增强档竟跟着变成有 key（回落没删干净）')
 
-  // 选择器里增强档必须不再置灰
+  // ③ 选择器里置灰 + 说明栏原样给那句话
   await w2.click('[data-testid="tier-selector"]')
   await w2.locator('[data-testid="tier-menu"]').waitFor({ timeout: 8000 })
-  if ((await w2.locator('[data-testid="tier-option-enhanced"]').getAttribute('data-available')) !== '1')
-    throw new Error('回落生效后增强档还是置灰的')
+  const optE = w2.locator('[data-testid="tier-option-enhanced"]')
+  if ((await optE.getAttribute('data-available')) !== '0') throw new Error('增强线路未配置时选择器没有置灰')
+  const menuL = await w2.locator('[data-testid="tier-menu"]').innerText()
+  if (!menuL.includes('增强线路未配置，请联系管理员')) throw new Error(`选择器没有明示「增强线路未配置，请联系管理员」：「${menuL.replace(/\s+/g, ' ')}」`)
   await w2.waitForTimeout(300)
-  await w2.screenshot({ path: join(shots, '45e-老用户机-增强档回落可用.png') })
-  record('45e-老用户机-增强档回落可用')
+  await w2.screenshot({ path: join(shots, '45e-老用户机-增强线路未配置.png') })
+  record('45e-老用户机-增强线路未配置')
   await w2.keyboard.press('Escape')
 
-  // 管理员区要把"复用"这件事标出来（钱从哪把 key 上扣的，必须查得到）
+  // ④ 管理员区同一句话（两处说法必须一致），且没有任何"复用/回落"字样
   await w2.click('text=设置')
   const badgeL = w2.locator('[data-testid="version-badge"]')
   await badgeL.waitFor({ timeout: 10000 })
@@ -762,34 +805,55 @@ const rawShot = async (cdp, name) => {
     await badgeL.click()
     await w2.waitForTimeout(60)
   }
-  await w2.locator('[data-testid="tier-shared-key-enhanced"]').waitFor({ timeout: 8000 })
+  await w2.locator('[data-testid="tier-unconfigured-enhanced"]').waitFor({ timeout: 8000 })
+  const adminE = await w2.locator('[data-testid="tier-config-enhanced"]').innerText()
+  if (!adminE.includes('增强线路未配置，请联系管理员')) throw new Error(`管理员区没有同一句话：「${adminE.replace(/\s+/g, ' ')}」`)
+  if (/复用|回落/.test(adminE)) throw new Error(`管理员区仍出现回落字样：「${adminE.replace(/\s+/g, ' ')}」`)
 
-  // 回落**日志**必须落下来：发一条增强档的消息把 resolveTierForRequest 走一遍
-  // （key 是假的，请求注定失败，但预检必须放行——放行本身就是回落生效的证据）
-  await w2.evaluate(() => window.api.chat.send('e2e-fallback', '回落走查', undefined, 'enhanced'))
+  // ⑤ 日志：迁移 v2 必须写明清了什么；**不得**出现任何回落日志
   let logText = ''
-  for (let i = 0; i < 40 && !/回落到共享密钥/.test(logText); i++) {
-    await w2.waitForTimeout(500)
+  for (let i = 0; i < 20 && !/迁移 v2/.test(logText); i++) {
+    await w2.waitForTimeout(300)
     try {
       logText = readFileSync(join(legacyUser, 'logs', 'main.log'), 'utf-8')
     } catch {
       /* 还没写出来 */
     }
   }
-  const fallbackLine = logText.split('\n').find((l) => l.includes('回落到共享密钥'))
-  if (!fallbackLine) throw new Error('增强档回落没有打日志（静默兜底是明确禁止的）')
-  if (!fallbackLine.includes('encryptedApiKey')) throw new Error(`回落日志没说清回落到哪把：${fallbackLine}`)
-  console.log('增强档回落（老用户机）✓', JSON.stringify({ 迁移后标准档: std.keyField, 日志: fallbackLine.trim() }))
+  const v2Line = logText.split('\n').find((l) => l.includes('迁移 v2：已清除'))
+  if (!v2Line) throw new Error('迁移 v2 没打日志（清了什么必须查得到）')
+  if (!/\[warn\]/.test(v2Line) || !v2Line.includes('api.inferera.com')) throw new Error(`迁移 v2 日志没说清清了哪条线路：${v2Line}`)
+  if (/回落到共享密钥/.test(logText)) throw new Error('日志里仍出现增强档回落——静默回落已明令禁止')
+  console.log('老用户机 · 迁移 v2 + 增强档不回落 ✓', JSON.stringify({ 标准档: std.baseUrl, 增强: enh.unavailableReason, 日志: v2Line.trim().slice(0, 80) }))
   await a2.close()
+
+  // ⑥ 管理员手改的覆盖要保留（大头那台靠它）：形态不是 v1 写出来的，v2 就不许碰
+  const MANUAL = { baseUrl: 'https://custom.example.test/anthropic', model: 'deepseek-v4-pro' }
+  const cfg3 = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+  delete cfg3.tierMigrated2
+  writeFileSync(cfgPath, JSON.stringify({ ...cfg3, tierOverrides: { standard: MANUAL } }))
+  const a3 = await launch(envL)
+  const w3 = await a3.firstWindow()
+  await w3.waitForTimeout(2500)
+  const std3 = (await w3.evaluate(() => window.api.ai.tiers())).tiers.find((t) => t.id === 'standard')
+  const cfg3After = JSON.parse(readFileSync(cfgPath, 'utf-8'))
+  if (std3.baseUrl !== MANUAL.baseUrl || !std3.overridden || cfg3After.tierOverrides?.standard?.baseUrl !== MANUAL.baseUrl)
+    throw new Error('迁移 v2 把管理员手改的覆盖也清掉了（一刀切是明令禁止的）：' + JSON.stringify({ std3, onDisk: cfg3After.tierOverrides }))
+  const log3 = readFileSync(join(legacyUser, 'logs', 'main.log'), 'utf-8')
+  if (!/判为运维手改，保留/.test(log3)) throw new Error('迁移 v2 保留手改覆盖时没打日志')
+  console.log('老用户机 · 手改覆盖保留 ✓', std3.baseUrl)
+  await a3.close()
 }
 
+seedMainProvision()
 const app = await launch({
   ...process.env,
   MCNAI_USER_DATA: userData,
   MCNAI_VAULT: vaultCopy,
-  // 主实例强制把增强档探测判为可用：这台机器上没有 aihubmix 的 key，不强制的话
+  // 主实例强制把增强档探测判为可用：这台机器上没有增强档的 key，不强制的话
   // 档位选择器永远只有一档可选，"按会话记忆"和"失败有出口"两条就没法走真实用户路径。
-  // 注意 key 仍然是没有的 —— 增强档发出去照样会被主进程预检拦下，M-11 那段正好用它造确定失败
+  // 注意 key 仍然是没有的 —— 增强档发出去照样会被主进程预检拦下，M-11 那段正好用它造确定失败。
+  // 开关优先于"配没配齐"（health.ts 里 forced 判在 configured 之前）；"没配齐 → 置灰 + 明示"由 45e 独立实例验
   MCNAI_E2E_TIER_HEALTH: 'up',
   // R3 墙钟超时：把上限压到 3 秒，走查里才造得出「一轮跑太久被中断」（真造要等 15 分钟）。
   // **只在本地模式给**：CHAT 模式一轮真实回答要几十秒，3 秒上限会把每一轮都掐断。
@@ -2447,8 +2511,8 @@ try {
     // 增强档的失败**怎么造**，两种模式已经不一样了（2026-08-18 修）：
     //  - 本地模式：增强档确实没有 key → 主进程预检 `bail` → **同步**错误。这是竞态最宽的
     //    那条窗口（错误抢在 React 提交用户消息之前到达），仍然由这一轮守着
-    //  - `E2E_CHAT`：登录之后增强档**是有 key 的**——2026-08-17 起没配独立 key 会回落到
-    //    共享密钥（45e）。"增强档没 key 所以必然快速失败"这个前提就此消失，旧写法会在这里
+    //  - `E2E_CHAT`：登录之后增强档**是有 key 的**——契约 v2 起服务端按档下发（增强档那把
+    //    第一版复用中转站 key）。"增强档没 key 所以必然快速失败"这个前提就此消失，旧写法会在这里
     //    干等 30 秒等不到错误气泡（实测卡死在这，整轮 E2E_CHAT 跑不到终点）。
     //    **不能靠"测试环境别下发共享密钥"来复原**——那是为测试削产品。
     //    改成把**增强档的地址**临时指到一个秒回 401 的本地桩：失败照样确定、只要几秒、零 token，
@@ -2614,7 +2678,8 @@ try {
       // 换档重试会把会话的档位记忆改成 standard，先点就把上面那条验没了
       if (CHAT) {
         enhStub.close()
-        await win.evaluate((b) => window.api.ai.setTierConfig('enhanced', { baseUrl: b }), enhOrigBase)
+        // 清空 = 回到服务端下发的值（写回原值也可以，产品侧会识别"与下发值相同"不算覆盖）
+        await win.evaluate(() => window.api.ai.setTierConfig('enhanced', { baseUrl: '' }))
         const restoredEnh = await win.evaluate(async () => {
           const r = await window.api.ai.tiers()
           return r.tiers.find((t) => t.id === 'enhanced').baseUrl
@@ -2820,7 +2885,12 @@ try {
       await snap('41f-一轮超时-中断提示', 200)
       console.log('R3 墙钟超时 ✓', JSON.stringify({ 中断用时ms: elapsedMs, 子进程: mine, 半截正文: partial.length }))
       hole.close()
-      await win.evaluate((b) => window.api.ai.setTierConfig('enhanced', { baseUrl: b }), enh0.baseUrl)
+      await win.evaluate(() => window.api.ai.setTierConfig('enhanced', { baseUrl: '' })) // 清空 = 回到下发值
+      {
+        const back = (await win.evaluate(() => window.api.ai.tiers())).tiers.find((t) => t.id === 'enhanced')
+        if (back.baseUrl !== enh0.baseUrl || back.overridden || !back.provisioned)
+          throw new Error('R3 还原后增强档没有回到服务端下发值：' + JSON.stringify(back))
+      }
       // 这条 failed 任务留在 recent 里：本地模式后面没有看 Dock 失败文案的断言（M-03 那段是 CHAT 专属）
       await win.click('button[title="新对话"]')
       await win.waitForTimeout(400)
@@ -4199,7 +4269,14 @@ try {
     if (std.fast !== 'deepseek-v4-flash') throw new Error(`标准档轻量模型不对：${std.fast}`)
     if (!std.base.includes('api.deepseek.com')) throw new Error(`标准档线路不对：${std.base}`)
     if (enh.model !== 'claude-opus-5') throw new Error(`增强档主模型没钉死成 claude-opus-5：${enh.model}`)
-    if (!enh.base.includes('aihubmix.com')) throw new Error(`增强档线路不对：${enh.base}`)
+    // 2026-09-03 起：增强档 = 中转站 api.inferera.com，aihubmix.com 从所有默认值/断言里清除
+    if (!enh.base.includes('api.inferera.com')) throw new Error(`增强档线路不对：${enh.base}`)
+    if (/aihubmix/i.test(std.base + enh.base)) throw new Error(`档位映射里仍出现 aihubmix：${std.base} / ${enh.base}`)
+    // 两档地址都该标「服务端下发」（走查种的就是下发形态；界面必须如实说来源）
+    for (const id of ['standard', 'enhanced']) {
+      const row = await win.locator(`[data-testid="tier-config-${id}"]`).innerText()
+      if (!row.includes('服务端下发')) throw new Error(`「${id}」档没有标出线路来自服务端下发：「${row.replace(/\s+/g, ' ').slice(0, 80)}」`)
+    }
     await win.locator('[data-testid="tier-config-enhanced"]').scrollIntoViewIfNeeded()
     await snap('10h-管理员区-档位映射', 300)
     // 线路检测按钮真点一次：结论必须落到界面上（可用 / 不可用+原因）
@@ -5192,7 +5269,7 @@ const ONLY_IN_CHAT_RUN = {
   '52-产物步骤-无历史时长.png': '产物步骤（本机还没有历史耗时）',
   '52b-产物步骤-有历史时长.png': '产物步骤（秒数取自本机耗时中位数）',
   '53-步骤流-失败步骤.png': '工具失败的那一步标出来（靠模型肯照做，抓不到会打印跳过原因）',
-  // 45e（老用户升级机的增强档回落）两轮都刷得到，不列进来
+  // 45e（老用户升级机：迁移 v2 + 增强线路未配置）两轮都刷得到，不列进来
   // 47b/47c 两轮都刷得到，不列进来
 }
 /**
