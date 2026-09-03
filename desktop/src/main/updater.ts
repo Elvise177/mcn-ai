@@ -11,10 +11,12 @@ import { log } from './lib/logger'
  *   下载期间界面上什么都不出（下载失败也不出）——更新链路的任何故障都不许打扰正在干活的人。
  *
  * 三条硬约定（改这层前先看）：
- * ① **占位源不发请求**：更新源 URL 现在是占位（见 electron-builder.yml 的 publish.url），
- *    真实的阿里云 OSS 地址用户稍后给。占位期间整条链路直接跳过——否则每台客户机
- *    每 4 小时往一个不存在的域名打一次请求，日志里堆一串 ENOTFOUND，看着像产品坏了。
- *    切真实源的步骤写在 docs/RELEASE.md §C。
+ * ① **占位源不发请求**：更新源 URL 是打包时烧进 `resources/app-update.yml` 的
+ *    （electron-builder.yml 的 publish.url）。**2026-08-19 起已是真实的阿里云 OSS 地址**
+ *    （`samepage-updates.oss-cn-chengdu.aliyuncs.com/mac/`，见 docs/RELEASE.md §C），
+ *    所以下面的 `.invalid` 判据在正式包里恒为假——它只保护「用占位地址打出来的包」：
+ *    那种包整条链路直接跳过，否则每台客户机每 4 小时往一个解析不了的域名打一次请求，
+ *    日志里堆一串 ENOTFOUND，看着像产品坏了。判据不删：换渠道/私有 bucket 时仍可能用占位先打包。
  * ② **push 尽力而为、snapshot 才是权威**（同任务层的约定）：`update:ready` 事件在窗口
  *    reload 期间会静默丢，所以渲染层每次挂载都要先 `update:state` 打底。
  * ③ **只在打包形态生效**：dev 下 electron-updater 没有 app-update.yml，调它只会抛。
