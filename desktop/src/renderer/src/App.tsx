@@ -596,6 +596,7 @@ function IngestSection() {
       <label className="flex cursor-pointer items-center gap-2 text-md">
         <input
           type="checkbox"
+          data-testid="artifact-auto-ingest"
           checked={auto}
           onChange={(e) => {
             setAuto(e.target.checked)

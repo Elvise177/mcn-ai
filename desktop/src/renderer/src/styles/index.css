@@ -97,6 +97,18 @@ button { transition: background-color var(--dur-fast) ease, color var(--dur-fast
 .task-dock-open {
   max-height: 160px;
   opacity: 1;
+  /**
+   * **展开态必须放开 overflow**（2026-09-03 走查现场逮到）。
+   *
+   * 上面那条 `overflow: hidden` 是给 max-height 过渡用的，但 Dock 里那个
+   * 「≥2 项时点开的任务列表」是 `absolute bottom-full` —— 它画在 Dock **上方**，
+   * 正好落在被裁掉的那一片里。后果：列表看着像出现了（DOM 在、Playwright 也报
+   * "visible"），实际像素被裁光，点下去命中的是它底下的「最近对话」列表。
+   * 也就是说**多任务时 Dock 的列表入口从写出来那天起就是点不到的**。
+   *
+   * 只在展开态放开：收起态仍然靠 hidden 把内容裁在 0 高度里。
+   */
+  overflow: visible;
 }
 
 @media (prefers-reduced-motion: reduce) {

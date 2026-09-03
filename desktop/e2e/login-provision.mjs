@@ -78,7 +78,7 @@ try {
   // 90s 还进不去就是回归：写入又跑回登录这条同步路径上了
   await win.waitForSelector('button[title="新对话"]', { timeout: 90000 }).catch(() => fail('登录后未进入主界面'))
   console.log(`登录到进主界面 ${Date.now() - tLogin}ms`)
-  const chatHome = await win.locator('text=问你的库，或直接说要做什么').count()
+  const chatHome = await win.locator('text=问你的知识库，或直接说要做什么').count()
   if (!chatHome) await fail('登录后没有落在对话页')
   console.log('✅ 登录门登录成功，直接落在对话页')
 

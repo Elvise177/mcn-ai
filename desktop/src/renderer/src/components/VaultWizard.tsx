@@ -40,7 +40,7 @@ export function VaultWizard({
         onReady(v)
       }
     } catch (e) {
-      ui.toast(`${create ? '新建库' : '打开库'}失败：${errText(e)}`, 'error')
+      ui.toast(`${create ? '新建知识库' : '打开知识库'}失败：${errText(e)}`, 'error')
     } finally {
       setBusy(null)
       // 失败/取消都退回第一步：停在模板页上会让人以为库已经建了一半

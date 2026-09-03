@@ -54,11 +54,15 @@ export const STAGE_LABEL: Record<string, string> = {
   convert: '读取文件',
   pii_guard: '检查中',
   tag_llm: '整理中',
-  tag_rules: '整理中',
+  // **相邻两个阶段不许同名**（走查断言逮到）：投递箱面板一个阶段事件画一行，
+  // 同名就成了连着两行一模一样的字——那正是客户报「右下角出现多次上云进度」的观感。
+  // 这一步是"不发给模型、只按规则整理"的那批（敏感文件），所以叫「本地整理」
+  tag_rules: '本地整理',
   convert_failures: '读取结果',
   sensitive_enrich: '建立关联',
   gen_moc: '建立索引',
-  build_cards: '建立关联',
+  // 实体卡（达人/产品/合作方的档案页）：与上面的「建立关联」是两件事，也不能同名
+  build_cards: '整理档案',
   archive: '收尾',
   cloud_sync: '同步云端',
   done: '完成',

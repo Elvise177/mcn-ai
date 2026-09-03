@@ -8,7 +8,7 @@ import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync, writeFileSync, rea
 import { execSync } from 'child_process'
 import { createServer } from 'net'
 import { join, dirname } from 'path'
-import { homedir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { fileURLToPath } from 'url'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -281,19 +281,19 @@ const rawShot = async (cdp, name) => {
   record('00c-首跑-建库引导')
   console.log('shot: 00c-首跑-建库引导')
   // 两张卡片静态同款、hover 才高亮：hover 态要用 CDP 抓
-  await w2.locator('button:has-text("新建库")').hover()
+  await w2.locator('[data-testid="wizard-create"]').hover()
   await w2.waitForTimeout(200)
-  const wizardHover = await w2.locator('button:has-text("新建库")').evaluate(
+  const wizardHover = await w2.locator('[data-testid="wizard-create"]').evaluate(
     (el) => getComputedStyle(el).borderColor
   )
-  const wizardIdle = await w2.locator('button:has-text("使用已有库")').evaluate(
+  const wizardIdle = await w2.locator('[data-testid="wizard-existing"]').evaluate(
     (el) => getComputedStyle(el).borderColor
   )
   if (wizardHover === wizardIdle) throw new Error(`建库卡片 hover 没有反馈：${wizardHover}`)
   await rawShot(cdp2, '00c2-建库引导-卡片hover')
   console.log('建库卡片 hover ✓', JSON.stringify({ hover: wizardHover, idle: wizardIdle }))
   await w2.click('text=暂时跳过')
-  await w2.locator('text=问你的库，或直接说要做什么').waitFor({ timeout: 5000 })
+  await w2.locator('text=问你的知识库，或直接说要做什么').waitFor({ timeout: 5000 })
   await w2.screenshot({ path: join(shots, '00d-首跑-跳过后落对话页.png') })
   record('00d-首跑-跳过后落对话页')
   console.log('shot: 00d-首跑-跳过后落对话页')
@@ -355,7 +355,7 @@ const rawShot = async (cdp, name) => {
   // ② 失败要有可见报错，而且必须解锁回可点状态（H-12 的正主：以前 setBusy(false) 根本不会执行）
   await wW.locator('[data-testid="toast"]').waitFor({ timeout: 15000 })
   const wizToast = await wW.locator('[data-testid="toast"]').first().innerText()
-  if (!/新建库失败/.test(wizToast)) throw new Error(`建库失败没有报错 toast：「${wizToast}」`)
+  if (!/新建知识库失败/.test(wizToast)) throw new Error(`建库失败没有报错 toast：「${wizToast}」`)
   await wW.screenshot({ path: join(shots, '40b-建库向导-失败报错.png') })
   record('40b-建库向导-失败报错')
   for (const id of ['wizard-create', 'wizard-existing']) {
@@ -381,7 +381,7 @@ const rawShot = async (cdp, name) => {
     const guardToast = wW.locator('[data-testid="toast"]:has-text("家目录")')
     await guardToast.waitFor({ timeout: 10000 })
     const guardText = await guardToast.innerText()
-    if (!/打开库失败/.test(guardText)) throw new Error(`拒绝家目录的 toast 文案不对：「${guardText}」`)
+    if (!/打开知识库失败/.test(guardText)) throw new Error(`拒绝家目录的 toast 文案不对：「${guardText}」`)
     if (!(await wW.locator('text=建立你的知识库').count())) throw new Error('拒绝家目录后离开了向导')
     if (await wW.locator('[data-testid="wizard-existing"]').isDisabled()) throw new Error('拒绝家目录后「使用已有库」仍是禁用的')
     await wW.screenshot({ path: join(shots, '40h-建库向导-拒绝家目录.png') })
@@ -448,7 +448,7 @@ const rawShot = async (cdp, name) => {
   if (leaked.length) throw new Error(`通用模板的首页出现 MCN 快捷指令：${JSON.stringify(leaked)}`)
 
   // ③ 关系图图例只列图上真有的类型（新库只有一篇「欢迎」→ 只该有「文档」）
-  await wC.click('text=个人知识库')
+  await wC.click('aside button:has-text("知识库")')
   await wC.waitForTimeout(2500)
   const legend = await wC.locator('[data-testid="graph-legend"] span').allInnerTexts()
   const legendBad = legend.filter((t) => ['达人', '产品', '合作方'].includes(t.trim()))
@@ -516,7 +516,7 @@ const rawShot = async (cdp, name) => {
   record('02a-工作台-空库引导')
   console.log('shot: 02a-工作台-空库引导 ✓', JSON.stringify({ 副标题: sub, 指向: hintText }))
 
-  await w3.click('text=个人知识库')
+  await w3.click('aside button:has-text("知识库")')
   await w3.locator('text=拖入你的第一份资料试试').waitFor({ timeout: 8000 })
   const guideBtn = await w3.locator('button:has-text("打开投递箱")').count()
   if (!guideBtn) throw new Error('空库引导缺少「打开投递箱」入口')
@@ -579,7 +579,7 @@ const rawShot = async (cdp, name) => {
   const offText = await w2b.locator('[data-testid="offline-bar"]').innerText()
   if (!/云端离线/.test(offText)) throw new Error(`离线条文案不对：「${offText}」`)
   // 本地功能必须照常可用（这是 bug#1 的关键：不是"打不开"，是"云端那部分不可用"）
-  await w2b.click('text=个人知识库')
+  await w2b.click('aside button:has-text("知识库")')
   await w2b.waitForTimeout(2500)
   if (!(await w2b.locator('[data-testid="tree-col"]').count()))
     throw new Error('离线时知识库打不开了（bug#1 降级不成立）')
@@ -1551,7 +1551,7 @@ try {
    */
   {
     const sub = (await win.locator('[data-testid="home-subtitle"]').innerText()).trim()
-    if (sub !== '问你的库，或直接说要做什么') throw new Error(`非空库首页副标题被改成了空库那句：「${sub}」`)
+    if (sub !== '问你的知识库，或直接说要做什么') throw new Error(`非空库首页副标题被改成了空库那句：「${sub}」`)
     if (await win.locator('[data-testid="home-empty-vault-hint"]').count())
       throw new Error('库里有内容，首页却挂着空库引导')
   }
@@ -1561,7 +1561,7 @@ try {
   await assertNoRose('工作台首页')
   // 深色侧栏的 hover 态要单独留一张：hover 只有 CDP 抓屏截得到（§4-15），
   // 而"深底上 hover 是提亮还是压暗"正是这次改动最容易做错的一处
-  await win.hover('nav button:has-text("个人知识库")')
+  await win.hover('nav button:has-text("知识库")')
   await snapHover('01i-侧栏-深色hover态')
   // 对话工作台（默认页，无模块入口——新对话/Recents 即入口）：空态 + 输入 + 快捷指令
   await snap('01b-工作台-空态', 400)
@@ -2938,17 +2938,17 @@ try {
     // ＋新对话必须复位：空态问候可见 + 输入框清空（回归 2026-07-16 用户报障）
     await win.click('button[title="新对话"]')
     await win.waitForTimeout(500)
-    const emptyOk = await win.locator('text=问你的库，或直接说要做什么').count()
+    const emptyOk = await win.locator('text=问你的知识库，或直接说要做什么').count()
     const inputVal = await win.locator('textarea').first().inputValue()
     if (!emptyOk || inputVal !== '') throw new Error(`＋新对话未复位：空态=${emptyOk} 输入残留="${inputVal}"`)
     await snap('01d2-新对话复位', 300)
   }
 
   // 知识库页
-  await win.click('text=个人知识库')
+  await win.click('aside button:has-text("知识库")')
   await snap('02-知识库-默认大图谱', 2500)
-  await assertNoOldBrand('个人知识库')
-  await assertNoRose('个人知识库')
+  await assertNoOldBrand('知识库')
+  await assertNoRose('知识库')
 
   // 文件树默认宽度收窄到 ~220px（第二轮精修项）
   const treeW0 = await win.locator('[data-testid="tree-col"]').evaluate((el) => el.offsetWidth)
@@ -3238,15 +3238,38 @@ try {
             const dockOpen = async () =>
               (await dockBox.evaluate((el) => getComputedStyle(el).maxHeight)) !== '0px'
 
-            // 上一轮可能已经跑完了（任务进终态、Dock 收起），所以这里自己再投一个文件，
-            // 保证接下来的断言有一个确定处于活跃态的任务可看
-            await win.evaluate((pth) => window.api.inbox.enqueue([pth]), sample)
+            /**
+             * 上一轮可能已经跑完了（任务进终态、Dock 收起），所以这里自己再投一批，
+             * 保证接下来的断言有一个**确定处于活跃态的投递任务**可看。
+             *
+             * 两条都是踩出来的：
+             * ① **等的必须是"有在跑的投递任务"，不是"Dock 出现了"**——Dock 上还挂着
+             *    R3 那条 failed 的对话，光看 Dock 开没开，前提是**碰巧**成立的
+             *    （CLAUDE.md 铁律里那张表的同一个病）。
+             * ② **投一批而不是一个**：本地模式 `--skip-llm`，一个文件几秒就跑完，
+             *    等我们关掉浮窗再去点 Dock，任务早没了（把窗口拉宽到必然成立）。
+             */
+            const widen = []
+            for (let i = 0; i < 6; i++) {
+              const p = join(tmpdir(), `e2e唤回窗口_${Date.now()}_${i}.docx`)
+              copyFileSync(sample, p)
+              widen.push(p)
+            }
+            await win.evaluate((ps) => window.api.inbox.enqueue(ps), widen)
+            const liveInbox = async () =>
+              win.evaluate(async () => {
+                const snap = await window.api.tasks.list()
+                return snap.tasks.some(
+                  (t) => t.kind === 'inbox' && (t.status === 'queued' || t.status === 'running')
+                )
+              })
             let live = false
-            for (let i = 0; i < 120 && !live; i++) {
-              live = await dockOpen()
+            for (let i = 0; i < 240 && !live; i++) {
+              live = await liveInbox()
               if (!live) await win.waitForTimeout(500)
             }
-            if (!live) throw new Error('投了文件之后 TaskDock 仍然没出现')
+            for (const p of widen) rmSync(p, { force: true })
+            if (!live) throw new Error('投了一批文件之后任务层里仍然没有在跑的投递任务')
 
             /**
              * **关掉浮窗 → 点 Dock → 浮窗必须回来**（2026-08-18 真人测试反馈）。
@@ -3266,10 +3289,51 @@ try {
             await win.waitForTimeout(400)
             if (await panel.count())
               throw new Error('点了 ✕ 投递箱浮窗没关掉（跑批期间被 inboxRunning 顶回来了？）')
+            /**
+             * Dock 有**两种合法形态**，走哪一种由任务层决定，所以**先从另一侧把形态问出来**，
+             * 再走对应的那条路（CLAUDE.md：两种合法状态就两种都断言，不许猜、也不许 try/catch 一裹）：
+             *  · 只有一条任务 → 点整条就直接带你去那个任务
+             *  · ≥2 条（这一轮常常是：投递箱在跑 + R3 那条 failed 的对话）→ 点整条只是**展开列表**，
+             *    真正的入口是列表里投递箱那一行
+             * 第一版只点了外层那颗，Dock 里恰好多一条失败任务时就永远等不到面板
+             * （2026-09-03 走查现场：等 8 秒超时，看着像"唤回坏了"，其实是点错了地方）
+             */
+            const dock = await win.evaluate(async () => {
+              const snap = await window.api.tasks.list()
+              const live = snap.tasks.filter(
+                (t) => (t.status === 'queued' || t.status === 'running') && t.kind !== 'sync'
+              )
+              const bad = snap.tasks.filter((t) => t.status === 'failed' && t.kind !== 'sync')
+              return { rows: live.length + bad.length, inboxTitle: live.find((t) => t.kind === 'inbox')?.title ?? '' }
+            })
+            if (!dock.inboxTitle) throw new Error('唤回断言的前提没了：任务层里已经没有在跑的投递任务')
             await win.locator('[data-testid="task-dock-btn"]').click()
+            if (dock.rows > 1) {
+              // 标题从任务层取，不在断言里再抄一份文案
+              const row = win.locator(`[data-testid="task-dock"] button:has-text("${dock.inboxTitle}")`).last()
+              await row.waitFor({ timeout: 5000 })
+              /**
+               * **点得到才算数**（2026-09-03 走查逮到的真 bug）：这个列表是
+               * `absolute bottom-full`，画在 Dock 上方，而 `.task-dock` 为了 max-height 过渡
+               * 挂着 `overflow: hidden` —— 像素被整片裁掉，DOM 还在、Playwright 也报 "visible"，
+               * 点下去命中的却是底下的「最近对话」列表。所以这里先做一次**命中测试**：
+               * 列表中心点上到底是谁。只断言"看得见"会把这类缺陷整个放过去。
+               */
+              const hit = await row.evaluate((el) => {
+                const r = el.getBoundingClientRect()
+                const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+                return { inside: el.contains(top), top: top?.className ?? '', y: Math.round(r.top) }
+              })
+              if (!hit.inside)
+                throw new Error(
+                  `Dock 的任务列表被裁掉了、点不到（命中的是「${hit.top}」）——` +
+                    `多半是 .task-dock 的 overflow:hidden 把 absolute bottom-full 的浮层裁没了`
+                )
+              await row.click()
+            }
             await panel.waitFor({ timeout: 8000 })
             await snap('27b-Dock唤回投递箱浮窗', 300)
-            console.log('Dock 唤回浮窗 ✓')
+            console.log('Dock 唤回浮窗 ✓', JSON.stringify(dock))
 
             // 上面这几步会吃掉十几秒，本地模式一轮 pipeline 很短，等做完任务多半已经结束了。
             // 后面 H-07/H-08/reload 那几条都要求**有一个活跃任务**，所以这里把前提重新架起来。
@@ -3379,7 +3443,7 @@ try {
             console.log('真相源一致 ✓', JSON.stringify({ ...cmp, uiCount }))
 
             // H-08：切回知识库页，运行态与进度条必须还在（旧代码回来是空白或上一轮的静态日志）
-            await win.click('text=个人知识库')
+            await win.click('aside button:has-text("知识库")')
             await win.waitForTimeout(2000)
             if (!(await win.locator('.inbox-bar-fill').count())) {
               const btn = win.locator('button[title="投递箱"]')
@@ -3438,12 +3502,23 @@ try {
              */
             const m = text.match(/(\d+)\s*\/\s*(\d+)/)
             const finished = !!m && m[1] === m[2]
+            /**
+             * 「上云那行出来了没有」**必须从另一侧取阶段名**（CLAUDE.md 三条规矩之一）。
+             * 这里原来写死 `startsWith('上云')`，U3 #6 把阶段名改成用户词之后它永远为假——
+             * 采样点提前，下面的 message 断言跟着报成"阶段日志把 message 丢了"，方向完全指错。
+             * 现在拿任务层那份 `stages`（系统侧的真相）里 cloud_sync 的 message 去认。
+             */
             const cloudRowUp = panelUp
-              ? await win.evaluate(() =>
-                  [...document.querySelectorAll('[data-testid="inbox-panel"] .fade-up')].some((el) =>
-                    (el.textContent ?? '').replace(/\s+/g, '').startsWith('上云')
+              ? await win.evaluate(async () => {
+                  const snap = await window.api.tasks.list()
+                  const t = snap.tasks.find((x) => x.kind === 'inbox')
+                  const ev = (t?.stages ?? []).filter((e) => e.stage === 'cloud_sync').pop()
+                  if (!ev?.message) return false
+                  const want = ev.message.replace(/\s+/g, '')
+                  return [...document.querySelectorAll('[data-testid="inbox-panel"] .fade-up')].some((el) =>
+                    (el.textContent ?? '').replace(/\s+/g, '').includes(want)
                   )
-                )
+                })
               : false
             if (panelUp && (cloudRowUp || finished || !busy)) break
             // 面板已经收起（run-end 后 4 秒自动收）就别再等了——该采的已经采到了
@@ -3460,9 +3535,45 @@ try {
            * 本地模式没登录，cloud_sync 是 `skipped` 带 message「未登录」，正好验同一条链路。
            */
           if (!logRows.length) throw new Error('整轮跑下来投递箱面板一行阶段日志都没渲染过')
-          const cloudRow = logRows.find((t) => t.startsWith('上云'))
-          if (!cloudRow || cloudRow === '上云')
-            throw new Error(`阶段日志把 message 丢了（只剩光秃秃的阶段名）：${JSON.stringify(logRows)}`)
+          // 期望值从**任务层**取（系统侧），不在断言里再抄一份阶段名/文案常量
+          let cloudEv = null
+          for (let i = 0; i < 240 && !cloudEv?.message; i++) {
+            cloudEv = await win.evaluate(async () => {
+              const snap = await window.api.tasks.list()
+              const t = snap.tasks.find((x) => x.kind === 'inbox')
+              return (t?.stages ?? []).filter((e) => e.stage === 'cloud_sync').pop() ?? null
+            })
+            if (!cloudEv?.message) await win.waitForTimeout(500)
+          }
+          if (!cloudEv?.message) throw new Error('等了 2 分钟任务层里都没有带 message 的 cloud_sync 事件')
+          const wantMsg = cloudEv.message.replace(/\s+/g, '')
+          const readRows = () =>
+            win.evaluate(() =>
+              [...document.querySelectorAll('[data-testid="inbox-panel"] .fade-up')].map((el) =>
+                (el.textContent ?? '').replace(/\s+/g, '')
+              )
+            )
+          /**
+           * **面板可能在最后那一行渲染出来之前就自动收起了**（run-end 后 4 秒收；
+           * 而实体建卡与上云是跑在 pipeline 之后的主进程里的，正好落在这段窗口上）。
+           * 收起不代表没渲染过——面板读的就是任务对象上那份 `stages`，重新打开一次
+           * 拿到的是同一份。所以采不到就重开再采，而不是把断言判死（2026-09-03 走查踩到）。
+           */
+          if (!logRows.some((t) => t.includes(wantMsg))) {
+            const toggle = win.locator('[data-testid="inbox-toggle"]')
+            if (!(await win.locator('[data-testid="inbox-panel"]').count())) await toggle.click()
+            await win.locator('[data-testid="inbox-panel"]').waitFor({ timeout: 10000 })
+            for (let i = 0; i < 40; i++) {
+              logRows = await readRows()
+              if (logRows.some((t) => t.includes(wantMsg))) break
+              await win.waitForTimeout(500)
+            }
+          }
+          const cloudRow = logRows.find((t) => t.includes(wantMsg))
+          if (!cloudRow)
+            throw new Error(
+              `阶段日志把 message 丢了（只剩光秃秃的阶段名）：期望含「${wantMsg}」，实得 ${JSON.stringify(logRows)}`
+            )
           const stageName = (t) => t.replace(/[·（(].*$/, '')
           for (let i = 1; i < logRows.length; i++) {
             if (stageName(logRows[i]) && stageName(logRows[i]) === stageName(logRows[i - 1]))
@@ -3779,7 +3890,7 @@ try {
     await win.reload()
     await armUpgradeGuard() // reload 重置了页面上下文，升级提示守卫要重装（见定义处）
     await win.waitForTimeout(2000)
-    await win.click('text=个人知识库')
+    await win.click('aside button:has-text("知识库")')
     await win.waitForTimeout(2500)
     const treeReload = await widthOf('tree-col')
     if (Math.abs(treeReload - treeAfter) > 2)
@@ -4214,7 +4325,15 @@ try {
     await win.click('button[title="切换知识库"]')
     await win.locator('text=切换到另一个知识库？').waitFor({ timeout: 5000 })
     const switchMsg = await win.locator('.whitespace-pre-line').first().innerText()
-    if (!switchMsg.includes(settings.vaultPath)) throw new Error(`换库确认没显示当前库路径：「${switchMsg}」`)
+    /**
+     * U3 #5：这里断言的从"含绝对路径"改成"**只含文件夹名、不含绝对路径**"。
+     * `/Users/xxx/…/mcnai-e2e-vault` 里既有用户名也有我们的目录结构，
+     * 对"我要不要切库"这个决定一点帮助都没有——但用户要认出"当前是哪个库"，所以名字得在。
+     */
+    const vaultName = settings.vaultPath.split('/').filter(Boolean).pop()
+    if (!switchMsg.includes(vaultName)) throw new Error(`换库确认没说清当前是哪个库：「${switchMsg}」`)
+    if (switchMsg.includes(settings.vaultPath) || /\/Users\//.test(switchMsg))
+      throw new Error(`换库确认把绝对路径摆出来了（U3 #5）：「${switchMsg}」`)
     await snap('22-换库二次确认', 200)
     // 取消：应该还在原来的库里（文件树还在）
     await win.click('[data-testid="modal"] button:has-text("取消")')
@@ -4973,7 +5092,12 @@ try {
   // 首页面板默认收起，先点收起态的入口把它展开
   await win.click('button[title="打开产物面板"]')
   await win.waitForTimeout(400)
-  if (!(await win.locator('text=90_产物/').count())) throw new Error('点收起态入口后产物面板没展开')
+  // 展开判据改用面板本身（原来用的是标题里的 `90_产物/`，U3 #5 把内部目录名去掉了）
+  if (!(await win.locator('[data-testid="artifact-panel"]').count()))
+    throw new Error('点收起态入口后产物面板没展开')
+  // U3 #5：面板标题里不许再摆内部目录名——它是我们的落位约定，不是用户要记的东西
+  const panelHead = await win.locator('[data-testid="artifact-panel"] > div').first().innerText()
+  if (/90_产物|\/Users\//.test(panelHead)) throw new Error(`产物面板标题泄漏了内部路径：「${panelHead}」`)
   await snap('12b-产物面板-手动展开', 200)
   const cardPpt = win.locator('div.group:has([title="e2e课件.pptx"])').first()
   if (!(await cardPpt.count())) throw new Error('产物面板没有 e2e课件.pptx 卡片')
@@ -5266,19 +5390,29 @@ try {
 
   // ---- Q13 / Q14：诊断导出有 busy 与结论、设置项落盘有反馈 ----
   {
-    await win.click('text=设置')
+    await win.click('aside button:has-text("设置")')
     await win.waitForTimeout(600)
 
-    // Q14：勾一个复选框，必须给「已保存」——原来五处 set* 的返回值全被 void 扔了，
-    // 成功和失败长得一模一样（都是什么都不发生）
-    await win.click('[data-testid="show-cost-toggle"]')
+    /**
+     * Q14：勾一个复选框，必须给「已保存」——原来五处 `settings.set*` 的返回值全被 `void` 扔了，
+     * **成功和失败长得一模一样**（都是什么都不发生）。
+     *
+     * 用「产物自动入库」这颗而不是管理员区里的那颗：管理员区的解锁态只存内存，
+     * 上面 Q8 那段做过一次 reload，锁已经合上了（第一版就是这么红的）。
+     */
+    const ingestToggle = win.locator('[data-testid="artifact-auto-ingest"]')
+    const ingestBefore = await ingestToggle.isChecked()
+    await ingestToggle.click()
     const savedToast = win.locator('[data-testid="toast"]', { hasText: '已保存' })
     await savedToast.waitFor({ timeout: 8000 })
     if ((await savedToast.first().getAttribute('data-kind')) !== 'ok')
       throw new Error('保存成功的 toast 语义不是 ok（绿勾那一档）')
     await snap('57-设置项保存反馈', 200)
-    await win.click('[data-testid="show-cost-toggle"]') // 复位，别影响后面的用量页断言
+    // 复位：这颗开关决定产物要不要自动进投递箱，留着反向值会影响后面的断言
+    await ingestToggle.click()
     await win.waitForTimeout(400)
+    if ((await ingestToggle.isChecked()) !== ingestBefore)
+      throw new Error('Q14 断言把「产物自动入库」开关留在了反向值上')
 
     // Q13：导出诊断报告。原来无 try/catch 且**无条件报成功**——
     // 满盘/无权限时把失败说成"已导出"，而这是客服排查的最后一个抓手
@@ -5427,9 +5561,17 @@ try {
     const failText = await wU.locator('[data-testid="update-text"]').innerText()
     if (!/更新失败/.test(failText) || !/安装器启动失败/.test(failText))
       throw new Error(`失败文案没说清原因：「${failText}」`)
-    // 失败态不该再摆一颗「立即重启」——按了什么都不会发生的按钮比没有更糟
-    if (await wU.locator('[data-testid="update-install"]').count())
-      throw new Error('已经失败了却还留着「立即重启」按钮')
+    /**
+     * **安装失败不许说"稍后会自动重试"**：包已经下好了，没有任何东西会自动再装一次
+     * （只有"下载失败"才轮得到 4 小时一次的例行查更新去重试）。
+     * 这一条是 2026-09-03 走查读文案时抓到的——断言绿的时候也要读一遍那句话。
+     */
+    if (/自动重试/.test(failText)) throw new Error(`安装失败却说会自动重试（这是假话）：「${failText}」`)
+    // 出口必须留着：包已经下好了，"再点一次「立即重启」"是他唯一能做的事
+    const retryBtn = wU.locator('[data-testid="update-install"]')
+    if (!(await retryBtn.count())) throw new Error('安装失败后连「立即重启」都没了，用户没有任何出口')
+    if (await retryBtn.isDisabled())
+      throw new Error('安装失败后「立即重启」还禁用着（按钮永远停在「正在重启…」，正是 Q9 要修的那半截）')
     await wU.waitForTimeout(300)
     await wU.screenshot({ path: join(shots, '59b-更新条-安装失败.png') })
     record('59b-更新条-安装失败')

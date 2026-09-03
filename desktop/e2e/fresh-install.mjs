@@ -96,7 +96,7 @@ try {
   await win.click('button:has-text("登录")')
   // 真·全新机器登录完落的是**建库引导**，不是对话页——那台机器还没有库，
   // 侧栏的「新对话」按钮此时根本不存在。等错东西会白等 90 秒（第一版就是这么红的）。
-  await win.waitForSelector('button:has-text("新建库")', { timeout: 90000 })
+  await win.waitForSelector('[data-testid="wizard-create"]', { timeout: 90000 })
   let s = {}
   for (let i = 0; i < 60; i++) {
     s = await win.evaluate(() => window.api.settings.get())
@@ -120,7 +120,7 @@ try {
   await snap('61-新装-建库向导两分支')
   // 走 UI 上那颗「新建库」卡片；落点由 MCNAI_E2E_NEW_VAULT 决定
   // （系统保存框 Playwright 驱动不了，见 ipc.ts 里那条注释）
-  await win.click('button:has-text("新建库")')
+  await win.click('[data-testid="wizard-create"]')
   for (let i = 0; i < 60; i++) {
     if ((await win.evaluate(() => window.api.settings.get())).vaultPath) break
     await win.waitForTimeout(1000)
@@ -149,7 +149,7 @@ try {
   check('入库跑完且成功', task?.status === 'succeeded', JSON.stringify({ status: task?.status, error: task?.error }))
   // 截图前先切回知识库页：`inbox.enqueue` 是直接调 IPC 的，界面停在哪儿就是哪儿，
   // 不切的话这张「入库完成」拍出来是对话首页，等于什么都没证明
-  await win.click('text=个人知识库').catch(() => {})
+  await win.click('aside button:has-text("知识库")').catch(() => {})
   await win.waitForTimeout(2500)
   await snap('62-新装-入库完成')
 

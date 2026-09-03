@@ -41,10 +41,28 @@ export function UpdateBar() {
     }
   }, [])
 
+  /**
+   * **主进程推来失败态时要把按钮放出来**（Q9 的下半截）。
+   *
+   * `install()` 是立刻回 `{ok:true}` 的——真正的失败发生在之后的 `setImmediate` 里，
+   * 只能由主进程 push `phase:'error'` 上来。不在这里复位 `restarting` 的话，
+   * 按钮就永远停在「正在重启…」且不可点——那正是 0.1.2 修了一半、这次要修完的那个卡死。
+   */
+  useEffect(() => {
+    if (st?.phase === 'error') setRestarting(false)
+  }, [st?.phase])
+
   if (!st || dismissed) return null
   const failed = st.phase === 'error' || !!installError
   const downloading = st.phase === 'downloading'
   if (!failed && !downloading && !st.ready) return null
+  /**
+   * **两种失败要说两句不同的话**（2026-09-03 走查读出来的）：
+   *  · 下载失败 → 包还没下全，4 小时一次的例行查更新真的会再试一遍 → 「稍后会自动重试」
+   *  · 安装失败 → 包**已经下好了**（`ready` 仍为真），没有任何东西会自动再装一次；
+   *    说"会自动重试"就是撒谎，而且把唯一的出口（再点一次「立即重启」）也藏了起来
+   */
+  const installFailed = failed && st.ready
 
   const tone = failed
     // `border-danger-line` 这个 token 不存在，Tailwind 静默不生成 → 失败态一直没有描边色（2026-09-03 修 Q9 时发现）
@@ -68,7 +86,9 @@ export function UpdateBar() {
 
       <span className="min-w-0 flex-1 truncate" data-testid="update-text">
         {failed
-          ? `更新失败：${installError ?? st.error}。稍后会自动重试，也可以联系我们`
+          ? installFailed
+            ? `更新失败：${installError ?? st.error}。可以再点一次「立即重启」，仍不行请联系我们`
+            : `更新失败：${installError ?? st.error}。稍后会自动重试，也可以联系我们`
           : downloading
             ? /**
                * 百分比必须出现在文案里——「正在下载新版本…」这种没有数字的说法，
@@ -88,7 +108,8 @@ export function UpdateBar() {
         </span>
       )}
 
-      {st.ready && !failed && (
+      {/* 安装失败时**按钮要留着**：包已经下好了，再点一次是他唯一的出口 */}
+      {st.ready && (!failed || installFailed) && (
         <button
           data-testid="update-install"
           disabled={restarting}

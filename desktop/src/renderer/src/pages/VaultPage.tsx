@@ -927,6 +927,7 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
             <span className="flex shrink-0 items-center gap-2.5">
               {/* 空库时给投递箱入口加个描边，和中间区域的引导箭头对上 */}
               <button
+                data-testid="inbox-toggle"
                 onClick={() => setShowInbox((s) => !s)}
                 title="投递箱"
                 className={

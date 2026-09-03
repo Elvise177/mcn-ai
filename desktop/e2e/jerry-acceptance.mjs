@@ -54,7 +54,7 @@ try {
   await win.fill('input[placeholder="邮箱"]', 'mcnai-test-a@example.com')
   await win.fill('input[placeholder="密码"]', 'McnAi-Test-2026!')
   await win.click('button:has-text("登录")')
-  await win.waitForSelector('button:has-text("新建库")', { timeout: 90000 })
+  await win.waitForSelector('[data-testid="wizard-create"]', { timeout: 90000 })
   let s = {}
   for (let i = 0; i < 60; i++) {
     s = await win.evaluate(() => window.api.settings.get())
@@ -160,7 +160,7 @@ try {
     console.log(`   实际花费 ¥${cost.toFixed(2)}（打标 ${rows.length} 篇）`)
   }
 
-  await win.click('text=个人知识库').catch(() => {})
+  await win.click('aside button:has-text("知识库")').catch(() => {})
   await win.waitForTimeout(3000)
   await win.screenshot({ path: join(shots, 'B3-05-Jerry包-通用模板入库后.png') })
   console.log(`\n   截图 → ${join(shots, 'B3-05-Jerry包-通用模板入库后.png')}`)

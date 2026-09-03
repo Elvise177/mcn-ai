@@ -186,7 +186,7 @@ say('空目录 / 全不支持格式：均返回 added=0 且带跳过计数 ✓')
 // 只断言返回值是不够的：修复前那条路径**拿到结果就扔了**，返回值一直是对的
 // 拖之前先确保停在知识库页：建完库不一定就落在这儿，搜索框（拖放锚点）没渲染出来的话
 // 事件根本没人接，toast 自然等不到
-await win.click('text=个人知识库').catch(() => {})
+await win.click('aside button:has-text("知识库")').catch(() => {})
 await win.locator('input[placeholder="搜索库…"]').waitFor({ timeout: 15000 })
 
 const dropDir = async (p) => {

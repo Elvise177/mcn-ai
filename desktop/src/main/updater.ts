@@ -201,7 +201,8 @@ export function initUpdater(window: BrowserWindow): void {
 function failInstall(e: unknown): void {
   const msg = e instanceof Error ? e.message : String(e)
   log('error', 'updater', `quitAndInstall 抛错：${msg}`)
-  state = { ...state, phase: 'error', error: `安装没能启动（${msg}）` }
+  // 渲染层会把它拼进「更新失败：…」，这里再套一层括号就成了双层嵌套（走查截图上一眼看出来的）
+  state = { ...state, phase: 'error', error: `安装没能启动，${msg}` }
   push()
 }
 

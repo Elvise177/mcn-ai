@@ -848,7 +848,7 @@ function ArtifactPanel({ homeEmpty, onOpenNote }: { homeEmpty: boolean; onOpenNo
   }
 
   return (
-    <div className="slide-in-right flex w-artifact-panel shrink-0 flex-col border-l border-line">
+    <div data-testid="artifact-panel" className="slide-in-right flex w-artifact-panel shrink-0 flex-col border-l border-line">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <div className="text-md font-medium">
           {/* U3 #5：标题里不摆内部目录名。「90_产物/」是我们的落位约定，

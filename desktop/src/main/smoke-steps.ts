@@ -4,7 +4,7 @@ import { describeStep, durationHint, scanTarget } from '../renderer/src/config/s
 import { failedCount, producedArtifact, summaryText, tierNote, type SummaryStep } from '../renderer/src/lib/turn-summary'
 import { backoffMs, isTransient, retryNotice, shouldAnnounceRetry } from './lib/backoff'
 import { nextRetryAt, notesForRoot, pickDue } from './lib/retry-ladder'
-import { INBOX_STAGES, STAGE_LABEL } from '../renderer/src/config/stages'
+import { INBOX_STAGES, STAGE_LABEL, stageLabel } from '../renderer/src/config/stages'
 import { fmLabel, formatFrontmatterValue, splitFrontmatter } from '../renderer/src/lib/note-format'
 
 /**
@@ -428,6 +428,17 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   }
   // 主流程八个阶段一个都不许漏映射（漏了就会在进度条上直接露出英文 stage id）
   for (const s of INBOX_STAGES) check(`主流程阶段 ${s} 有映射`, STAGE_LABEL[s] !== undefined)
+  /**
+   * **相邻阶段不许同名**（走查现场逮到）：投递箱面板一个阶段事件画一行，
+   * 相邻两行一模一样就是客户报过的「右下角出现多次上云进度」那种观感。
+   * 走查有一条断言守着（"同一阶段连着堆了两行"），但它要跑完一整轮入库才走得到；
+   * 这里几毫秒就能把整张表扫一遍。
+   */
+  for (let i = 1; i < INBOX_STAGES.length; i++) {
+    const a = stageLabel(INBOX_STAGES[i - 1])
+    const b = stageLabel(INBOX_STAGES[i])
+    check(`${INBOX_STAGES[i - 1]} 与 ${INBOX_STAGES[i]} 用户词不同名`, a !== b, `都叫「${a}」`)
+  }
 
   // #1：frontmatter 属性卡。真实键集来自走查库（doc_type/entity_kind/entities_*/rule_tagged…）
   const fm = {
