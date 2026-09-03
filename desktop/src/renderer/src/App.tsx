@@ -1042,9 +1042,19 @@ function AdminZone({ tiers, onChanged }: { tiers: AiTier[]; onChanged: () => voi
     return () => clearTimeout(t)
   }, [secretTask?.status, secretTask?.endedAt])
 
+  // agent 一轮的墙钟上限（R3）：分钟，0 = 关。落盘走 onBlur，保存结果 toast 出来（Q14 的原则：别静默）
+  const [timeoutMin, setTimeoutMin] = useState('')
   useEffect(() => {
-    void window.api.settings.get().then((s) => setApiBase(s.apiBaseUrl))
+    void window.api.settings.get().then((s) => {
+      setApiBase(s.apiBaseUrl)
+      setTimeoutMin(String(s.agentTimeoutMin ?? 15))
+    })
   }, [])
+  const saveTimeout = async (): Promise<void> => {
+    const r = await window.api.settings.setAgentTimeout(Number(timeoutMin))
+    setTimeoutMin(String(r.minutes))
+    ui.toast(r.minutes === 0 ? '已关闭单轮超时中断' : `单轮超时上限已设为 ${r.minutes} 分钟`)
+  }
 
   return (
     <div
@@ -1099,6 +1109,24 @@ function AdminZone({ tiers, onChanged }: { tiers: AiTier[]; onChanged: () => voi
         >
           {provisioning ? '获取中…' : '重新获取服务端配置'}
         </button>
+      </div>
+
+      <div className="flex items-center gap-2 text-md">
+        <span className="shrink-0 text-muted">单轮超时</span>
+        <input
+          data-testid="admin-agent-timeout"
+          type="number"
+          min={0}
+          max={240}
+          value={timeoutMin}
+          onChange={(e) => setTimeoutMin(e.target.value)}
+          onBlur={() => void saveTimeout()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+          }}
+          className="w-20 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
+        />
+        <span className="text-sm text-muted">分钟，超过即中断这一轮（80% 时先提醒）；0 = 不限</span>
       </div>
 
       <div className="flex items-center gap-2 text-md">

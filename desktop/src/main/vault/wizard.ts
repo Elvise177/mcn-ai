@@ -1,6 +1,40 @@
 import { promises as fs } from 'fs'
-import { join } from 'path'
+import { join, resolve, sep } from 'path'
+import { homedir } from 'os'
 import { MCN_PRESET, PRESETS, type PresetId, type VaultConfig } from './taxonomy'
+
+/**
+ * 建库/选库的路径护栏（PLAN-v2 N6，借 Claude Desktop 的文件夹护栏）。
+ *
+ * 把**家目录 / 磁盘根 / 外接卷根 / iCloud 根**整个当知识库会发生什么：首次索引扫几十万个文件、
+ * 三个 chokidar watcher 盯住整块盘、投递箱建在 `~/00_投递箱`、AI 写入确认卡对着 `~/Documents/...`
+ * 问你要不要改——每一样都不是用户想要的，而且没有一样能在事后轻松撤销。
+ * 所以在 `vault:pickExisting` / `vault:createNew` 就拦，理由直接回给向导 toast。
+ *
+ * **只拦「根」本身，不拦其下的子目录**：`~/Documents/我的知识库` 完全合法。
+ */
+export function isSafeVaultRoot(path: string): { ok: true } | { ok: false; reason: string } {
+  const p = resolve(path).replace(/[\\/]+$/, '') || '/' // 去尾斜杠；`/` 去完是空串，要补回来
+  const home = resolve(homedir())
+  const bad: Array<[string, string]> = [
+    ['/', '磁盘根目录'],
+    [home, '家目录'],
+    [join(home, 'Library', 'Mobile Documents'), 'iCloud 云盘根目录'],
+    [join(home, 'Library'), '系统资料库目录'],
+  ]
+  for (const [root, label] of bad) {
+    if (p === root) return { ok: false, reason: `不能把${label}整个当作知识库，请选一个专门的文件夹（比如「文稿」下新建一个）` }
+  }
+  // 外接卷 / 网络卷的根：/Volumes/<名字>
+  const m = p.match(/^\/Volumes\/[^/]+$/)
+  if (m) return { ok: false, reason: '不能把整块磁盘当作知识库，请在磁盘里选一个专门的文件夹' }
+  // /Volumes 自己、/Users 这类系统目录
+  if (p === '/Volumes' || p === '/Users' || p === '/System' || p === '/Applications') {
+    return { ok: false, reason: '这是系统目录，不能当作知识库' }
+  }
+  void sep
+  return { ok: true }
+}
 
 /**
  * 新建库的默认布局。

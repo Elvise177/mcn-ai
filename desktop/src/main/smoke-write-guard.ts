@@ -1,4 +1,4 @@
-import { judgeWrite, FORBIDDEN } from './agent/write-guard'
+import { judgeWrite, isPathWritable, FORBIDDEN } from './agent/write-guard'
 import { join } from 'path'
 
 /**
@@ -62,6 +62,45 @@ console.log('\n【6】空路径 / 垃圾输入')
 {
   const v = judgeWrite('', ROOT, ART)
   v.kind === 'deny' ? ok('空路径 → deny') : fail('空路径应 deny', v)
+}
+
+/**
+ * 【6b】产物目录吃配置（PLAN-v2 R6）。
+ * 以前 `90_产物` 写死在两处（agent 建目录 + 这里的相对路径判断），库里把产物目录改名
+ * （layout.json `artifacts: "产物区"`）之后：AI 写到旧名目录、产物面板盯新名目录 → 面板一片空白。
+ * 这组断言用一个改了名的产物目录跑同一套判据，落对地方才算过。
+ */
+console.log('\n【6b】改名产物目录后写入落对地方（R6）')
+{
+  const ART2 = join(ROOT, '产物区')
+  const v1 = judgeWrite('产物区/周报.docx', ROOT, ART2)
+  v1.kind === 'allow-artifact' ? ok('改名后：相对路径 产物区/ → 放行') : fail('改名后相对路径应放行', v1)
+  const v2 = judgeWrite(join(ART2, '2026', 'x.pptx'), ROOT, ART2)
+  v2.kind === 'allow-artifact' ? ok('改名后：绝对路径 产物区/ → 放行') : fail('改名后绝对路径应放行', v2)
+  // 旧名不再是产物目录：它现在只是一个普通库内目录，要问用户（不许再靠写死的 90_产物 放行）
+  const v3 = judgeWrite('90_产物/周报.docx', ROOT, ART2)
+  v3.kind === 'ask' ? ok('改名后：旧名 90_产物/ 退化成普通目录 → ask') : fail('旧名 90_产物 不该再被放行', v3)
+  // 产物目录名是别的目录名的前缀时不能误放（`产物区2/` ≠ `产物区/`）
+  const v4 = judgeWrite('产物区2/x.md', ROOT, ART2)
+  v4.kind === 'ask' ? ok('前缀相似的目录不误放（产物区2/ → ask）') : fail('产物区2/ 被当成产物目录放行了', v4)
+}
+
+/**
+ * 【6c】三段判定 `isPathWritable`（PLAN-v2 N5）：可写根 → 受保护前缀 → 受保护文件。
+ * 单独导出是为了让写入方之外的调用者（将来的批准缓存 F24）也走同一份判据。
+ */
+console.log('\n【6c】isPathWritable 三段判定（N5）')
+{
+  const w = (p: string): ReturnType<typeof isPathWritable> => isPathWritable(ROOT, p)
+  w('80_Library/笔记.md').ok ? ok('普通笔记 → 可写') : fail('普通笔记应可写', w('80_Library/笔记.md'))
+  !w('.mcnai/layout.json').ok ? ok('.mcnai/layout.json → 拒（布局配置）') : fail('.mcnai 应拒')
+  !w('.obsidian/app.json').ok ? ok('.obsidian/ → 拒') : fail('.obsidian 应拒')
+  !w(join(ROOT, '.git', 'HEAD')).ok ? ok('.git/HEAD → 拒') : fail('.git 应拒')
+  !w('80_Library/node_modules/x.js').ok ? ok('深层 node_modules → 拒（不带点也在名单上）') : fail('node_modules 应拒')
+  !w('../别人的库/x.md').ok ? ok('../ 穿越 → 拒（不在可写根内）') : fail('穿越应拒')
+  !w(ROOT).ok ? ok('库根本身 → 拒（不能当文件写）') : fail('库根应拒')
+  const rel = w(join(ROOT, '20_公司管理', '新的.md'))
+  rel.ok && rel.rel === join('20_公司管理', '新的.md') ? ok('通过时给出相对路径') : fail('相对路径不对', rel)
 }
 
 /**

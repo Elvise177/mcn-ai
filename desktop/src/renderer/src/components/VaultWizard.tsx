@@ -34,7 +34,11 @@ export function VaultWizard({
     try {
       const v = create ? await window.api.vault.createNew(preset) : await window.api.vault.pickExisting()
       // v === null = 用户在 Finder 选择框点了取消，不是错误，安静回到可点状态
-      if (v) onReady(v)
+      if (v) {
+        // R2：换库时上一库的投递还在跑、已被主进程停掉——要说出来，否则用户以为换库把入库弄丢了
+        if (v.stoppedInbox) ui.toast('已停止上一库的入库（已完成的部分已保留，回到那个库后可点「立即处理」接着做）', 'info')
+        onReady(v)
+      }
     } catch (e) {
       ui.toast(`${create ? '新建库' : '打开库'}失败：${errText(e)}`, 'error')
     } finally {

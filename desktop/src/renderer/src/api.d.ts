@@ -60,6 +60,8 @@ interface DesktopSettings {
   searchBackend?: 'local' | 'cloud'
   /** 真实应用版本（主进程 app.getVersion()）。**别在渲染层写死版本号** */
   appVersion?: string
+  /** agent 一轮的墙钟上限（分钟，0 = 关；出厂 15）。见 main/agent/timeout.ts */
+  agentTimeoutMin?: number
 }
 
 type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'
@@ -87,8 +89,8 @@ interface InboxTask extends TaskBase {
   stages: InboxEvent[]
   /** pipeline 子进程组 id（取消要用；走查靠它做进程组残留断言） */
   pid?: number
-  /** 谁停的：user=面板上点了「停止本轮」，quit=退出应用时清理 */
-  canceled?: 'user' | 'quit'
+  /** 谁停的：user=面板上点了「停止本轮」，quit=退出应用时清理，switch=换库时把上一库在跑的停掉 */
+  canceled?: 'user' | 'quit' | 'switch'
 }
 interface AgentTask extends TaskBase {
   kind: 'agent'
@@ -143,6 +145,8 @@ interface InboxEvent {
 interface VaultOpenResult {
   path: string
   noteCount: number
+  /** 换库时上一库的投递还在跑、已被停掉（R2）。向导据此 toast 一句，别让人以为换库把入库弄丢了 */
+  stoppedInbox?: boolean
 }
 
 interface VaultTreeNode {
@@ -352,6 +356,8 @@ interface Window {
       setArtifactAutoIngest: (v: boolean) => Promise<{ ok: boolean }>
       setShowCost: (v: boolean) => Promise<{ ok: boolean }>
       setSensitiveMode: (allowAi: boolean, allowCloud: boolean) => Promise<{ ok: boolean }>
+      /** agent 一轮的墙钟上限（分钟，0 = 关）；管理员区专用 */
+      setAgentTimeout: (minutes: number) => Promise<{ ok: boolean; minutes: number }>
     }
     ai: {
       tiers: () => Promise<{ tiers: AiTier[] }>
@@ -458,6 +464,8 @@ interface Window {
       confirmWrite: (id: string, allow: boolean) => Promise<{ ok: boolean }>
       /** 撤销一次 AI 写入（原文写回；本来是新建的则移入废纸篓） */
       undoWrite: (id: string) => Promise<{ ok: boolean; error?: string }>
+      /** 诊断口：当前库的对话 system prompt（只读） */
+      systemPrompt: () => Promise<string>
     }
     auth: {
       /** kind 区分「网络不可达」与「密码错」：Supabase 被暂停时报密码错是最坏的误导（M-01） */

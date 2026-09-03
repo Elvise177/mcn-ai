@@ -81,6 +81,11 @@ interface StoreSchema {
    *   ~/Library/Application Support/mcn-ai-desktop/config.json 里加 `"searchBackend": "cloud"`
    */
   searchBackend: 'local' | 'cloud'
+  /**
+   * agent 一轮的墙钟上限（分钟；0 = 关）。出厂 15，管理员区可改（PLAN-v2 R3）。
+   * 判据在 `agent/timeout.ts`：80% 软提醒、100% 硬中断（先落盘半截正文再 abort）
+   */
+  agentTimeoutMin: number
   /** 密钥指纹用的随机盐（不是秘密，见 secrets.ts） */
   secretSalt?: string
   encryptedApiKeyFp?: string
@@ -106,6 +111,7 @@ export const store = new Store<StoreSchema>({
     sensitiveAllowAi: false,
     sensitiveAllowCloud: false,
     searchBackend: 'local',
+    agentTimeoutMin: 15,
   },
 })
 

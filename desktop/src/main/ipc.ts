@@ -22,7 +22,7 @@ import { syncConversation } from './knowledge/client'
 import { vaultManager } from './vault'
 import { log } from './lib/logger'
 import { exportDiagnostics } from './lib/diagnostics'
-import { createVault } from './vault/wizard'
+import { createVault, isSafeVaultRoot } from './vault/wizard'
 import type { PresetId } from './vault/taxonomy'
 import { sendDingtalk } from './lib/dingtalk'
 import { startBizSync } from './knowledge/bizdata'
@@ -88,6 +88,8 @@ export function registerIpc(): void {
      * 一个永远不变的数字等于把这一步废掉了。
      */
     appVersion: app.getVersion(),
+    /** agent 一轮的墙钟上限（分钟，0 = 关）；管理员区可改（R3） */
+    agentTimeoutMin: store.get('agentTimeoutMin'),
     dingtalkWebhook: store.get('dingtalkWebhook') ?? '',
     dingtalkSecret: store.get('dingtalkSecret') ?? '',
     dingtalkNotifyInbox: store.get('dingtalkNotifyInbox'),
@@ -111,6 +113,15 @@ export function registerIpc(): void {
     store.set('sensitiveAllowAi', !!allowAi || !!allowCloud) // 允许上云必然也允许打标
     store.set('sensitiveAllowCloud', !!allowCloud)
     return { ok: true }
+  })
+
+  // agent 一轮的墙钟上限（R3）。整数分钟、0 = 关、上限 240；非法值落回出厂 15，不静默吞
+  ipcMain.handle('settings:setAgentTimeout', (_e, minutes: number) => {
+    const n = Number(minutes)
+    const v = Number.isFinite(n) && n >= 0 ? Math.min(240, Math.round(n)) : 15
+    store.set('agentTimeoutMin', v)
+    log('info', 'settings', `agent 墙钟上限改为 ${v} 分钟`)
+    return { ok: true, minutes: v }
   })
 
   ipcMain.handle(
@@ -174,6 +185,9 @@ export function registerIpc(): void {
   ipcMain.handle('vault:pickExisting', async () => {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (r.canceled || !r.filePaths[0]) return null
+    // N6：家目录 / 磁盘根 / 外接卷根 / iCloud 根 整个当库会扫几十万文件、盯整块盘——在这儿拦，理由给向导 toast
+    const safe = isSafeVaultRoot(r.filePaths[0])
+    if (!safe.ok) throw new Error(safe.reason)
     return openVault(r.filePaths[0])
   })
 
@@ -203,6 +217,8 @@ export function registerIpc(): void {
       buttonLabel: '创建',
     })
     if (r.canceled || !r.filePath) return null
+    const safe = isSafeVaultRoot(r.filePath) // N6：保存框里也能选到磁盘根/家目录本身
+    if (!safe.ok) throw new Error(safe.reason)
     await createVault(r.filePath, preset)
     return openVault(r.filePath)
   })
@@ -303,6 +319,8 @@ export function registerIpc(): void {
     return { ok: true }
   })
   ipcMain.handle('agent:undoWrite', (_e, id: string) => undoWrite(id))
+  // 诊断口（R1）：当前库的对话 system prompt 原文，只读。走查拿它扫"通用库不许有 MCN 字眼"
+  ipcMain.handle('agent:systemPrompt', () => agentManager.systemPromptForDiag())
 
   ipcMain.handle('update:state', () => updateState())
   ipcMain.handle('update:install', () => installUpdateNow())
@@ -347,7 +365,7 @@ export function registerIpc(): void {
 }
 
 /** 启动时与知识库页共用：打开上次的库（对话工作台是首页，不能等用户进知识库页才加载库） */
-export async function openStoredVault(): Promise<{ path: string; noteCount: number } | null> {
+export async function openStoredVault(): Promise<{ path: string; noteCount: number; stoppedInbox?: boolean } | null> {
   const p = process.env.MCNAI_VAULT || store.get('vaultPath')
   if (!p) return null
   try {
@@ -357,10 +375,12 @@ export async function openStoredVault(): Promise<{ path: string; noteCount: numb
   }
 }
 
-async function openVault(path: string): Promise<{ path: string; noteCount: number }> {
+async function openVault(path: string): Promise<{ path: string; noteCount: number; stoppedInbox?: boolean }> {
   const { noteCount } = await vaultManager.open(path)
   store.set('vaultPath', path)
+  // configure → stop('switch')：上一库还在跑的 pipeline 在这里被杀干净（R2，bug#10）
   await inboxOrchestrator.configure(path)
+  const stoppedInbox = inboxOrchestrator.takeStoppedForSwitch()
   await artifactsWatcher.configure(path)
   await ensureRouteFolders(path)
   /**
@@ -370,5 +390,5 @@ async function openVault(path: string): Promise<{ path: string; noteCount: numbe
    * 埋第二个 MCN 假设（拍板：功能开关跟 persona 走）。
    */
   if (store.get('bizSyncEnabled') && hasFeature(await readVaultConfig(path), 'bizdata')) startBizSync(path)
-  return { path, noteCount }
+  return stoppedInbox ? { path, noteCount, stoppedInbox } : { path, noteCount }
 }

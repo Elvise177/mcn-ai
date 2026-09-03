@@ -19,6 +19,8 @@ import { tmpdir, homedir } from 'os'
 import { spawnSync } from 'child_process'
 import { resolveConfig, resolveEntityScanDirs, MCN_PRESET, GENERAL_PRESET, hasFeature, type VaultConfig } from './vault/taxonomy'
 import { createVault } from './vault/wizard'
+import { buildSystemPrompt, personaIdentity, NEUTRAL_IDENTITY } from './agent/system-prompt'
+import { SUPPORTED_EXT_LIST } from './lib/supported-ext'
 
 let failed = 0
 const check = (name: string, ok: boolean, extra = ''): void => {
@@ -160,6 +162,16 @@ const FIXTURES: Fixture[] = [
     name: '团队版预留位：scope=org 原样保留',
     raw: { scope: 'org' },
     expect: (c) => check('scope = org', c.scope === 'org', c.scope),
+  },
+  {
+    name: 'persona 带对话身份句 prompt（R1）→ 原样保留',
+    raw: { persona: { id: 'custom', role: '律所的资料管理员', prompt: '这家律师事务所的 AI 工作台', features: [] } },
+    expect: (c) => check('prompt 原样', c.persona.prompt === '这家律师事务所的 AI 工作台', String(c.persona.prompt)),
+  },
+  {
+    name: 'persona 段存在但 prompt 非字符串/空串 → 不兜底（没给就是没给）',
+    raw: { persona: { id: 'general', role: 'x', prompt: 42, features: [] } },
+    expect: (c) => check('prompt 缺席', c.persona.prompt === undefined, String(c.persona.prompt)),
   },
   { name: '空目录名（全空格）→ 当没配', raw: { inbox: '   ', library: '' } },
   { name: 'null 配置', raw: null },
@@ -307,6 +319,66 @@ async function main(): Promise<void> {
   } else {
     failed++
     console.log('   ❌ 没有 Python 侧，黄金母本比对跳过（见下）')
+  }
+
+  /**
+   * 【A5】**对话 system prompt 读 persona**（PLAN-v2 R1）。
+   *
+   * 打标那条线早就走 persona 了，唯独对话的 prompt 写死「MCN 公司与带货达人的 AI 工作台」+
+   * 「达人用艺名」——管理咨询客户一开口就穿帮。抽成纯函数后在这儿零花费验：
+   * 期望词表**从 preset 常量取**（MCN 的身份句原文），不在断言里再抄一遍句子。
+   */
+  console.log('\n【A5】对话 system prompt：通用库不含 MCN 字眼，MCN 库身份句来自 persona.prompt')
+  {
+    const mcnWords = /MCN|达人|OMG美妆|带货|美妆/
+    const gen = buildSystemPrompt({ root: '/tmp/x', dirs: ['管理', '业务'], cfg: GENERAL_PRESET, scanLimit: 5 })
+    const hit = gen.match(mcnWords)
+    check('通用预设：prompt 不含 MCN/达人/OMG美妆/带货/美妆', !hit, hit ? `命中「${hit[0]}」` : '')
+    check('通用预设：身份句落中性句', gen.includes(`你是 SamePage——${NEUTRAL_IDENTITY}`), gen.split('\n')[0])
+    const mcn = buildSystemPrompt({ root: '/tmp/x', dirs: [], cfg: MCN_PRESET, scanLimit: 5 })
+    check('MCN 预设：身份句 = persona.prompt 原文', !!MCN_PRESET.persona.prompt && mcn.includes(`你是 SamePage——${MCN_PRESET.persona.prompt}`), mcn.split('\n')[0])
+    // 老库形态：layout.json 没有 persona 段 → 整段回落 MCN → 对话口径不漂
+    const legacy = resolveConfig({ inbox: '00_投递箱' }, null)
+    check('老库（无 persona 段）：身份句仍是 MCN 原句', personaIdentity(legacy) === MCN_PRESET.persona.prompt, personaIdentity(legacy))
+    // 批 3 模板建的 MCN 库：persona 段有、但当时没写 prompt → 按 id 取预设默认句，不是中性句
+    const mcnNoPrompt = resolveConfig({ persona: { id: 'mcn', role: MCN_PRESET.persona.role, company: 'OMG美妆', features: ['bizdata'] } }, null)
+    check('MCN 库缺 prompt 字段：按 persona.id 取预设默认句', personaIdentity(mcnNoPrompt) === MCN_PRESET.persona.prompt, personaIdentity(mcnNoPrompt))
+    const custom = resolveConfig({ persona: { id: 'custom', role: 'r', prompt: '这家律师事务所的 AI 工作台', features: [] } }, null)
+    check('自定义 prompt 优先于预设', personaIdentity(custom) === '这家律师事务所的 AI 工作台', personaIdentity(custom))
+    // 产物目录名吃配置（R6）：改名后 prompt 里只许出现新名
+    const renamed = resolveConfig({ artifacts: '产物区' }, null)
+    const rp = buildSystemPrompt({ root: '/tmp/x', dirs: [], cfg: renamed, scanLimit: 5 })
+    check('产物目录改名后：prompt 写的是新名', rp.includes('写入 产物区/ 目录') && !rp.includes('90_产物'), rp.match(/写入 [^ ]+ 目录/)?.[0] ?? '')
+    check('prompt 带上库根与顶层分区', gen.includes('/tmp/x') && gen.includes('管理、业务'))
+    check('扫描上限进 prompt', gen.includes('一轮最多 5 次'))
+  }
+
+  /**
+   * 【A6】**支持的扩展名只有一份真相**（PLAN-v2 R7）。
+   * desktop 侧 `lib/supported-ext.ts` 是 pipeline `02_convert.CONVERTERS`（+ .md/.txt）的唯一副本，
+   * 由 `taxonomy.py --supported-ext` 从模块里读出来（不是抄），逐字比对——差一个就红。
+   * 0.1.2 加 `.doc` 那次就是抄件没跟上、报成"整包拖入没有全部入队"。
+   */
+  console.log('\n【A6】支持的扩展名：TS 唯一副本 = py 02_convert.CONVERTERS + .md/.txt')
+  if (hasPy) {
+    const r = spawnSync('python3', [py, '--supported-ext'], { encoding: 'utf-8' })
+    const out = (r.stdout ?? '').trim()
+    let pyExts: string[] = []
+    try {
+      pyExts = JSON.parse(out)
+    } catch {
+      /* 下面报 */
+    }
+    if (r.status !== 0 || !pyExts.length) {
+      check('py 侧给出扩展名集合', false, `status=${r.status} ${(r.stderr ?? '').trim().split('\n').pop()}`)
+    } else {
+      const a = [...SUPPORTED_EXT_LIST].sort().join(' ')
+      const b = [...pyExts].sort().join(' ')
+      check(`扩展名集合逐字相同（${a}）`, a === b, a === b ? '' : `\n        ts=${a}\n        py=${b}`)
+    }
+  } else {
+    failed++
+    console.log('   ❌ 没有 Python 侧，扩展名契约比对跳过')
   }
 
   console.log('\n【B】TS ↔ Python 逐字比对')

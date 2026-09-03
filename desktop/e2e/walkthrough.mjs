@@ -19,6 +19,7 @@ mkdirSync(shots, { recursive: true })
 // 没被刷新的（= 旧版本残留）一律列出来报警，防止基线里混代
 const written = new Set()
 const record = (name) => written.add(name + '.png')
+rmSync(join(shots, 'ZZ-失败现场.png'), { force: true }) // 上一轮失败留下的现场图，本轮开头清掉
 
 // 每次重置隔离环境：userData 清空（保证登录门可见），vault 副本重拷（保证确定性）
 const userData = '/tmp/mcnai-e2e-userdata'
@@ -347,6 +348,30 @@ const rawShot = async (cdp, name) => {
   await wW.click('[data-testid="wizard-template-general"]')
   await wW.locator('[data-testid="wizard-template-general"]:has-text("正在创建/索引…")').waitFor({ timeout: 4000 })
   console.log('H-12 建库向导 ✓', JSON.stringify({ toast: wizToast.trim(), 失败后可再点: true, 失败后退回第一步: true }))
+  // ---- N6 建库护栏：家目录 / 磁盘根 不能整个当知识库（借 Claude Desktop 的文件夹护栏）----
+  // 系统目录选择框 Playwright 驱动不了，桩掉 showOpenDialog 让它"选中"家目录（同附件那步的做法）
+  {
+    const home = homedir()
+    await appW.evaluate(({ dialog }, h) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [h] })
+    }, home)
+    await wW.click('[data-testid="wizard-existing"]')
+    const guardToast = wW.locator('[data-testid="toast"]:has-text("家目录")')
+    await guardToast.waitFor({ timeout: 10000 })
+    const guardText = await guardToast.innerText()
+    if (!/打开库失败/.test(guardText)) throw new Error(`拒绝家目录的 toast 文案不对：「${guardText}」`)
+    if (!(await wW.locator('text=建立你的知识库').count())) throw new Error('拒绝家目录后离开了向导')
+    if (await wW.locator('[data-testid="wizard-existing"]').isDisabled()) throw new Error('拒绝家目录后「使用已有库」仍是禁用的')
+    await wW.screenshot({ path: join(shots, '40h-建库向导-拒绝家目录.png') })
+    record('40h-建库向导-拒绝家目录')
+    // 磁盘根同样拒（另一条理由文案）
+    await appW.evaluate(({ dialog }) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: ['/'] })
+    })
+    await wW.click('[data-testid="wizard-existing"]')
+    await wW.locator('[data-testid="toast"]:has-text("磁盘根")').waitFor({ timeout: 10000 })
+    console.log('N6 建库护栏 ✓', JSON.stringify({ 家目录: guardText.trim().slice(0, 60) }))
+  }
   await appW.close()
 }
 
@@ -409,6 +434,20 @@ const rawShot = async (cdp, name) => {
   await wC.screenshot({ path: join(shots, '40g-干净新库-通用模板.png') })
   record('40g-干净新库-通用模板')
   console.log('B3-2 干净新库 ✓', JSON.stringify({ 顶层: top, persona: cfgC.persona.id, 图例: legend.map((s) => s.trim()) }))
+
+  // ---- ④ R1：通用模板库的**对话** system prompt 不许带 MCN 字眼（从主进程取真值，同 assertNoOldBrand 的扫法）----
+  // 打标那条线 0.2.0 批 2 就去 MCN 化了，唯独用户天天面对的对话 prompt 还写死「MCN 公司与带货达人」+「达人用艺名」
+  {
+    const prompt = await wC.evaluate(() => window.api.chat.systemPrompt())
+    if (!prompt) throw new Error('通用新库拿不到 system prompt（诊断口返回空）')
+    // 走查库路径 `/tmp/mcnai-e2e-cleanvault` 会撞 `mcn[-\s]?ai`，同 assertNoOldBrand：先抠掉环境串再扫
+    const stripEnv = (l) => l.replace(/(\/private)?\/tmp\/mcnai-[\w.-]*/g, '<走查目录>')
+    const bad = prompt.split('\n').filter((l) => /MCN|达人|OMG美妆|带货|美妆|mcn[-\s]?ai|拉齐/i.test(stripEnv(l)))
+    if (bad.length) throw new Error('通用模板库的对话 prompt 还带着 MCN 字眼：\n  ' + bad.map((l) => l.trim().slice(0, 80)).join('\n  '))
+    if (!prompt.includes(NEW)) throw new Error('对话 prompt 里没有当前库根，读的不是这个库')
+    if (!prompt.includes(`写入 ${cfgC.artifacts}/ 目录`)) throw new Error(`对话 prompt 里的产物目录不是配置里的「${cfgC.artifacts}」`)
+    console.log('R1 通用库对话 prompt 干净 ✓', prompt.split('\n')[0])
+  }
   await appC.close()
 }
 
@@ -752,9 +791,46 @@ const app = await launch({
   // 档位选择器永远只有一档可选，"按会话记忆"和"失败有出口"两条就没法走真实用户路径。
   // 注意 key 仍然是没有的 —— 增强档发出去照样会被主进程预检拦下，M-11 那段正好用它造确定失败
   MCNAI_E2E_TIER_HEALTH: 'up',
+  // R3 墙钟超时：把上限压到 3 秒，走查里才造得出「一轮跑太久被中断」（真造要等 15 分钟）。
+  // **只在本地模式给**：CHAT 模式一轮真实回答要几十秒，3 秒上限会把每一轮都掐断。
+  // 接线是同一条代码路径，本地模式验过即可；CHAT 模式跳过 41f（见那一步的 `if (CHAT)`）
+  ...(process.env.E2E_CHAT === '1' ? {} : { MCNAI_E2E_AGENT_TIMEOUT: '3000' }), // CHAT 常量在后面才定义，这里直接读 env
 })
 const win = await app.firstWindow()
 const cdp = await prepWindow(app, win)
+
+/**
+ * 「知识库可以升级一下」提示的守卫（2026-09-02 U0 重跑抓到的走查时间炸弹）。
+ *
+ * VaultPage 挂载后会 spawn 一次 `--count-stale`，旧标签篇数 ≥ 阈值就弹一个 `ui.confirm`
+ * 模态。它弹出的时刻由**子进程往返时间**决定（几百毫秒到几秒不等），而且每次 reload
+ * 都会重新问一次。走查里 34 步取消测试转出来的那批无标签笔记把篇数推过了阈值，
+ * 于是 18b reload 之后模态在 02d/02e 期间的某一刻弹出、19 步点笔记被遮罩挡住超时——
+ * 红在一个与真因毫不相干的地方，而且只在"count-stale 慢一点"时才红。
+ *
+ * 处理：装一个 MutationObserver，模态一出现就点「以后再说」并计数（**两种合法状态都覆盖**：
+ * 有没有弹都不算错，弹了也不许挡后面的步骤）。**必须在每次 reload 后重装**——页面上下文重置。
+ * 这条提示本身的断言（文案/阈值/点了升级真跑）不在主走查里，挂账 PLAN-v2。
+ */
+const armUpgradeGuard = async (page = win) => {
+  await page.evaluate(() => {
+    if (window.__upgradeGuard) return
+    window.__upgradeGuard = { dismissed: 0 }
+    const tryDismiss = () => {
+      for (const m of document.querySelectorAll('[data-testid="modal"]')) {
+        if (!m.innerText.includes('知识库可以升级一下')) continue
+        const btn = [...m.querySelectorAll('button')].find((b) => b.innerText.trim() === '以后再说')
+        if (btn) {
+          btn.click()
+          window.__upgradeGuard.dismissed++
+        }
+      }
+    }
+    tryDismiss()
+    new MutationObserver(tryDismiss).observe(document.body, { subtree: true, childList: true })
+  })
+}
+await armUpgradeGuard()
 // 线路纪律：任何真实调用之前先验标准档是官方直连。走查的 userData 每次都是清空重建，
 // migrateTiers 会走「全新安装」分支拿出厂映射——这条断言就是守住这个前提不被改坏
 await assertStandardRoute(win, '走查主实例')
@@ -2664,6 +2740,92 @@ try {
       }
     }
 
+    // ---- R3 墙钟超时：黑洞端点 + MCNAI_E2E_AGENT_TIMEOUT=3000 → 3 秒内中断、子进程被杀、失败可重试 ----
+    // 判据本身（80% 提醒 / 100% 中断）在 smoke:guards 里零花费验；这里验的是**接线**：
+    // 定时器真挂上了、abort 真杀了 SDK 子进程、错误真落成了带「重试」的气泡、任务真是 failed。
+    // CHAT 模式跳过：3 秒上限只在本地模式的 env 里给（否则真实回答每轮都会被掐断），接线是同一条代码路径
+    if (CHAT) console.log('ℹ️  E2E_CHAT 模式跳过 R3 超时断言（3 秒上限只在本地模式注入，见主实例 env）')
+    else {
+      const { createServer: createHttpServer } = await import('http')
+      const hole = createHttpServer(() => {
+        /* 只收不答：模拟上游挂住。401 桩那种秒回的失败走的是别的分支，测不到超时 */
+      })
+      await new Promise((r) => hole.listen(0, '127.0.0.1', r))
+      const holePort = hole.address().port
+      /**
+       * 用**增强档**造超时，不用标准档：标准档的 keyField 是 `encryptedLlmKey`，
+       * 它同时是投递箱打标的 key——给它塞一把假 key，后面整轮投递就会真去打标、
+       * 卡在「智能打标 第 1/1 篇」五分钟（2026-09-03 第一版就是这么红的）。
+       * 增强档的槽位（`encryptedAihubmixKey`）与打标无关；本地模式它本来没 key、预检会 bail，
+       * 所以这里给它一把假 key 让请求真的发出去。走查后面没有依赖"增强档没 key"的断言
+       * （45d 在前面，45e 是独立实例）。
+       */
+      const enh0 = await win.evaluate(async () => (await window.api.ai.tiers()).tiers.find((t) => t.id === 'enhanced'))
+      if (!enh0.hasKey) await win.evaluate((k) => window.api.settings.setKey(k, 'enhanced'), 'sk-e2e-timeout-fake-key')
+      await win.evaluate((port) => window.api.ai.setTierConfig('enhanced', { baseUrl: `http://127.0.0.1:${port}` }), holePort)
+      // SDK 的 CLI 子进程：命令行里带 claude-agent-sdk-darwin-*/claude。发送前快照，差集才是本轮的
+      const sdkProcs = () =>
+        execSync('ps -eo pid=,command=')
+          .toString()
+          .split('\n')
+          .filter((l) => /claude-agent-sdk-darwin-\w+\/claude/.test(l))
+          .map((l) => Number(l.trim().split(/\s+/)[0]))
+      const before = new Set(sdkProcs())
+      await win.click('button[title="新对话"]')
+      await win.waitForTimeout(400)
+      await win.click('[data-testid="tier-selector"]')
+      await win.locator('[data-testid="tier-option-enhanced"]').click()
+      await win.waitForTimeout(300)
+      if ((await win.locator('[data-testid="tier-selector"]').getAttribute('data-tier')) !== 'enhanced')
+        throw new Error('R3：没切到增强档，超时断言会走到标准档的预检上')
+      const ti = win.locator('textarea').first()
+      await ti.fill('R3 超时走查：这一条会被墙钟中断')
+      await ti.press('Enter')
+      const t0 = Date.now()
+      let mine = []
+      while (Date.now() - t0 < 15000 && !mine.length) {
+        mine = sdkProcs().filter((p) => !before.has(p))
+        if (!mine.length) await win.waitForTimeout(150)
+      }
+      if (!mine.length) throw new Error('发送后 15 秒内没看到 SDK 子进程（请求压根没发出去？超时断言无从谈起）')
+      await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 25000 })
+      const elapsedMs = Date.now() - t0
+      const errText = await win.locator('.md-article').last().innerText()
+      if (!/超时|中断/.test(errText) || !/秒|分钟/.test(errText)) throw new Error(`超时错误气泡文案不对：「${errText}」`)
+      const agentTasks = await win.evaluate(async () => {
+        const s = await window.api.tasks.list()
+        return s.tasks.filter((t) => t.kind === 'agent').map((t) => ({ status: t.status, error: t.error, title: t.title }))
+      })
+      if (!agentTasks.some((t) => t.status === 'failed' && /超时|中断/.test(String(t.error))))
+        throw new Error('超时后 agent 任务不是 failed、或 error 里没写超时：' + JSON.stringify(agentTasks))
+      // 硬 abort 真杀了子进程
+      let alive = sdkProcs().filter((p) => mine.includes(p))
+      for (let i = 0; i < 30 && alive.length; i++) {
+        await win.waitForTimeout(200)
+        alive = sdkProcs().filter((p) => mine.includes(p))
+      }
+      if (alive.length) throw new Error('超时中断后 SDK 子进程还活着：pid ' + alive.join(','))
+      // 消息形态：两种合法状态都断言——黑洞下没有半截正文 → 提问 + 错误气泡；
+      // 若真流出过正文 → 多一条以「（已超时中断）」结尾的 assistant（先落盘再中断的证据）
+      const conv = await win.evaluate(async () => {
+        const c = (await window.api.chat.list())[0]
+        return c.messages.map((m) => ({ role: m.role, err: !!m.error, tail: (m.text ?? '').slice(-8) }))
+      })
+      const users = conv.filter((m) => m.role === 'user').length
+      const errs = conv.filter((m) => m.err).length
+      const partial = conv.filter((m) => m.role === 'assistant' && !m.err)
+      if (users !== 1 || errs !== 1) throw new Error(`超时后消息形态不对（应为 1 提问 + 1 错误气泡）：${JSON.stringify(conv)}`)
+      if (partial.length > 1 || (partial.length === 1 && !partial[0].tail.endsWith('（已超时中断）')))
+        throw new Error(`超时的半截正文没带中断标记：${JSON.stringify(conv)}`)
+      await snap('41f-一轮超时-中断提示', 200)
+      console.log('R3 墙钟超时 ✓', JSON.stringify({ 中断用时ms: elapsedMs, 子进程: mine, 半截正文: partial.length }))
+      hole.close()
+      await win.evaluate((b) => window.api.ai.setTierConfig('enhanced', { baseUrl: b }), enh0.baseUrl)
+      // 这条 failed 任务留在 recent 里：本地模式后面没有看 Dock 失败文案的断言（M-03 那段是 CHAT 专属）
+      await win.click('button[title="新对话"]')
+      await win.waitForTimeout(400)
+    }
+
     // ＋新对话必须复位：空态问候可见 + 输入框清空（回归 2026-07-16 用户报障）
     await win.click('button[title="新对话"]')
     await win.waitForTimeout(500)
@@ -2864,6 +3026,15 @@ try {
 
   // 投递箱：真实拷一个文件进投递箱目录，观察面板
   const settings = await win.evaluate(() => window.api.settings.get())
+
+  // ---- R1 对照组：走查库是老库形态（layout.json 没有 persona 段 → 整段回落 MCN），对话 prompt 口径不许漂 ----
+  // 与 40g 那条「通用库 prompt 不含 MCN 字眼」互为对照：两边都空也能让"不含"成立，所以这里反向验"含"
+  {
+    const prompt = await win.evaluate(() => window.api.chat.systemPrompt())
+    if (!/带货/.test(prompt)) throw new Error('老库的对话 prompt 丢了 MCN 身份句（老库口径漂了）：' + prompt.split('\n')[0])
+    if (!prompt.includes(settings.vaultPath)) throw new Error('对话 prompt 里的库根不是当前库：' + prompt.split('\n')[1])
+    console.log('R1 老库对话 prompt 口径不漂 ✓', prompt.split('\n')[0])
+  }
   if (settings.vaultPath) {
     const inboxCandidates = ['95_待入库', '00_投递箱']
     for (const c of inboxCandidates) {
@@ -3029,6 +3200,7 @@ try {
             // 渲染层刷新后状态照样在（主进程内存是真相源，reload 只是重拉一次 snapshot）。
             // 必须趁任务刚活起来这一刻 reload——等它跑完再 reload 测的就是"收起"那条分支了
             await win.reload()
+    await armUpgradeGuard() // reload 重置了页面上下文，升级提示守卫要重装（见定义处）
             await win.waitForTimeout(2500)
             const after = await win.evaluate(async () => {
               const st = await window.api.tasks.list()
@@ -3335,6 +3507,92 @@ try {
             // 收尾：把没处理完的测试文件清掉，别影响后面的入库断言
             for (const n of cancelFiles) rmSync(join(dir, n), { force: true })
           }
+
+          // ---- R2 换库 mid-pipeline：上一库的 pipeline 必须跟着停，run-end 不许打到新库的任务上（bug#10）----
+          {
+            const B = '/tmp/mcnai-e2e-switch-vault'
+            rmSync(B, { recursive: true, force: true })
+            mkdirSync(join(B, '80_资料库'), { recursive: true })
+            writeFileSync(join(B, '临时库B说明.md'), '# 临时库 B\n\n只为换库断言存在。\n')
+            if (!(await waitInboxIdle(win))) throw new Error('换库断言前投递箱一直没闲下来')
+            const switchFiles = []
+            let pgid = null
+            for (let attempt = 1; attempt <= 3 && !pgid; attempt++) {
+              // 同 34 步的窗口拉宽法：投 10 份，pipeline 才活得够久
+              for (let i = 0; i < 10; i++) {
+                const name = `e2e换库测试_${Date.now()}_${attempt}_${i}.docx`
+                copyFileSync(sample, join(dir, name))
+                switchFiles.push(name)
+              }
+              const p = await waitForPipelinePid(win, 180000)
+              if (p && pipelineLeftovers(p).length) pgid = p
+              else {
+                console.log(`第 ${attempt} 次：pgid=${p} 已经不在 ps 里了，等闲下来再丢一批`)
+                if (!(await waitInboxIdle(win))) throw new Error('投递箱一直没闲下来，换库断言没法重来')
+              }
+            }
+            if (!pgid) throw new Error('三次都没在 pipeline 跑着的时候开始换库')
+            console.log('换库前 pipeline pgid =', pgid, '（ps 里确认存活）')
+            // 系统目录选择框驱动不了：桩 showOpenDialog → 库 B（同附件那步）
+            await app.evaluate(({ dialog }, dirB) => {
+              const orig = dialog.showOpenDialog
+              dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dirB] })
+              globalThis.__restoreOpenDialog = () => { dialog.showOpenDialog = orig }
+            }, B)
+            await win.click('button[title="切换知识库"]')
+            await win.click('[data-testid="modal"] button:has-text("去换库")')
+            await win.locator('[data-testid="wizard-existing"]').click()
+            await win.locator('[data-testid="tree-col"]').waitFor({ timeout: 30000 })
+            // ① 得说出来：上一库的入库被停了
+            const stopToast = win.locator('[data-testid="toast"]:has-text("上一库")')
+            await stopToast.waitFor({ timeout: 8000 })
+            const stopText = await stopToast.innerText()
+            if (!/已停止/.test(stopText)) throw new Error(`换库停旧库的 toast 文案不对：「${stopText}」`)
+            await snap('22d-换库-已停止上一库的入库', 200)
+            // ② 真的切到了 B（settings.vaultPath 在 MCNAI_VAULT 下恒等于 env，不能拿它判；看文件树）
+            const treeB = await win.evaluate(async () => (await window.api.vault.tree()).map((n) => n.name))
+            // 开库会 mkdir 投递箱，所以 B 里也有 00_投递箱；拿走查库独有的目录（20_公司管理）判"没切过去"
+            if (!treeB.includes('临时库B说明') || treeB.includes('20_公司管理'))
+              throw new Error('换库后文件树不是库 B 的：' + JSON.stringify(treeB))
+            // ③ 上一库的进程组一个不剩
+            let left = pipelineLeftovers(pgid)
+            for (let i = 0; i < 20 && left.length; i++) {
+              await win.waitForTimeout(500)
+              left = pipelineLeftovers(pgid)
+            }
+            if (left.length) throw new Error('换库后上一库的 pipeline 还活着：\n' + left.join('\n'))
+            // ④ 任务层：旧库任务 canceled:'switch'、pid 清空、不带 error；新库不许凭空多出一条 running（run-end 打歪的形态）
+            const tk = await win.evaluate(async () => {
+              const s = await window.api.tasks.list()
+              return s.tasks.filter((t) => t.kind === 'inbox').map((t) => ({ key: t.key, status: t.status, canceled: t.canceled, pid: t.pid, error: t.error, title: t.title }))
+            })
+            const old = tk.find((t) => t.key === vaultCopy)
+            if (!old) throw new Error('任务层里找不到旧库的投递任务：' + JSON.stringify(tk))
+            if (old.status !== 'canceled' || old.canceled !== 'switch')
+              throw new Error(`旧库任务应为 canceled/switch，实得 ${old.status}/${old.canceled}：${JSON.stringify(old)}`)
+            if (old.pid) throw new Error(`旧库任务 pid 没清（hasChild 仍为真的形态）：${JSON.stringify(old)}`)
+            if (old.error) throw new Error(`换库停止被画成了失败：${JSON.stringify(old)}`)
+            if (!/上一库/.test(old.title)) throw new Error(`旧库任务标题没说明是换库停的：${old.title}`)
+            const fresh = tk.find((t) => t.key === B)
+            if (fresh && (fresh.status === 'running' || fresh.status === 'queued'))
+              throw new Error('库 B 的投递箱是空的，却多出一条在跑的任务（旧轮次的事件打到了新库上）：' + JSON.stringify(fresh))
+            console.log('R2 换库停旧库 pipeline ✓', JSON.stringify({ pgid, 旧库: old.status + '/' + old.canceled, 新库任务: fresh?.status ?? '无' }))
+
+            // 切回来：先把没处理完的测试原件清掉（否则切回去 watcher 一拾又跑一轮），再桩回原库
+            for (const n of switchFiles) rmSync(join(dir, n), { force: true })
+            await app.evaluate(({ dialog }, dirA) => {
+              dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [dirA] })
+            }, vaultCopy)
+            await win.click('button[title="切换知识库"]')
+            await win.click('[data-testid="modal"] button:has-text("去换库")')
+            await win.locator('[data-testid="wizard-existing"]').click()
+            await win.locator('[data-testid="tree-col"]').waitFor({ timeout: 60000 })
+            await app.evaluate(() => globalThis.__restoreOpenDialog?.())
+            const treeA = await win.evaluate(async () => (await window.api.vault.tree()).map((n) => n.name))
+            if (!treeA.includes('00_投递箱')) throw new Error('没有切回走查库：' + JSON.stringify(treeA))
+            if (!(await waitInboxIdle(win))) throw new Error('切回走查库后投递箱一直没闲下来')
+            rmSync(B, { recursive: true, force: true })
+          }
         }
         break
       }
@@ -3410,6 +3668,7 @@ try {
 
     // 记忆验证：重载后回知识库，宽度应还是拖完的值
     await win.reload()
+    await armUpgradeGuard() // reload 重置了页面上下文，升级提示守卫要重装（见定义处）
     await win.waitForTimeout(2000)
     await win.click('text=个人知识库')
     await win.waitForTimeout(2500)
@@ -3992,6 +4251,29 @@ try {
       throw new Error('两条线路的缓存读倍率相同，按线路分表没生效')
     await win.locator('[data-testid="pricing-config"]').scrollIntoViewIfNeeded()
     await snap('10i-管理员区-计价配置', 300)
+
+    // ---- R3 管理员区：单轮超时上限可改、落盘可读回（值从 settings.get 取，不在断言里抄常量）----
+    {
+      const inp = win.locator('[data-testid="admin-agent-timeout"]')
+      if (!(await inp.count())) throw new Error('管理员区没有「单轮超时」输入框')
+      const before = await win.evaluate(async () => (await window.api.settings.get()).agentTimeoutMin)
+      if (before !== 15) throw new Error(`出厂上限应为 15 分钟，实得 ${before}`)
+      await inp.fill('20')
+      await inp.press('Enter')
+      await win.locator('[data-testid="toast"]:has-text("20 分钟")').waitFor({ timeout: 5000 })
+      const after = await win.evaluate(async () => (await window.api.settings.get()).agentTimeoutMin)
+      if (after !== 20) throw new Error(`改成 20 没落盘：${after}`)
+      // 清空 = 0 = 关：要说出来，不能静默
+      await inp.fill('')
+      await inp.press('Enter')
+      await win.locator('[data-testid="toast"]:has-text("已关闭")').waitFor({ timeout: 5000 })
+      const off = await win.evaluate(async () => (await window.api.settings.get()).agentTimeoutMin)
+      if (off !== 0) throw new Error(`清空应落 0（关），实得 ${off}`)
+      await inp.fill('15')
+      await inp.press('Enter')
+      await win.locator('[data-testid="toast"]:has-text("15 分钟")').waitFor({ timeout: 5000 })
+      console.log('R3 管理员区超时上限 ✓', JSON.stringify({ before, after, off }))
+    }
     console.log('计价配置 ✓', JSON.stringify(onDisk))
   }
 
@@ -4447,6 +4729,7 @@ try {
     await window.api.chat.save({ id: 'e2e-conv-2', title: 'e2e 历史会话二', messages: [], updatedAt: now - 60000 })
   })
   await win.reload()
+    await armUpgradeGuard() // reload 重置了页面上下文，升级提示守卫要重装（见定义处）
   await win.waitForTimeout(2000)
   if (!(await win.locator('text=最近对话').count())) throw new Error('首页缺「最近对话」卡片区')
   if (!(await win.locator('button:has-text("e2e 历史会话一")').count())) throw new Error('最近对话卡片没有渲染会话')
@@ -4662,6 +4945,7 @@ try {
 
     // 落盘表：重载后仍然认得「已入库」（不是内存里的一次性状态）
     await win.reload()
+    await armUpgradeGuard() // reload 重置了页面上下文，升级提示守卫要重装（见定义处）
     await win.waitForTimeout(2500)
     await win.click('button[title="打开产物面板"]').catch(() => {})
     await win.waitForTimeout(600)
@@ -4846,6 +5130,14 @@ try {
   // 先把失败原因打出来：下面的 close 一旦挂住，抛出去的错要等 finally 走完才显示，
   // 实测被吞过一次（看着像"卡死在某一步"，其实早就断言失败了）
   console.error('❌ 走查失败：', err?.stack ?? err)
+  // 失败现场留一张图（不 record：绿的时候它不该存在，开头已删）——
+  // U0 重跑那次被一个模态遮罩挡住点击，光看 call log 猜不出是哪个弹窗
+  try {
+    await win.screenshot({ path: join(shots, 'ZZ-失败现场.png') })
+    console.error('失败现场截图：e2e/shots/ZZ-失败现场.png')
+  } catch {
+    /* 窗口已经没了就算了 */
+  }
   throw err
 } finally {
   // app.close() 偶尔挂住（SDK 子进程还在重试连接时），别让它把失败原因一起埋掉

@@ -4,6 +4,7 @@ import { spawn } from 'child_process'
 import { app, dialog, nativeImage, type BrowserWindow } from 'electron'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
+import { SUPPORTED_EXT_BARE } from '../lib/supported-ext'
 
 /**
  * 对话附件（A-3 图片能力 B'）：用户在输入框挑图片 → 随这条消息提供给 agent →
@@ -22,9 +23,8 @@ const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif']
  * 其余边界一律照旧：不打标、不建卡、不上云、不进投递箱，会话结束随临时目录清掉。
  * 用户真想长期保存，那条路是把文件拖进窗口（投递箱），提示里会说这句话。
  */
-// `.doc` 是 0.1.2 加的（走 macOS 自带 textutil）——支持列表在三处，改一处漏两处：
-// 这里、`inbox/orchestrator.ts` 的 SUPPORTED_EXT、pipeline 的 `02_convert.CONVERTERS`
-const DOC_EXT = ['doc', 'docx', 'pdf', 'xlsx', 'pptx', 'md', 'txt']
+// 支持列表只有一份（`lib/supported-ext.ts`，R7）：以前这里自己抄了一份，0.1.2 加 `.doc` 时差点漏掉
+const DOC_EXT = SUPPORTED_EXT_BARE
 /** 超过这个体积就别走"临时参考"这条路了——转换慢、上下文也塞不下，提示改走入库 */
 const DOC_MAX_BYTES = 20 * 1024 * 1024
 

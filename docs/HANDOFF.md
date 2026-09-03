@@ -6,6 +6,51 @@
 
 ---
 
+## 0-新d. PLAN-v2 批 0 + 批 1「架构止血」（2026-09-02 执行，未发版）
+
+> 方案见 `docs/PLAN-v2.md`（已批准），事实底座 `docs/PRODUCT-AUDIT.md`。本批全是底层改动，**随下一版一起出**。
+> 真实调用 ¥0（R3 用开关造超时）。
+
+### 做了什么（对照 PLAN-v2 批 1 表）
+
+| 项 | 落点 | 验收 |
+|---|---|---|
+| R1 对话 prompt 读 persona | `agent/system-prompt.ts`（纯函数）；`persona.prompt` 新字段（TS+py 镜像）；MCN 身份句进 `MCN_PRESET.persona.prompt`；规则 4/6/11 去「达人」「90_产物」写死 | `smoke:taxonomy`【A5】通用预设不含 MCN/达人/OMG美妆/带货；走查 40g 通用新库经诊断口 `chat.systemPrompt()` 扫、主实例老库反向验含「带货」 |
+| R2 换库/退出杀 pipeline | `stop('switch'\|'quit')` 关 watcher → kill 进程组 → 等退 → 重置 running；`run()` 快照 `{root, taskId, gen}`，尾段只认快照；`openVault` 回 `stoppedInbox` → 向导 toast；`before-quit` 调 `agentManager.abortAll()` | 走查新段（34b 之后）：换库 mid-pipeline → toast「已停止上一库的入库」（**新图 22d**）、`ps` 零残留、旧库任务 `canceled:'switch'` 且 `pid` 空、新库不多出 running |
+| R3 agent 墙钟超时 | `agent/timeout.ts` 的 `judgeTimeout`（80% warn / 100% abort）+ `resolveTimeoutMs`；`runTurn` 500ms 定时器；中断顺序 = 半截正文落盘 →abort → error；`store.agentTimeoutMin`（出厂 15，0 关）+ 管理员区一行 + IPC `settings:setAgentTimeout`；`MCNAI_E2E_AGENT_TIMEOUT` 只给走查 | `smoke:guards`【1】【2】；走查 41f：黑洞端点 + 3 秒上限 → SDK 子进程出现→错误气泡含「超时」→子进程 ≤6s 消失→任务 failed；10i 后管理员区改 20/清空=关/回 15 都落盘 |
+| R4 stderr 尾 2KB | `lib/tail-buffer.ts`；非零退出且非自杀时最后一行进任务 error（stage `pipeline`）、整段进 main.log | `smoke:guards`【3】；`smoke:pipeline`【5】未知参数崩溃 → stderr 有原因、stdout 零事件 |
+| R5 key 走 env | `lib/pipeline.ts` 的 `pipelineArgs`/`pipelineEnv`（纯函数）：argv 不带 `--llm-key`，`LLM_API_KEY` 进 env（无 key 时主动删掉开发机的）；`cli.py` 本就读 env | `smoke:guards`【4】argv 不含 key；`smoke:pipeline`【6】env 传 key 跑通 `--count-stale` 且不回显 |
+| R6 `90_产物` 走 layout | `agent/index.ts` 读 `readVaultConfig(root).artifacts`；工具说明与规则 6 用它；`write-guard` 相对路径按 `artifactsDir` 算 | `smoke:write`【6b】改名为「产物区」后：新名放行、旧名退化为 ask、前缀相似不误放 |
+| R7 supportedExt 单一真相 | `lib/supported-ext.ts`（orchestrator 转出口、attachments 引用、删渲染层死抄件 `SUPPORTED_HINT`）；pipeline `cli.py` 三处改从 `02_convert.CONVERTERS` 派生；`taxonomy.py --supported-ext` | `smoke:taxonomy`【A6】TS 集合 = py 集合逐字 |
+| N5 write-guard 三段判定 | `isPathWritable(root, p)`：可写根 → 受保护前缀（`.mcnai/.git/.obsidian/node_modules/.done/.failed` + 任何 `.` 段）→ 受保护文件 | `smoke:write`【6c】8 条 |
+| N6 建库护栏 | `vault/wizard.ts` 的 `isSafeVaultRoot`：拒 `/`、`~`、`~/Library`、iCloud 根、`/Volumes/<卷>`、`/Users` 等；挂在 `vault:pickExisting`/`createNew` | `smoke:guards`【5】；走查 40 系拒家目录 toast + 仍在向导（**新图 40h**）、磁盘根同拒 |
+| 刻度表 token | `theme.css`：`--space-1/2/3/4/6/8/12`（删 5/10）、`--leading-snug`、`--shadow-modal`；`tailwind.config.js`：数字 spacing extend 指 token（零视觉变化）、`leading-snug`、`shadow-modal`、`fontWeight` 整体覆盖排除 700 | 存量 560 处替换 + 整体覆盖 + 白名单断言 + 全量重拍 = 批 4 |
+
+**新增验收入口**：`npm run smoke:guards`（进 `verify` L1）。pipeline 源码改动已在 pkb-pipeline 提交并**重新冻结**（`pyinstaller mcn-ingest.spec`），`resources/pipeline/` 已更新、`smoke:pipeline` 在冻结形态全绿。
+
+### 批 0 结论
+
+- **R20**：`updater.ts` 头注释与 §0 待办 #7 更正为「已接 OSS」；§5 补 `docs/` 索引；`pkb-pipeline/README.md` 链路描述按 `cli.py` 重写（01/05/06/08 不在链上）。
+- **R21**：embedding 锁定记入 §4-28。
+- **U0**：重跑走查核实——**两条都是基线过期**。成功 toast 现为炭黑底 + 绿勾（20b/24b/37d 已刷新）；版本号：本地模式各屏统一 `v0.1.2`，而 `11/12` 两张登录态截图停在 2026-08-18（早于 08-19 的 `app.getVersion()` 修复），它们归 `login-provision.mjs`（要登录 + 一轮真实对话），**本批 ¥0 不重拍，随批 2 的 E2E_CHAT 轮刷新**。
+- **U0 顺带抓到一颗走查时间炸弹**：VaultPage 的「知识库可以升级一下」确认模态由 `--count-stale` 子进程往返时间决定何时弹、每次 reload 重问一次；34 步取消测试转出的无标签笔记把篇数推过阈值，18b reload 后模态在 02e 期间弹出，19 步点笔记被遮罩挡住超时——红在与真因无关的地方、且只在子进程慢一点时才红。已加 `armUpgradeGuard`（MutationObserver 自动点「以后再说」并计数，每次 reload 后重装）+ 失败现场截图 `ZZ-失败现场.png`。这条提示自身的断言挂账。
+
+### 走查里踩的坑（写给下一个改走查的人）
+
+- **标准档的 keyField 就是打标的 key**（`encryptedLlmKey`）。R3 第一版给标准档塞了一把假 key 造超时，
+  结果后面整轮投递真去打标、卡在「智能打标 第 1/1 篇」五分钟、退出时 `kill EPERM`。
+  走查里要给对话线路造 key，一律用**增强档**（`encryptedAihubmixKey`，与打标无关）。
+- 换库到空库 B 后文件树里也会有 `00_投递箱`（开库 mkdir 投递箱），判"切没切过去"要拿走查库独有的目录。
+- 通用新库路径 `/tmp/mcnai-e2e-cleanvault` 会撞旧名正则 `mcn[-\s]?ai`，扫 prompt 前先抠环境串（同 `assertNoOldBrand`）。
+- R3 步在本地模式留下一条 failed 的 agent 任务在 Dock（没有真 key 修不好它）；本地模式后面没有看 Dock 失败文案的断言，CHAT 模式整段跳过。
+
+### 销账 / 挂账
+
+- §3 bug#10「短时间连续 enqueue 同库两个 pipeline」：机制 = `stop()` 不杀 child + `run()` 尾段 getter 读到新库（R2），**已修**，走查 R2 段守着。
+- 挂账：升级提示的专项断言；`11/12` 基线刷新；批 4 刻度表存量替换。
+
+---
+
 ## 0-新. 0.1.1 状态（2026-08-20）
 
 **产品名已统一为 SamePage**（Dock / Finder / 菜单栏 / dmg 文件名）。
@@ -252,8 +297,9 @@ E2E_CHAT 那 20 张旧配色基线**本轮已自然刷新，该条已知状态�
    `returns table` 加 `file_path` → webpage `KnowledgeMatch` → 桌面端 `CloudMatch` 与格式串，
    顺带补相关度阈值 / 相近结果警示。做完把 `searchBackend` 从 `local` 切回 `cloud`。
    **数据不用补录**（列早就有、切片一直在写）。**排在第 5 条之后**
-7. **自动更新源接真实地址**：当前是占位（`.invalid`），拿到阿里云 OSS 地址后按
-   `docs/RELEASE.md` §C 切换；客户增多后升级为私有 bucket 或网关鉴权
+7. ~~**自动更新源接真实地址**~~ ✅ **已接阿里云 OSS**（2026-08-19，`docs/RELEASE.md` §C；
+   本条 2026-09-02 审计 a14 发现文档漂移才更正——`updater.ts` 里的 `.invalid` 判据在正式包里恒为假，
+   只保护占位地址打出来的包）。**剩下的待办**：客户超过 5 家时升级为私有 bucket 或网关鉴权（PLAN-v2 R20 渠道部分，C 档）
 8. **M-29 冷调用复测**：签名后要在**重启机器之后第一件事**跑 `e2e/probe-safestorage.mjs`
    才量得到真冷态（本轮 securityd 缓存已烘热，新旧包都 0ms，**没测出结论**）
 9. **网关**：key 不再下发客户端（§3「未解决/未做」有完整方案）
@@ -605,7 +651,7 @@ Electron App（macOS arm64，v0.1.0）
      不内建时段表是有意的：计价是运维项，跟着官方调价手动改一次即可。
      **哪一档是高峰没查清**，所以界面上只说「存在分时计价」，不说「按高峰价估」
 
-10. **【潜在风险 · 短时间连续 enqueue 会让同库上并发两个 pipeline（P2，2026-08-18，机制未查清）】**：
+10. ~~**【潜在风险 · 短时间连续 enqueue 会让同库上并发两个 pipeline（P2，2026-08-18，机制未查清）】**~~ ✅ **2026-09-02 已修（PLAN-v2 R2，见 §0-新d / §4-30）**：机制 = `stop()` 只关 watcher不杀 child、`run()` 尾段用 getter 读到换库后的新 taskId。原文保留作案卷：
    补做 A-1 时把验收断言内联在主走查里，那段连着做了 5 次 `enqueue`，结果同一个
    `/tmp/mcnai-e2e-vault` 上同时活着**两个 `mcn-ingest`**，退出应用时 `before-quit` 只杀得掉
    `this.child` 跟踪的那一个，另一个成了孤儿（2/2 复现）。
@@ -1043,6 +1089,29 @@ Electron App（macOS arm64，v0.1.0）
     - 顺带一条边界：**钉钉群消息里的旧名不在本次范围内**（那是发到客户群的外发文案，不是界面），
       要改得先确认。日志前缀与 `MCNAI_*` 环境变量属内部标识，同样不动。
 
+28. **embedding 模型锁定 `text-embedding-3-small` / 1536 维（2026-09-02 记档，PLAN-v2 R21）**。
+    决策本身是 M4 时定的（§4-11：成本敏感），这里补记**为什么现在不换、换要付什么**：
+    维度写死在迁移 `010`（pgvector 列 1536）与 `012`、`webpage/lib/knowledge/embeddings.ts`；
+    换模型 = 改列维度 + **全量重灌所有 owner 的切片**（团队版数据量放大后成本指数级，审计 a11）。
+    所以：**团队版上线前不换**；真要换的触发条件只有两个——检索质量在真实问答里被证明不够
+    （先修 §3-13 `file_path` 缺失那条再下结论，别把 RPC 缺列误判成模型不行），或 OpenAI 下线该模型。
+    换的时候按「新列并行写 → 后台重灌 → 切读 → 删旧列」四步，不做原地改维。
+
+29. **agent 一轮墙钟超时：软提醒 80% → 硬中断 100%，先落盘再发事件（2026-09-02，PLAN-v2 R3）**。
+    此前只有 `maxTurns:40` 和扫描闸门，模型卡在上游慢响应/重试退避时一轮可以无限期转下去。
+    上限出厂 15 分钟（`store.agentTimeoutMin`，管理员区可改，0 = 关）；判据是纯函数
+    `agent/timeout.ts` 的 `judgeTimeout`（`smoke:guards` 零花费验），走查用 `MCNAI_E2E_AGENT_TIMEOUT=<ms>` 造超时。
+    **中断顺序不能反**：先把已流出的半截正文落成带「（已超时中断）」的 assistant 消息 → 再 abort →
+    最后发 `kind:'error'`；反过来渲染层收到 done 就清屏，半截正文就没了（同 H-09 的教训）。
+    超时是 **failed 不是 canceled**（用户没动手，是系统替他停的，要红出来）。
+
+30. **换库 / 退出时在跑的 pipeline 必须跟着停（2026-09-02，PLAN-v2 R2，销掉 §3 bug#10）**。
+    `stop('switch')` 现在会 kill 进程组并等它退（≤4s）再重置 `running`；`run()` 开头快照
+    `{root, taskId, gen}`，尾段（建卡/上云/记账/run-end）全部用快照——此前 run-end 走的是
+    getter，换库后会打到**新库**的任务上，这正是 bug#10「两个 mcn-ingest / before-quit 只杀一个」的机制。
+    换库成功时向导 toast「已停止上一库的入库（已完成的部分已保留）」，任务 `canceled:'switch'`。
+    `before-quit` 同时 `agentManager.abortAll()`，SDK 子进程不再随退出成孤儿。
+
 ---
 
 ## 5. 文件结构说明
@@ -1057,8 +1126,23 @@ mcn-ai/
 │   └ app/api/v1/knowledge/personal/     桌面版云端接口（Bearer 鉴权）
 ├ desktop/     Electron 桌面版（本文档主角）
 ├ supabase/    migrations/（010=私人层，011=file_path/content_hash 去重）
-└ worker/      视频线 worker（未开工）
+├ worker/      视频线 worker（未开工）
+└ docs/        见下表
 ```
+
+### docs/ 索引（2026-09-02 补，PLAN-v2 R20）
+
+| 文档 | 内容 | 状态 |
+|---|---|---|
+| `HANDOFF.md` | 本文：项目全貌 / bug / 决策，接手必读 | 持续更新 |
+| `RELEASE.md` · `RELEASE-CHECK.md` | 发版手册（签名/公证/OSS 更新源）· 发版前全面自测报告 | 现行 |
+| `DESIGN-task-state.md` · `DESIGN-color-semantics.md` | 全局任务状态层设计 · 颜色语义规则 | 现行 |
+| `UX-AUDIT.md` · `QA-REPORT-qa.md` | 2026-08 UX 审计（H/M/L 编号的来源）· QA 修复大单报告（含计价三方对账） | 已消化 |
+| `PRODUCT-AUDIT.md` | 2026-09-02 产品审计三卷（架构债 a/b/c/d、静默清单 Q1–Q15、UI 附录 B） | 事实底座 |
+| `REFERENCE-codex.md` · `REFERENCE-products.md` | Codex CLI 源码参照 · Claude Desktop / WorkBuddy 对照与「明确不做」清单 | 参照 |
+| `DESIGN-scale.md` | 设计刻度表（间距 8 点栅格 7 档 / 行高 / 阴影 / 字重）；token 已定义，存量替换在批 4 | 草案→token 已落 |
+| `PLAN-v2.md` | 补课方案 v2，批 0–7；**已批准，批 0+1 于 2026-09-02 执行** | 现行 |
+| `architecture.md` | webpage 侧早期架构 | 早期 |
 
 ### desktop/ 内部
 

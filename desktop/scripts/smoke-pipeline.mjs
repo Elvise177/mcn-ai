@@ -137,6 +137,36 @@ console.log('\n【4】convert-one：成功 / 损坏 / 不支持')
     : fail('不支持格式的处理不对', JSON.stringify(e3))
 }
 
+console.log('\n【5】崩溃时 stderr 要留得下原因（R4 的素材）')
+{
+  // 没打出任何 JSON 事件就退出的崩溃：argparse 拒绝未知参数就是这种形态——
+  // 非 0 退出、stdout 零事件、原因只在 stderr。orchestrator 现在把 stderr 尾部 2KB 端进任务 error，
+  // 这里断言的是"素材确实在 stderr 里"，否则那条链路接得再对也是空的
+  const r = run(['--vault', V, '--skip-llm', '--e2e-bogus-flag'])
+  r.code !== 0 ? ok(`非 0 退出（code ${r.code}）`) : fail('未知参数居然正常退出')
+  r.events.length === 0 ? ok('stdout 零 JSON 事件（崩在解析参数之前）') : fail('不该有事件', JSON.stringify(r.events[0]))
+  /error|unrecognized/i.test(r.raw) ? ok('stderr 里有原因', r.raw.trim().split('\n').pop().slice(0, 80)) : fail('stderr 没有原因', r.raw.slice(-200))
+}
+
+console.log('\n【6】打标 key 走环境变量（R5）：argv 不给 --llm-key 也能被 cli.py 读到')
+{
+  // 只验"参数解析层认 env"，不真调 LLM：--count-stale 路径在读完 args 之后立即返回，
+  // 期间 cli.py 会把 env 里的 key 当成 --llm-key 的默认值。给一把假 key + 假地址，
+  // 断言它没有因为"缺 key"而把 llm 判成不可用（tag_stale 事件照常出来，且没有 skipped no_llm_key）
+  let r
+  try {
+    const out = execFileSync(BIN, ['--vault', V, '--count-stale', '--llm-base-url', 'http://127.0.0.1:9'], {
+      encoding: 'utf8', timeout: 120_000, env: { ...process.env, LLM_API_KEY: 'sk-e2e-fake' },
+    })
+    r = { code: 0, raw: out, events: parse(out) }
+  } catch (e) {
+    r = { code: e.status ?? 1, raw: String(e.stdout ?? '') + String(e.stderr ?? ''), events: parse(String(e.stdout ?? '')) }
+  }
+  const e = r.events.find((x) => x.stage === 'tag_stale')
+  e ? ok('env 传 key 的调用照常跑通 --count-stale') : fail('--count-stale 没回事件', r.raw.slice(-200))
+  !r.raw.includes('sk-e2e-fake') ? ok('key 没有被回显到 stdout/stderr') : fail('key 泄漏到输出')
+}
+
 rmSync(V, { recursive: true, force: true })
 console.log(bad === 0 ? '\n✅ pipeline 冒烟全部通过\n' : `\n❌ ${bad} 条不通过\n`)
 process.exit(bad === 0 ? 0 : 1)

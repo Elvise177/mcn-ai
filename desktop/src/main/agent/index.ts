@@ -19,6 +19,9 @@ import type { AgentTask } from '../tasks/types'
 import { conversationMessages, type ChatMessage } from './conversations'
 import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
 import { judgeWrite } from './write-guard'
+import { buildSystemPrompt } from './system-prompt'
+import { judgeTimeout, resolveTimeoutMs } from './timeout'
+import { readVaultConfig } from '../vault/taxonomy'
 import { backupBeforeWrite, takeUndoNotice } from './write-backup'
 import {
   countToolResults,
@@ -138,35 +141,6 @@ function summarizeWrite(tool: string, input: Record<string, unknown>): string {
   return `写入全文，约 ${content.length} 字`
 }
 
-/** PPT 版式速查（源自 render_pptx.py 的设计系统，注入系统提示词） */
-const PPT_GUIDE = `render_pptx 的 outline JSON 格式：
-{"title":"标题","subtitle":"副标题","slides":[
- {"title":"页标题","bullets":["要点",{"pre":"铺垫：","hl":"重点"}]},
- {"title":"章节","section":true,"num":"一","quote":"章节金句"},
- {"type":"vs","title":"对比","left":{"label":"错误","lines":["…"]},"right":{"label":"正确","lines":["…"]}},
- {"type":"quote","title":"小标","text":"大字金句","sub":"补充"},
- {"type":"checklist","title":"清单","items":["条目"]},
- {"type":"bars","title":"数据","items":[{"label":"A","value":100}]},
- {"type":"steps","title":"流程","items":["步骤"],"footer":"金句"},
- {"type":"matrix","title":"矩阵","items":["项"],"highlight":[0],"cols":4},
- {"type":"timeline","title":"轴","nodes":[{"time":"0天","label":"阶段","status":"状态"}]},
- {"type":"bignum","title":"看板","cards":[{"num":"¥199","label":"名","lines":["说明"],"style":"accent"}]},
- {"type":"image","title":"配图页","images":["/绝对路径/图.png"],"caption":"图注"},
- {"type":"chart","chart":"bar|line|pie","title":"数据图","categories":["1月","2月"],"series":[{"name":"系列名","values":[100,200]}]}]}
-版式选择：对比→vs；观点→quote；行动项→checklist；流程→steps；多选一→matrix；阶段→timeline；价格→bignum。
-整份至少混用 3 种版式，同一版式禁止连续超过 2 页，禁止全篇 bullets；内容必须来自检索到的库内资料，不得编造。
-
-**图（image 版式）**：两个来源都能用——① 用户本轮附件（路径在【本轮附件】里，原样填）；
-② 库内笔记里的嵌图（正文里形如 \`![](_assets/…/img01.png)\` 的引用，把它换算成绝对路径填进来）。
-一页最多 4 张。没有图就别用这个版式，不要编路径。
-
-**数据用 chart 不用 bars**：只要数字来自库内表格（GMV、场次、占比、月度趋势…），
-一律用 \`chart\`——它生成的是真的 PPT 图表对象，能点开改数据。\`bars\` 只用于没有真实数据的
-观感对比（比如"你以为 100 / 实际 50"）。categories 与每个 series 的 values 必须等长。
-
-render_document 的 spec JSON（Word/PDF 用 doc 结构，Excel 用 sheets 结构）：
-doc:  {"title":"标题","subtitle":"副标题","sections":[{"heading":"小节","paragraphs":["段落"],"bullets":["要点"],"images":["/绝对路径/图.png"],"table":{"headers":["列"],"rows":[["值"]]}}]}
-xlsx: {"title":"名","sheets":[{"name":"表名","headers":["列1"],"rows":[["值"]],"widths":[16]}]}`
 
 /**
  * 往渲染 spec 里注入库根。**由主进程注入，不是让模型填**：
@@ -283,35 +257,41 @@ export class AgentManager {
     return 'chat'
   }
 
-  private buildSystemPrompt(): string {
-    const root = vaultManager.currentRoot
-    const tree = vaultManager.tree()
-    const dirs = tree.filter((n) => n.children).map((n) => n.name).join('、')
-    return `你是 SamePage——MCN 公司与带货达人的 AI 工作台，工作语言中文。
-用户的个人知识库在 ${root ?? '(未打开)'}，顶层分区：${dirs || '(空库)'}。
+  /** 文件树的一级目录名，进 system prompt 的「顶层分区」 */
+  private topDirs(): string[] {
+    return vaultManager.tree().filter((n) => n.children).map((n) => n.name)
+  }
 
-规则：
-1. 回答任何与用户业务/资料相关的问题前，必须先用 search_knowledge 检索库；回答中的每个关键结论句末标注来源，格式 [[笔记名]]。不许编造。
-1b. **只许引用你这一轮真正看过的文件**：检索命中并读过、或用 Read 打开过的。没读过就别标它的名字——哪怕你觉得内容对得上。结论出自哪一篇就标哪一篇，不要把 A 的内容标成 B 的来源。检索结果里只看到标题没看到内容的，要么先 Read 再引，要么不引。
-2. **检索词写成 2-4 个空格分开的短关键词，不要把整句话丢进去**。检索器是关键词匹配，整句查询（如「公司今年的年度目标是什么」）会因为夹带虚词而命中不到；正确写法是「年度目标」或「年度目标 进展」。空结果时**换更短的词**再试，不要换同义词反复兜圈子。
-3. **顺序不能反：任何与库内资料相关的问题，第一个动作必须是 search_knowledge**，不许一上来就 Grep/Glob/Read 扫文件系统。
-3b. **检索有命中就先把命中用足**：该 Read 就 Read，把读到的内容榨干；读完仍然不够，再按规则 4 去找。命中的内容里通常已经有答案，或者有能直接用的线索（确切的笔记名）。
-4. **找东西只有这三个工具：Grep（找内容）、Glob（找文件名）、Read（读全文）。命令行是关着的，别用 Bash 去 grep/find/ls——那条路一定被拒。**
-   用它们的时机有两种：① 检索没命中，要确认"库里真的没有"（检索返回空 ≠ 库里没有）；② 已经拿到明确线索——确切的文件名、确切的目录，或用户问题里出现的专名（人名/产品名/项目名）。
-   **别猜**：不要拿检索结果里的内部字段名（my_script、source_type 这类）当关键词，不要猜目录路径，不要把同一个意思换几种写法反复试。**一次 0 命中说明线索不对——该换的是思路，不是再猜一个路径。**
-   用户问题里的专名（比如达人名、产品名）就是最好的关键词，一次 Grep 通常就够。
-5. 用户要"做成PPT/课件"时：先检索资料，再构造 outline JSON 调 render_pptx 工具；要 Word/Excel/PDF 时：先检索资料，构造 spec JSON 调 render_document 工具（format 选 docx/xlsx/pdf）。用户要求生成文件时必须真的调用渲染工具产出文件，不许只在回答里给内容。${PPT_GUIDE}
-6. 写文件只允许写入 90_产物/ 目录。用户指名要 PPT/Word/Excel/PDF 时，必须调用对应渲染工具（render_pptx / render_document）产出该格式的文件，禁止用 Write 写 markdown 代替。
-7. 回答简洁直接，重要结论在前。
-8. 重要：每轮只调用一个工具，严禁在同一轮里并行调用多个工具（网关不支持并行 tool_use，会直接报错）。需要多次检索就分多轮串行进行。
-9. 检索够用即止：同一个任务里 search_knowledge 最多调 3 次。素材够写就立刻动手产出（该调 render_pptx / render_document 就调），不要为了"再全一点"反复检索——轮次是有上限的，耗光了文件就产不出来。三次检索仍无命中就转规则 4 的 Grep/Glob 兜底，别继续换词再搜。
-9b. **文件查找（Grep/Glob）一轮最多 ${SCAN_LIMIT} 次，系统强制**，超了直接拒。所以每一次都要花在有线索的地方；额度用完就**拿已有材料作答**，没有依据的部分直说没有，不要硬凑，更不要改用别的工具绕过去。
-10. **回答里不许出现你的工作机制**：工具名、子代理、任务编排、"我调用了…"、"子代理卡住了"这类内容一律不写。用户要的是结论与来源，不是过程日志。遇到障碍就说人话，不要暴露内部实现。（用人话提一句"检索了资料库""查阅了档案"是可以的，不算暴露机制。）
-10b. **一旦说到检索过程，就必须与事实一致**。用户是**一边看界面上的过程步骤、一边读你的正文**的，两边对不上，在他眼里就是产品自己打自己。
-   - 检索**有结果、但你判断不相关**时，**不许说成"无结果／无命中／没找到"**。要说与事实相符的话，例如「检索到的内容与问题不直接相关，我改为直接查阅相关档案」。
-   - 凡是界面会展示的客观事实——**命中条数、文件名**——正文里的转述不得与它矛盾。拿不准就别提数字，只说做了什么。
-   - 检索返回的是「相近结果」而你最终判定库里没有时，**用一句话交代这些相近结果的去向**（例如「检索到的相近内容与霍格沃茨无关」）。界面上明明写着"相近结果 6 条"，正文却只字不提，用户会以为你漏看了。
-11. **敏感信息只用不说**：人事档案、财务表、达人信息表这类文件**可以读、可以作为结论依据、可以标注来源**，但**回答里不许复述个人字段**——身份证号、银行卡/收款账户、手机号等联系方式、员工与达人的真实姓名，一律不写进回答。提到人一律用**艺名**（达人）或**姓氏+职务**（员工，如"陈经理""李主管"）。用户明确要求看某个具体字段时，告诉他在哪个文件里自己打开看，不要代为复述。`
+  /**
+   * 诊断口（IPC `agent:systemPrompt`）：当前库会拿到的 system prompt 原文。
+   * 走查用它扫「通用库不许有 MCN 字眼」（R1），与真实发送走的是同一个函数、同一份配置。
+   */
+  async systemPromptForDiag(): Promise<string> {
+    const root = vaultManager.currentRoot
+    if (!root) return ''
+    const cfg = await readVaultConfig(root)
+    return buildSystemPrompt({ root, dirs: this.topDirs(), cfg, scanLimit: SCAN_LIMIT })
+  }
+
+  /**
+   * 退出应用时把生成中的会话全部中止（PLAN-v2 R2 / 审计 Q4）。
+   * 返回中止的个数，给 before-quit 打日志用。不落半截正文：进程马上就没了，渲染层收不到。
+   */
+  abortAll(reason: 'quit'): number {
+    let n = 0
+    for (const [sessionId, s] of this.live) {
+      this.stopped.add(sessionId)
+      s.abort.abort()
+      const taskId = this.taskId(sessionId)
+      if (tasks.get(taskId)) {
+        tasks.patch(taskId, { title: '应用退出，已停止生成' } as Partial<AgentTask>)
+        tasks.finish(taskId, 'canceled')
+      }
+      log('info', 'agent', `会话 ${sessionId} 随应用退出被中止（${reason}）`)
+      n++
+    }
+    this.live.clear()
+    return n
   }
 
   /**
@@ -475,10 +455,50 @@ export class AgentManager {
     this.live.set(sessionId, { abort })
     this.stopped.delete(sessionId) // 上一轮停止留下的标记，别把这一轮也掐了
 
+    /**
+     * 墙钟超时（PLAN-v2 R3）：软提醒 80% → 硬中断 100%，判据在 `agent/timeout.ts`（纯函数）。
+     * 上限来自管理员区（`store.agentTimeoutMin`，0 = 关）；`MCNAI_E2E_AGENT_TIMEOUT` 只给走查造超时。
+     *
+     * **中断的顺序不能反**（同 H-09 停止生成）：先把已流出的半截正文落成带「（已超时中断）」的
+     * assistant 消息 → 再 abort → 最后由 catch/循环出口发 `kind:'error'`。反过来渲染层收到 done 就清屏。
+     * 超时是 **failed 不是 canceled**：用户没动手，是系统替他停的，Dock 上要红出来。
+     */
+    let timedOut: string | null = null
+    let warned = false
+    const limitMs = resolveTimeoutMs(store.get('agentTimeoutMin'), process.env.MCNAI_E2E_AGENT_TIMEOUT)
+    const ticker = setInterval(() => {
+      if (timedOut || abort.signal.aborted) return
+      const v = judgeTimeout(startedAt, Date.now(), limitMs, warned)
+      if (v.kind === 'warn') {
+        warned = true
+        this.emit({ sessionId, kind: 'notice', text: v.message, tier })
+        return
+      }
+      if (v.kind !== 'abort') return
+      timedOut = v.message
+      log('warn', 'agent', `会话 ${sessionId} 超过墙钟上限 ${limitMs}ms，中断：${v.message}`)
+      const t = tasks.get(taskId) as AgentTask | undefined
+      const draft = t?.draft?.trim()
+      if (draft) {
+        this.emit({ sessionId, kind: 'assistant', text: `${draft}\n\n（已超时中断）`, sdkSessionId: t?.sdkSessionId })
+        tasks.patch(taskId, { draft: '', toolLine: undefined } as Partial<AgentTask>)
+      }
+      abort.abort()
+    }, 500)
+    ticker.unref?.()
+    /** 超时收尾：任务 failed + 错误气泡（带「重试」）。循环出口与 catch 两条路都可能到这里，只做一次 */
+    const settleTimeout = (): void => {
+      tasks.patch(taskId, { title: 'AI 回答超时中断' } as Partial<AgentTask>)
+      tasks.finish(taskId, 'failed', timedOut ?? '超时')
+      this.emit({ sessionId, kind: 'error', text: timedOut ?? '超时', tier })
+    }
+
     try {
       const { query, createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk')
 
-      const artifactsDir = join(root, '90_产物')
+      // 产物目录名吃 layout.json（R6）：以前写死 `90_产物`，库里改了名 AI 就写到旧目录、产物面板盯着新目录一片空白
+      const cfg = await readVaultConfig(root)
+      const artifactsDir = join(root, cfg.artifacts)
       await fs.mkdir(artifactsDir, { recursive: true })
 
       const knowledge = createSdkMcpServer({
@@ -526,7 +546,7 @@ export class AgentManager {
           ),
           tool(
             'render_pptx',
-            '把 outline JSON 渲染成 PPT 文件，写入 90_产物/，返回文件路径',
+            `把 outline JSON 渲染成 PPT 文件，写入 ${cfg.artifacts}/，返回文件路径`,
             {
               outline_json: z.string().describe('完整 outline JSON 字符串'),
               filename: z.string().describe('文件名（不含扩展名），中文可'),
@@ -552,7 +572,7 @@ export class AgentManager {
           ),
           tool(
             'render_document',
-            '把 spec JSON 渲染成 Word(docx)/Excel(xlsx)/PDF 文件，写入 90_产物/，返回文件路径',
+            `把 spec JSON 渲染成 Word(docx)/Excel(xlsx)/PDF 文件，写入 ${cfg.artifacts}/，返回文件路径`,
             {
               format: z.enum(['docx', 'xlsx', 'pdf']).describe('输出格式'),
               spec_json: z.string().describe('spec JSON 字符串（docx/pdf 用 doc 结构，xlsx 用 sheets 结构）'),
@@ -587,7 +607,7 @@ export class AgentManager {
           cwd: root,
           resume: ctx.resume,
           model: provider.model,
-          systemPrompt: this.buildSystemPrompt(),
+          systemPrompt: buildSystemPrompt({ root, dirs: this.topDirs(), cfg, scanLimit: SCAN_LIMIT }),
           allowedTools: [
             'Read', 'Grep', 'Glob',
             'mcp__knowledge__search_knowledge',
@@ -702,7 +722,7 @@ export class AgentManager {
       for await (const message of q) {
         // abort 传播需要时间，SDK 往往还会再吐一条 result 出来。半截回答此刻已经带着
         // 「（已停止）」落进对话了，再补一条完整答案等于根本没停成（H-09）
-        if (this.stopped.has(sessionId)) break
+        if (this.stopped.has(sessionId) || timedOut) break
         if (message.type === 'system' && message.subtype === 'init') {
           const tools = (message as { tools?: string[] }).tools ?? []
           console.log(
@@ -892,6 +912,7 @@ export class AgentManager {
       }
       // 扣住的错误型 result：到这里还没抛异常，说明子进程正常退出了，该由这里收尾。
       // 是「会话已不存在」就转降级重开，不当错误报出去
+      if (timedOut) return settleTimeout()
       if (errorResult) {
         if (ctx.canRecover && isResumeLost(errorResult)) return await this.recover(ctx, errorResult)
         tasks.patch(taskId, { title: 'AI 回答出错' } as Partial<AgentTask>)
@@ -903,7 +924,9 @@ export class AgentManager {
       this.emit({ sessionId, kind: 'done', recovered: ctx.recovered })
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err)
-      if (abort.signal.aborted) {
+      if (timedOut) {
+        settleTimeout()
+      } else if (abort.signal.aborted) {
         tasks.finish(taskId, 'canceled')
         this.emit({ sessionId, kind: 'done' })
       } else if (ctx.canRecover && isResumeLost(raw)) {
@@ -919,6 +942,7 @@ export class AgentManager {
         this.emit({ sessionId, kind: 'error', text: `${String(err)}${hint}`, tier })
       }
     } finally {
+      clearInterval(ticker)
       this.live.delete(sessionId)
       this.stopped.delete(sessionId)
     }

@@ -39,6 +39,8 @@ const api = {
     setShowCost: (v: boolean) => ipcRenderer.invoke('settings:setShowCost', v),
     setSensitiveMode: (allowAi: boolean, allowCloud: boolean) =>
       ipcRenderer.invoke('settings:setSensitiveMode', allowAi, allowCloud),
+    /** agent 一轮的墙钟上限（分钟，0 = 关）；管理员区专用（R3） */
+    setAgentTimeout: (minutes: number) => ipcRenderer.invoke('settings:setAgentTimeout', minutes),
   },
   ai: {
     tiers: () => ipcRenderer.invoke('ai:tiers'),
@@ -127,6 +129,8 @@ const chat = {
   },
   confirmWrite: (id: string, allow: boolean) => ipcRenderer.invoke('agent:confirmWrite', id, allow),
   undoWrite: (id: string) => ipcRenderer.invoke('agent:undoWrite', id),
+  /** 诊断口：当前库的对话 system prompt（只读；走查用它扫"通用库不许有 MCN 字眼"） */
+  systemPrompt: () => ipcRenderer.invoke('agent:systemPrompt'),
   onStream: (cb: (payload: unknown) => void) => {
     const listener = (_e: unknown, payload: unknown): void => cb(payload)
     ipcRenderer.on('agent:stream', listener)

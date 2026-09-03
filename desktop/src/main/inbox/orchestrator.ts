@@ -8,7 +8,7 @@ import { buildEntityCards } from '../vault/entity-cards'
 import { readVaultConfig } from '../vault/taxonomy'
 import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
-import { pipelineBin } from '../lib/pipeline'
+import { pipelineBin, pipelineArgs, pipelineEnv } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { hasSensitiveMark } from '../lib/sensitive'
 import { notifyDingtalk } from '../lib/dingtalk'
@@ -27,14 +27,16 @@ import { getLastInboxRun, setLastInboxRun } from '../tasks/persist'
 export type { InboxEvent }
 
 /**
- * 能入库的扩展名。**真相源是 pipeline 的 `02_convert.py`**（`.md`/`.txt` 直接拷，
- * `CONVERTERS` 里那四种做转换）——这里是它的副本，改一处必须改两处。
+ * 能入库的扩展名。定义搬到了 `lib/supported-ext.ts`（desktop 侧唯一一份，R7），这里只是转出口，
+ * 老的 import 路径不用改。
  *
  * 之所以在拷进投递箱之前就筛：不支持的格式拷进去也没人处理，
  * `02_convert` 连 fail 都不算（只有认识的扩展名转换失败才进 `.failed/`），
  * 结果就是一堆原件永远躺在投递箱里，而用户以为入库了。
  */
-export const SUPPORTED_EXT = new Set(['.md', '.txt', '.doc', '.docx', '.pdf', '.xlsx', '.pptx'])
+export { SUPPORTED_EXT } from '../lib/supported-ext'
+import { SUPPORTED_EXT } from '../lib/supported-ext'
+import { TailBuffer } from '../lib/tail-buffer'
 
 /** 与 `02_convert.py` 的 `JUNK_DIRS` 对齐 */
 const JUNK_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', '__MACOSX', '__pycache__'])
@@ -87,7 +89,7 @@ export class InboxOrchestrator {
   private child: ChildProcess | null = null
   private killTimer: ReturnType<typeof setTimeout> | null = null
   /** 本轮是被谁停的。非 null 时终态是 canceled 而不是 failed */
-  private canceledBy: 'user' | 'quit' | null = null
+  private canceledBy: 'user' | 'quit' | 'switch' | null = null
   /**
    * 上一轮是被用户停掉的、而且没跑完 → 「立即处理」必须放行，哪怕投递箱是空的。
    *
@@ -103,13 +105,17 @@ export class InboxOrchestrator {
     this.win = win
   }
 
-  private send(ev: InboxEvent): void {
+  /**
+   * `id` 是这一轮开始时快照下来的任务 id（R2）：换库后 `this.taskId` 已经指向新库，
+   * 旧轮次的尾段事件（run-end）不传快照就会 patch 到新库的任务上。不传 = 当前库（watcher 事件用）。
+   */
+  private send(ev: InboxEvent, id?: string): void {
     if (ev.type === 'run-start') this.stages = []
     if (ev.type === 'stage') {
       this.stages.push(ev)
       if (ev.status === 'error') log('error', 'inbox', `${ev.stage}: ${ev.message}`)
     }
-    this.toTask(ev)
+    this.toTask(ev, id)
   }
 
   private get taskId(): string {
@@ -130,8 +136,7 @@ export class InboxOrchestrator {
   }
 
   /** 把阶段事件翻译成任务状态。任务是唯一真相源，legacy 事件只是它的副本 */
-  private toTask(ev: InboxEvent): void {
-    const id = this.taskId
+  private toTask(ev: InboxEvent, id: string = this.taskId): void {
     const cur = tasks.get(id)
     const live = cur && (cur.status === 'queued' || cur.status === 'running')
 
@@ -161,7 +166,7 @@ export class InboxOrchestrator {
       tasks.start({
         id,
         kind: 'inbox',
-        key: this.vaultRoot ?? '',
+        key: id.replace(/^inbox:/, ''),
         status: 'running',
         title: '投递箱处理中',
         cancelable: true,
@@ -195,7 +200,9 @@ export class InboxOrchestrator {
         // 取消不是出错：把中途 stage 留下的 error 抹掉，面板/全局条才不会画成红色
         ...(canceled ? { error: undefined } : {}),
         title: canceled
-          ? `已停止（本轮处理到 ${progress.done}/${progress.total}，已完成的部分已保留）`
+          ? canceled === 'switch'
+            ? `已停止上一库的入库（处理到 ${progress.done}/${progress.total}，已完成的部分已保留）`
+            : `已停止（本轮处理到 ${progress.done}/${progress.total}，已完成的部分已保留）`
           : ev.ok
             ? '投递箱处理完成'
             : '投递箱处理失败',
@@ -209,7 +216,7 @@ export class InboxOrchestrator {
        * 停在 PII守卫 后点立即处理，被告知"没有文件要处理"，而提示语刚说过"仍在投递箱里"）。
        * 说错话比不说更糟，所以数一遍再决定怎么说。`toTask` 是同步的，这里异步补后半句。
        */
-      if (canceled) {
+      if (canceled === 'user') {
         const base = `已停止（本轮处理到 ${progress.done}/${progress.total}，已完成的部分已保留）`
         void this.pendingCount()
           .then((n) => {
@@ -330,10 +337,42 @@ export class InboxOrchestrator {
 
   private recentFiles = new Map<string, number>()
 
-  async stop(): Promise<void> {
+  /**
+   * 上一次 `stop()` 是否真的停掉了一轮在跑的 pipeline。`openVault` 换库成功后取走它，
+   * 决定要不要 toast「已停止上一库的入库」——取走即清。
+   */
+  private stoppedForSwitch = false
+  takeStoppedForSwitch(): boolean {
+    const v = this.stoppedForSwitch
+    this.stoppedForSwitch = false
+    return v
+  }
+
+  /**
+   * 换库 / 退出前停下这个库上的一切（PLAN-v2 R2，销掉 HANDOFF §3 bug#10）。
+   *
+   * 以前这里**只关 watcher**：在跑的 pipeline 不杀、`running` 不重置。换库之后旧 pipeline
+   * 继续写旧库、烧额度，`run()` 尾段又按 getter 读到**新库**的 taskId 去 patch——
+   * 这就是「同库两个 mcn-ingest / before-quit 只杀得掉一个」的机制。
+   * 现在：先关 watcher（别再收新文件）→ 撤掉去抖调度 → 有 child 就 kill 整个进程组并等它退（≤4s）
+   * → 重置 running/rerun。顺序固定，别调换。
+   */
+  async stop(reason: 'switch' | 'quit' = 'switch'): Promise<void> {
     await this.watcher?.close()
     this.watcher = null
-    if (this.debounce) clearTimeout(this.debounce)
+    if (this.debounce) {
+      clearTimeout(this.debounce)
+      this.debounce = null
+    }
+    this.rerun = false
+    if (this.child) {
+      log('info', 'inbox', `${reason === 'switch' ? '换库' : '退出'}时投递箱还在跑，先停掉这一轮`)
+      await this.cancel(reason)
+      if (reason === 'switch') this.stoppedForSwitch = true
+    }
+    // 兜底：cancel 等到 close 后 run() 的尾段会自己把 running 放掉；万一 4 秒兜底先到（进程没退干净），
+    // 也不能让下一个库的 run() 被一个已经不属于它的 running 挡住
+    this.running = false
   }
 
   /**
@@ -441,12 +480,10 @@ export class InboxOrchestrator {
         pipelineBin(),
         [
           '--vault', this.vaultRoot!, '--tag-backfill', '--max-cost', '10',
-          // `llmKey!`：非空是 judgeBackfill 保证的（no-key 已经在上面 return 了），
-          // 但那层保证 TS 跟不过来，不收窄的话整个数组变成 (string|null)[]，
-          // spawn 的重载解析失败 → child 被归约成 never，报的错跟真因毫不相干
-          '--llm-key', llmKey!, '--llm-base-url', store.get('llmBaseUrl'), '--llm-model', store.get('llmModel'),
+          '--llm-base-url', store.get('llmBaseUrl'), '--llm-model', store.get('llmModel'),
         ],
-        { stdio: ['ignore', 'pipe', 'pipe'], detached: true }
+        // key 走 env 不走 argv（R5）；llmKey 非空是 judgeBackfill 保证的
+        { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: pipelineEnv(process.env, llmKey) }
       )
       this.child = child
       tasks.patch(id, { pid: child.pid, cancelable: true } as Partial<InboxTask>)
@@ -517,7 +554,7 @@ export class InboxOrchestrator {
    * 而 UI 已经显示"已停止"——比不做取消更糟。所以 spawn 时加 detached:true 让子进程成为
    * 新进程组的组长（组 id == child.pid），这里用负号杀整组。
    */
-  private killGroup(reason: 'user' | 'quit'): void {
+  private killGroup(reason: 'user' | 'quit' | 'switch'): void {
     const pgid = this.child?.pid
     if (!pgid) return
     this.canceledBy = reason
@@ -546,7 +583,7 @@ export class InboxOrchestrator {
    * ——回滚意味着删用户 vault 里的文件，风险远大于收益。未处理的文件仍在投递箱里，
    * 下次「立即处理」会接着做。
    */
-  async cancel(reason: 'user' | 'quit' = 'user'): Promise<boolean> {
+  async cancel(reason: 'user' | 'quit' | 'switch' = 'user'): Promise<boolean> {
     // 还在 3 秒去抖窗口里、pipeline 没起来：撤掉这轮调度即可
     if (!this.child) {
       if (this.debounce) {
@@ -685,11 +722,10 @@ export class InboxOrchestrator {
    * 跑在 pipeline 之后、上云之前——新卡要上云，而敏感卡必须在上云前就被识别出来。
    * 实现在 `vault/entity-cards.ts`（不在 pipeline 里，见那里的头注释）。
    */
-  private async buildCards(): Promise<string[]> {
-    if (!this.vaultRoot) return []
+  private async buildCards(root: string, taskId: string = this.taskId): Promise<string[]> {
     try {
-      const libName = await this.libraryName(this.vaultRoot)
-      const st = await buildEntityCards(this.vaultRoot, libName)
+      const libName = await this.libraryName(root)
+      const st = await buildEntityCards(root, libName)
       const bits = [`实体 ${st.entities} 个`, `新建卡 ${st.created}`]
       if (st.updated) bits.push(`更新 ${st.updated}`)
       if (st.merged) bits.push(`归一合并 ${st.merged}`)
@@ -699,10 +735,10 @@ export class InboxOrchestrator {
       if (st.sensitiveCards) bits.push(`${st.sensitiveCards} 张敏感卡仅存本地`)
       // 冲突必须**说出来**：静默覆盖用户手工编辑过的卡是不可接受的（同 M-27 的原则）
       if (st.conflicted) bits.push(`${st.conflicted} 张你改过的卡未覆盖，新内容放在「待合并」里`)
-      this.send({ type: 'stage', stage: 'build_cards', status: st.conflicted ? 'warn' : 'ok', message: bits.join('，') })
+      this.send({ type: 'stage', stage: 'build_cards', status: st.conflicted ? 'warn' : 'ok', message: bits.join('，') }, taskId)
       return st.sensitivePaths
     } catch (e) {
-      this.send({ type: 'stage', stage: 'build_cards', status: 'error', message: String(e) })
+      this.send({ type: 'stage', stage: 'build_cards', status: 'error', message: String(e) }, taskId)
       return []
     }
   }
@@ -713,10 +749,9 @@ export class InboxOrchestrator {
   }
 
   /** 入库成功后：本轮修改过的 md 上云（私人层）。未登录直接跳过 */
-  private async cloudSync(sinceMs: number, extraSensitive: string[] = []): Promise<void> {
-    if (!this.vaultRoot) return
+  private async cloudSync(root: string, sinceMs: number, extraSensitive: string[], taskId: string): Promise<void> {
     if (!(await getAccessToken())) {
-      this.send({ type: 'stage', stage: 'cloud_sync', status: 'skipped', message: '未登录' })
+      this.send({ type: 'stage', stage: 'cloud_sync', status: 'skipped', message: '未登录' }, taskId)
       return
     }
     try {
@@ -730,11 +765,11 @@ export class InboxOrchestrator {
           if (e.isDirectory()) await walk(p)
           else if (e.name.endsWith('.md')) {
             const st = await fsp.stat(p)
-            if (st.mtimeMs > sinceMs - 60_000) changed.push(relative(this.vaultRoot!, p))
+            if (st.mtimeMs > sinceMs - 60_000) changed.push(relative(root, p))
           }
         }
       }
-      await walk(this.vaultRoot)
+      await walk(root)
 
       // A-8：带 `sensitive: true` 的笔记不进云端（除非用户在设置里开了第三档）。
       // 标记由 09_pii_guard 写进 frontmatter——不读 pipeline 的 .checkpoint.jsonl，
@@ -757,7 +792,7 @@ export class InboxOrchestrator {
         if (hit !== undefined) return hit
         let v = false
         try {
-          v = hasSensitiveMark(await fsp.readFile(join(this.vaultRoot!, rel), 'utf-8'))
+          v = hasSensitiveMark(await fsp.readFile(join(root, rel), 'utf-8'))
         } catch {
           // 读不到就当敏感：宁可少传一篇，不可误传一篇
           v = true
@@ -790,25 +825,31 @@ export class InboxOrchestrator {
         if (toPush.length > BATCH && i + BATCH < toPush.length) {
           // 文案不再自带「上云」二字：面板会把阶段名画在前面（`上云 · 20/61 篇`），
           // 自己再带一遍就成了「上云 · 上云中 20/61 篇」
-          this.send({
-            type: 'stage',
-            stage: 'cloud_sync',
-            status: 'ok',
-            message: `${Math.min(i + BATCH, toPush.length)}/${toPush.length} 篇`,
-          })
+          this.send(
+            {
+              type: 'stage',
+              stage: 'cloud_sync',
+              status: 'ok',
+              message: `${Math.min(i + BATCH, toPush.length)}/${toPush.length} 篇`,
+            },
+            taskId
+          )
         }
       }
       // 「N 篇未同步」单说会让人以为同步坏了、去查网络——而那 M 篇是按他自己的设置刻意不传的
       const holdNote = held.length ? `，其中 ${held.length} 篇为敏感文件，按设置仅存本地` : ''
       const failNote = failed ? `，${failed} 篇失败（已进重试队列）` : ''
-      this.send({
-        type: 'stage',
-        stage: 'cloud_sync',
-        status: failed ? 'warn' : 'ok',
-        message: `已完成 ${synced} 篇${holdNote}${failNote}`,
-      })
+      this.send(
+        {
+          type: 'stage',
+          stage: 'cloud_sync',
+          status: failed ? 'warn' : 'ok',
+          message: `已完成 ${synced} 篇${holdNote}${failNote}`,
+        },
+        taskId
+      )
     } catch (e) {
-      this.send({ type: 'stage', stage: 'cloud_sync', status: 'error', message: String(e) })
+      this.send({ type: 'stage', stage: 'cloud_sync', status: 'error', message: String(e) }, taskId)
     }
   }
 
@@ -822,25 +863,41 @@ export class InboxOrchestrator {
     this.canceledBy = null
     this.tagProgress = null // 每轮重新计数
     const runStart = Date.now()
-    this.send({ type: 'run-start' })
+    /**
+     * **这一轮的身份在开头拍下来**（R2）：库根、任务 id、轮次号。下面每一个 await 之后
+     * `this.vaultRoot`/`this.taskId` 都可能已经指向别的库（用户中途换库），
+     * 尾段（建卡 / 上云 / 记账 / run-end / 放开 running）全部只认快照。
+     */
+    const root = this.vaultRoot
+    const taskId = this.taskId
+    const gen = ++this.runGen
+    this.send({ type: 'run-start' }, taskId)
 
     const llmKey = getLlmKey()
-    const args = ['--vault', this.vaultRoot, '--max-cost', '10']
-    // A-8 三态：默认敏感文件只走本地规则打标；用户在设置里明示后才允许发给模型
-    if (store.get('sensitiveAllowAi')) args.push('--sensitive-allow-ai')
-    if (llmKey) {
-      args.push('--llm-key', llmKey, '--llm-base-url', store.get('llmBaseUrl'), '--llm-model', store.get('llmModel'))
-    } else {
-      args.push('--skip-llm')
-    }
+    // argv 里没有 key（R5）：key 走 env，见 lib/pipeline.ts 的两个纯函数（smoke:guards 守着）
+    const args = pipelineArgs({
+      root,
+      llmKey,
+      llmBaseUrl: store.get('llmBaseUrl'),
+      llmModel: store.get('llmModel'),
+      sensitiveAllowAi: store.get('sensitiveAllowAi'),
+    })
+    // stderr 只留尾部 2KB（R4）：崩溃没来得及打 JSON 事件时，这是唯一的原因来源
+    const stderrTail = new TailBuffer(2048)
 
     const ok = await new Promise<boolean>((resolve) => {
       // detached:true → 子进程成为新进程组的组长（组 id == child.pid），取消时才能连孙子进程
       // 一起杀（见 killGroup）。**不调 unref()**：我们仍然要等它的 close 事件
-      const child = spawn(pipelineBin(), args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true })
+      const child = spawn(pipelineBin(), args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+        // key 走环境变量不走 argv（R5，审计 b5）：argv 在 `ps` 里任何本机用户都看得见。
+        // cli.py 的 `--llm-key` 默认值就是 `os.environ["LLM_API_KEY"]`，冻结产物不用改
+        env: pipelineEnv(process.env, llmKey),
+      })
       this.child = child
       // pid 进任务对象：取消入口与走查的进程组断言都靠它
-      tasks.patch(this.taskId, { pid: child.pid, cancelable: true } as Partial<InboxTask>)
+      tasks.patch(taskId, { pid: child.pid, cancelable: true } as Partial<InboxTask>)
       let buf = ''
       let lastStatus = 'ok'
       child.stdout.on('data', (d: Buffer) => {
@@ -860,27 +917,30 @@ export class InboxOrchestrator {
              */
             if (ev.status === 'progress' && ev.stage === 'tag_llm') {
               this.tagProgress = { done: Number(ev.done) || 0, total: Number(ev.total) || 0 }
-              tasks.patch(this.taskId, { progress: this.computeProgress() } as Partial<InboxTask>)
+              tasks.patch(taskId, { progress: this.computeProgress() } as Partial<InboxTask>)
               continue
             }
             if (ev.stage === 'done') lastStatus = ev.status
-            this.send({
-              type: 'stage',
-              stage: ev.stage,
-              status: ev.status,
-              message: ev.message,
-              pending: ev.pending,
-              failed: ev.failed,
-              unsupported: ev.unsupported,
-              // 打标阶段若报了 token 用量就带上；pipeline 目前不报，那就只记次数（见下方 appendUsage）
-              usage: ev.usage,
-            })
+            this.send(
+              {
+                type: 'stage',
+                stage: ev.stage,
+                status: ev.status,
+                message: ev.message,
+                pending: ev.pending,
+                failed: ev.failed,
+                unsupported: ev.unsupported,
+                // 打标阶段若报了 token 用量就带上；pipeline 目前不报，那就只记次数（见下方 appendUsage）
+                usage: ev.usage,
+              },
+              taskId
+            )
           } catch {
             /* 非 JSON 行来自阶段脚本的中文日志，忽略 */
           }
         }
       })
-      child.stderr.on('data', () => void 0)
+      child.stderr.on('data', (d: Buffer) => stderrTail.push(d))
       const settle = (v: boolean): void => {
         if (this.child === child) this.child = null
         if (this.killTimer) {
@@ -889,17 +949,38 @@ export class InboxOrchestrator {
         }
         resolve(v)
       }
-      child.on('close', (code) => settle(code === 0 && lastStatus === 'ok'))
+      child.on('close', (code, signal) => {
+        /**
+         * 非零退出且不是我们自己杀的（R4）：把 stderr 尾部端出来。以前这里 stderr 整条丢弃，
+         * PyInstaller 找不到模块、Python 段错误这类**没来得及打 JSON 事件**的崩溃在界面上只剩
+         * 「投递箱处理失败」四个字，原因为空、日志也没有。现在最后一行进任务 error，整段进 main.log
+         */
+        if (code !== 0 && !this.canceledBy && !signal) {
+          const tail = stderrTail.text()
+          if (tail) log('error', 'inbox', `pipeline 退出码 ${code}，stderr 尾部：\n${tail}`)
+          this.send(
+            {
+              type: 'stage',
+              stage: 'pipeline',
+              status: 'error',
+              message: `处理程序异常退出（code ${code}）${stderrTail.lastLine() ? `：${stderrTail.lastLine()}` : '，详见诊断日志'}`,
+            },
+            taskId
+          )
+        }
+        settle(code === 0 && lastStatus === 'ok')
+      })
       child.on('error', (err) => {
-        this.send({ type: 'stage', stage: 'spawn', status: 'error', message: String(err) })
+        this.send({ type: 'stage', stage: 'spawn', status: 'error', message: String(err) }, taskId)
         settle(false)
       })
     })
 
-    // 建卡 → 上云。顺序不能反：新卡也要上云，而敏感继承卡必须在上云前就被识别出来
-    const sensitiveCards = ok && !this.canceledBy ? await this.buildCards() : []
+    // 建卡 → 上云。顺序不能反：新卡也要上云，而敏感继承卡必须在上云前就被识别出来。
+    // **只对快照的 root 做**：换库后 this.vaultRoot 已是新库，对新库跑建卡/上云就是 bug#10 的另一半
+    const sensitiveCards = ok && !this.canceledBy ? await this.buildCards(root, taskId) : []
     // 被停掉的那一轮不再上云：半截结果没必要推到云端，也别让用户多等一次网络往返
-    if (ok && !this.canceledBy) await this.cloudSync(runStart, sensitiveCards)
+    if (ok && !this.canceledBy) await this.cloudSync(root, runStart, sensitiveCards, taskId)
 
     const canceled = !!this.canceledBy
 
@@ -910,7 +991,7 @@ export class InboxOrchestrator {
       if (tag) {
         appendUsage({
           ts: Date.now(),
-          sessionId: `inbox:${this.vaultRoot ?? ''}`,
+          sessionId: taskId,
           taskType: 'ingest-tag',
           tier: null, // 入库打标不经档位层，走的是 llmBaseUrl/llmModel 那条独立线路
           expected_model: store.get('llmModel'),
@@ -922,7 +1003,7 @@ export class InboxOrchestrator {
       }
     }
 
-    this.send({ type: 'run-end', ok })
+    this.send({ type: 'run-end', ok }, taskId)
     for (const cb of this.runEndCbs) {
       try {
         cb(ok, canceled)
@@ -942,6 +1023,9 @@ export class InboxOrchestrator {
     } else {
       this.runFiles.length = 0
     }
+    // 只有还是"这一轮"的时候才放开 running（R2）：换库后新库的一轮可能已经开始，
+    // 旧轮次的尾段不许把它的 running 抹掉、也不许替它排下一轮
+    if (this.runGen !== gen) return
     this.running = false
     // 取消之后不接着排下一轮：文件还在投递箱里，等用户自己点「立即处理」
     if (this.rerun && !canceled) {
@@ -950,6 +1034,9 @@ export class InboxOrchestrator {
     }
     this.rerun = false
   }
+
+  /** 单调递增的轮次号：`run()` 尾段靠它判断"我还是当前这一轮吗"（R2） */
+  private runGen = 0
 }
 
 export const inboxOrchestrator = new InboxOrchestrator()

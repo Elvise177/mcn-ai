@@ -161,9 +161,16 @@ app.on('before-quit', (e) => {
   // 二分确认过：不开库秒退、开空库必挂；与 window-all-closed 无关（最小 Electron 应用
   // 复刻同样的 macOS 行为照样秒退）。关掉 watcher 之后恢复正常。
   void vaultManager.close()
-  void inboxOrchestrator.stop()
+  void inboxOrchestrator.stop('quit')
   void artifactsWatcher.stop()
   clearAttachmentsSync() // 对话附件是"仅本轮参考"，不该留在临时目录过夜。**必须同步**：异步版在进程退出前跑不完（B7 走查实测）
+  /**
+   * 生成中的对话也要停（PLAN-v2 R2 / 审计 Q4）：SDK 的 CLI 子进程不随主进程退，
+   * 以前退出时 live 表里的 AbortController 一个都没被 abort，孤儿 CLI 继续跑完那一轮、继续计费。
+   * abort 是同步的（SDK 收到信号就 kill 子进程），不用像 pipeline 那样 preventDefault 等它
+   */
+  const aborted = agentManager.abortAll('quit')
+  if (aborted) log('info', 'main', `退出前中止了 ${aborted} 个生成中的对话`)
 
   if (quitting || !inboxOrchestrator.hasChild()) return
   quitting = true

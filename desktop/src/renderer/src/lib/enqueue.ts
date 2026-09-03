@@ -28,8 +28,7 @@ export function enqueueMessage(r: EnqueueResult): { text: string; type: 'ok' | '
     : { text: `未发现可入库的文件${tail}`, type: 'warn' }
 }
 
-/** 支持的格式，给空态提示用（真相源见 `main/inbox/orchestrator.ts` 的 `SUPPORTED_EXT`） */
-export const SUPPORTED_HINT = 'md / txt / docx / pdf / xlsx / pptx'
+// （原来这里有一份 `SUPPORTED_HINT` 抄件，没人引用且已落后于真值——支持列表只从 `settings.supportedExt` 读，R7）
 
 /**
  * 拖放来的 `File` → 磁盘路径。**两个拖入口共用这一个，别各写各的。**

@@ -54,6 +54,13 @@ export interface Persona {
    * 没配就退化成不带括号的「不要把公司自己写进去」。
    */
   company?: string
+  /**
+   * **对话**的身份句（PLAN-v2 R1），进 `agent/system-prompt.ts` 的第一行
+   * 「你是 SamePage——{prompt}」。MCN 预设 = 「MCN 公司与带货达人的 AI 工作台」。
+   * 与 `role`（打标提示词的角色）分开：一个是"资料管理员"的口吻，一个是"工作台"的自述，
+   * 两句话面向的对象不同，硬合成一个字段两边都别扭。没配时按 `id` 取预设默认句。
+   */
+  prompt?: string
   /** 该 persona 下启用的业务功能开关 */
   features: string[]
 }
@@ -119,6 +126,8 @@ export const MCN_PRESET: VaultConfig = {
     id: 'mcn',
     role: '美妆带货MCN公司的资料管理员',
     company: 'OMG美妆',
+    // 对话身份句，逐字等于改造前 `agent/index.ts` 写死的那半句（老库对话口径不漂）
+    prompt: 'MCN 公司与带货达人的 AI 工作台',
     features: ['bizdata'],
   },
   /**
@@ -244,12 +253,15 @@ function persona(v: unknown): Persona {
    * 否则别家客户的提示词里会凭空出现一家美妆 MCN。
    */
   if (!v || typeof v !== 'object' || Array.isArray(v)) return { ...MCN_PRESET.persona }
-  const o = v as { id?: unknown; role?: unknown; company?: unknown; features?: unknown }
+  const o = v as { id?: unknown; role?: unknown; company?: unknown; prompt?: unknown; features?: unknown }
   const company = typeof o.company === 'string' && o.company.trim() ? o.company : undefined
+  // prompt 与 company 同一套规矩：persona 段存在就不兜底，没给就是没给（默认句由 id 决定，见 system-prompt.ts）
+  const prompt = typeof o.prompt === 'string' && o.prompt.trim() ? o.prompt : undefined
   return {
     id: str(o.id, MCN_PRESET.persona.id),
     role: str(o.role, MCN_PRESET.persona.role),
     ...(company ? { company } : {}),
+    ...(prompt ? { prompt } : {}),
     features: Array.isArray(o.features)
       ? o.features.filter((x): x is string => typeof x === 'string')
       : MCN_PRESET.persona.features,
