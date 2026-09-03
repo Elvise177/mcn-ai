@@ -64,6 +64,12 @@
 - `upgrade-path.mjs`（拷本机真实 userData）：迁移 v2 三条 ✓（v1 覆盖已清、`tierMigrated2` 落盘、标准档不再是覆盖）；"两档线路已下发"两条 ❌ = 生产服务端还是 v1，**部署后应绿**。这就是"用户本人机器"的改前/改后：改前 `tierOverrides.standard = {inferera, v4-pro/flash, encryptedApiKey}`，改后清空、等下发。
 - `smoke:provider` 标准档最小集 `SMOKE_ONLY=deepseek SMOKE_CASES=single,abort,tools` **3/3 通过**（16.5s / 4.8s / 31.3s，`modelUsage` 含 `deepseek-v4-pro`，工具真调 3 次），花费按上次口径 ≈¥0.5。
 - **增强档真实调用未跑**：单轮 ≈¥7（RELEASE-CHECK §1.2），超出本批 ¥1 预算，待拍板。线路层已用中转站 key 做过 `max_tokens:1` 探测（200、model 原样回 `claude-opus-5`），走查 10h 的「检测线路」在主实例也真点过一次。
+### 收口（2026-09-03 晚，用户裁决）
+
+- 代码已提交 `ace0d38` 并 **push**（此前本地领先 origin 20 个提交，从 2e92dd0 起都没推过——push 触发 Vercel 自动部署）。
+- **0.1.3 不单独发**：改为与 PLAN-v2 批 2/3 合并后一起发，`desktop/release/SamePage-0.1.3-arm64.dmg` 已签名公证订票（sha256 前缀 `81adfe305fa544cc`）留作备用；**OSS 上传推迟到批 3 完成**。上传时按 RELEASE §B5：zip/blockmap 先、yml 最后带 `max-age=60`。本机**没有 ossutil 与 OSS 凭据**（上一版应是控制台手传），要么 `brew install ossutil && ossutil config` 由用户输 AK，要么控制台手传。
+- **硬约束不变**：OSS 上传必须在生产 client-config 已是契约 v2 之后——否则老客户端自动更新到新版会撞旧服务端，两档全不可用。
+- **待办（下次会话第一件事）**：用测试账号读 `https://www.makeupai.top/api/v1/client-config`，核 `contractVersion: 2` + `tiers.*` 形状，结果记在这里。截至本会话结束（push 后约 5 分钟内轮询）生产仍是 v1，Vercel 部署尚未 Ready。核法：在 `desktop/` 下 `node scripts/check-client-config.mjs https://www.makeupai.top`（supabase-js 用 e2e 测试账号 signInWithPassword 取 token → GET 路由 → key 打码打印），或直接跑 `node e2e/login-provision.mjs`（已含两档下发断言）。
 - **挂账**：`smoke:provider` 跑完汇总后 `app.exit()` 不退出，进程挂了 11 分钟（本单没动它的退出逻辑，疑与 Electron 43 的 `before-quit`/watcher 那条同源，见 §0-新 R2），下次跑要盯着或加硬超时。
 
 ---
