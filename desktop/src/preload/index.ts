@@ -187,11 +187,20 @@ const routes = {
 const dingtalk = {
   test: () => ipcRenderer.invoke('dingtalk:test'),
 }
+/**
+ * 走查专用开关（判据同 HANDOFF §4-22：真触发它要制造一次真实崩溃）。
+ * **只在 preload 读 `process.env`**——渲染进程是 sandbox，拿不到 process。
+ * 生产里没人设这个变量，两个字段恒为 false。
+ */
+const e2e = {
+  /** F1：置 1 时渲染层主动抛一次异常，验 ErrorBoundary 真的接住了 */
+  crashOnMount: process.env.MCNAI_E2E_THROW === '1',
+}
 const files = {
   /** 拖放来的 File → 磁盘路径。取不到返回空串，调用方**必须**把空串报给用户，不许静默 */
   pathFor: (file: File) => pathForFile(file),
 }
-const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes, update, files, tasks: tasksApi }
+const fullApi = { ...api, inbox, chat, artifacts, auth, diag, shortcut, dingtalk, routes, update, files, e2e, tasks: tasksApi }
 contextBridge.exposeInMainWorld('api', fullApi)
 
 export type DesktopApi = typeof fullApi

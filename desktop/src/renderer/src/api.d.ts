@@ -129,6 +129,8 @@ interface CloudState {
   lastError?: string
   checkedAt: number
   pendingSync: number
+  /** N4：正在做的瞬态重试（首次静默，第二次起才有值）。落在 TaskDock 那条上，不进对话历史 */
+  retrying?: string
 }
 
 type TaskEventPayload =
@@ -187,6 +189,11 @@ interface ChatMessage {
   text: string
   /** 这条 assistant 消息是错误提示（M-11）：气泡里要挂「重试」，复用上一条 user 消息重发 */
   error?: boolean
+  /**
+   * B-6 / Q8：这条回答里**没有依据**的 `[[引用]]`（库里没有，或本轮从没读过）。
+   * 渲染成气泡下的角标，**不掺进正文**——掺进去会被复制走，也会被重建上下文时喂回模型。
+   */
+  unverified?: string[]
   attachments?: ChatAttachment[]
 }
 
@@ -297,6 +304,8 @@ interface AgentStreamPayload {
   models?: string[]
   /** 这一轮用的档位；出错时据此给「切换到标准模式重试」的出口 */
   tier?: TierId
+  /** Q15：服务端把模型换掉了（步骤流折叠行尾标「已按标准档执行」） */
+  degraded?: boolean
   /** B-6：回答里没有依据的引用（库里没有，或本轮从没读过） */
   unverifiedCitations?: string[]
   /** 这一轮是「旧 session 失效 → 拼本地历史重开」之后跑出来的（界面不用，冒烟要用） */
@@ -512,6 +521,11 @@ interface Window {
     diag: {
       export: () => Promise<string>
       log: (level: 'info' | 'warn' | 'error', msg: string) => Promise<void>
+    }
+    /** 走查专用开关（preload 读 process.env）。生产里全部恒为 false */
+    e2e: {
+      /** F1：置 1 时渲染层主动抛一次，验白屏保护接住了 */
+      crashOnMount: boolean
     }
     artifacts: {
       list: () => Promise<ArtifactInfo[]>
