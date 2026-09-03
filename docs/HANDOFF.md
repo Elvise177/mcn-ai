@@ -64,6 +64,12 @@
 - `upgrade-path.mjs`（拷本机真实 userData）：迁移 v2 三条 ✓（v1 覆盖已清、`tierMigrated2` 落盘、标准档不再是覆盖）；"两档线路已下发"两条 ❌ = 生产服务端还是 v1，**部署后应绿**。这就是"用户本人机器"的改前/改后：改前 `tierOverrides.standard = {inferera, v4-pro/flash, encryptedApiKey}`，改后清空、等下发。
 - `smoke:provider` 标准档最小集 `SMOKE_ONLY=deepseek SMOKE_CASES=single,abort,tools` **3/3 通过**（16.5s / 4.8s / 31.3s，`modelUsage` 含 `deepseek-v4-pro`，工具真调 3 次），花费按上次口径 ≈¥0.5。
 - **增强档真实调用未跑**：单轮 ≈¥7（RELEASE-CHECK §1.2），超出本批 ¥1 预算，待拍板。线路层已用中转站 key 做过 `max_tokens:1` 探测（200、model 原样回 `claude-opus-5`），走查 10h 的「检测线路」在主实例也真点过一次。
+### Vercel 生产构建连红两次（ace0d38 / cd824b0），已修
+
+route.ts 里 `export const CLIENT_CONFIG_CONTRACT_VERSION` 触发 Next.js App Router 的 "not a valid Route export field"——
+**route.ts 只允许导出 HTTP 方法与固定配置字段**，`next dev` 不查、只有 `next build` 才报。常量挪到
+`webpage/lib/client-config/contract.ts`，route.ts 改 import。**新规矩进了根 CLAUDE.md：webpage 改动 push 前必须本地 `npm run build` 通过。**
+
 ### 收口（2026-09-03 晚，用户裁决）
 
 - 代码已提交 `ace0d38` 并 **push**（此前本地领先 origin 20 个提交，从 2e92dd0 起都没推过——push 触发 Vercel 自动部署）。

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { authBearerUser } from '@/lib/auth/bearer';
+import { CLIENT_CONFIG_CONTRACT_VERSION } from '@/lib/client-config/contract';
 
 /**
  * 桌面客户端配置下发：登录用户自动获得线路 + key（内测用户零配置）。
@@ -25,8 +26,9 @@ import { authBearerUser } from '@/lib/auth/bearer';
  * 0.1.2 及更早的客户端只认这几个；`llm*` 三项此外仍是投递箱打标的配置（与档位无关）。
  * 废弃时机：所有已知装机（用户本人 / 大头 / Jerry）升到含契约 v2 的版本之后，见 HANDOFF。
  * P1 网关上线后本接口改为下发网关地址，key 不再出服务端。
+ *
+ * **route.ts 里不许再 export 任何非 HTTP 方法的东西**（契约版本常量在 lib/client-config/contract.ts）。
  */
-export const CLIENT_CONFIG_CONTRACT_VERSION = 2;
 
 function tier(prefix: string, defaults: { baseUrl: string; model: string; fastModel: string; keyFallback?: string }) {
   const env = process.env;
