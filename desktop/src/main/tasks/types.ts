@@ -1,3 +1,5 @@
+import { INBOX_STAGES, stageLabel } from '../../renderer/src/config/stages'
+
 /**
  * 全局任务状态层的类型定义（设计见 docs/DESIGN-task-state.md §1）。
  *
@@ -118,22 +120,13 @@ export type TaskEventPayload =
   | { type: 'remove'; id: string }
   | { type: 'cloud'; cloud: CloudState }
 
-/** 投递箱主流程的阶段顺序。进度分母在主进程算，渲染层不再自己拼 */
-export const INBOX_FLOW: Array<[string, string]> = [
-  ['convert', '转换'],
-  ['pii_guard', 'PII守卫'],
-  ['tag_llm', '智能打标'],
-  // 敏感文件走这一步：零模型的规则打标，补上 AI 打标跳过的那批的 frontmatter（A-2）。
-  // 必须排在实体建链之前——07 没有 frontmatter 就写不进结构摘要
-  ['tag_rules', '规则打标'],
-  ['sensitive_enrich', '实体建链'],
-  ['gen_moc', '索引重建'],
-  // 实体建卡（A-3）：**跑在 pipeline 之后的主进程里**，不是 pipeline 阶段
-  // （拍板理由：冻结体积与 spec 漏项风险，且增量卡片该由持库者管理）。
-  // 它在 flow 里排在上云之前——新卡也要上云，而敏感卡要在上云前被拦下
-  ['build_cards', '实体建卡'],
-  ['cloud_sync', '上云'],
-]
+/**
+ * 投递箱主流程的阶段顺序。进度分母在主进程算，渲染层不再自己拼。
+ *
+ * **顺序与用户词都来自 `config/stages.ts`**（U3 #6）：它原来在这里写一份、
+ * VaultPage 的 `STAGE_ZH` 又写一份，改一处必漏另一处。
+ */
+export const INBOX_FLOW: Array<[string, string]> = INBOX_STAGES.map((s) => [s, stageLabel(s)])
 
 /**
  * 投递箱进度计算——**纯函数，抽出来是为了能零花费测**。
@@ -170,8 +163,8 @@ export function computeInboxProgress(
       // total 为 0 时不许说「第 1/0 篇」——那是句荒唐话，用户会以为出错了。
       // 这一格刚起步、还没数出总数的那一瞬间就是这个状态（断言逮到的）
       label = tagProgress.total > 0
-        ? `智能打标 · 第 ${Math.min(tagProgress.done + 1, tagProgress.total)}/${tagProgress.total} 篇`
-        : '智能打标'
+        ? `${stageLabel('tag_llm')} · 第 ${Math.min(tagProgress.done + 1, tagProgress.total)}/${tagProgress.total} 篇`
+        : stageLabel('tag_llm')
     }
   }
   return { done, total: INBOX_FLOW.length, label: label || '准备中' }

@@ -22,7 +22,13 @@ import {
   type InboxEvent,
   type InboxTask,
 } from '../tasks/types'
-import { getLastInboxRun, setLastInboxRun } from '../tasks/persist'
+import {
+  dropNoteSyncFailure,
+  getLastInboxRun,
+  pendingSyncTotal,
+  pushNoteSyncFailure,
+  setLastInboxRun,
+} from '../tasks/persist'
 
 export type { InboxEvent }
 
@@ -819,8 +825,20 @@ export class InboxOrchestrator {
         const batch = toPush.slice(i, i + BATCH)
         for (const rel of batch) {
           const r = await ingestNote(rel)
-          if (r.ok && !r.skipped) synced++
-          else if (!r.ok) failed++
+          if (r.ok) {
+            if (!r.skipped) synced++
+            // 上一轮排进队列的这一篇现在通了，撤掉它（不然它会一直挂在「N 条待同步」里）
+            dropNoteSyncFailure(root, rel)
+          } else {
+            failed++
+            /**
+             * F3 / Q2：**真进重试队列**。以前这里只有一个计数器，文案却说「已进重试队列」——
+             * 而那个队列（`syncQueue`）只服务聊天记录，笔记压根没人管。
+             * 后果：云端静默缺篇，而登录态下问库走的是云端语义检索，
+             * 没上云的那些在对话里等于不存在。
+             */
+            pushNoteSyncFailure(root, rel, r.error ?? '未知原因')
+          }
         }
         if (toPush.length > BATCH && i + BATCH < toPush.length) {
           // 文案不再自带「上云」二字：面板会把阶段名画在前面（`上云 · 20/61 篇`），
@@ -838,7 +856,9 @@ export class InboxOrchestrator {
       }
       // 「N 篇未同步」单说会让人以为同步坏了、去查网络——而那 M 篇是按他自己的设置刻意不传的
       const holdNote = held.length ? `，其中 ${held.length} 篇为敏感文件，按设置仅存本地` : ''
-      const failNote = failed ? `，${failed} 篇失败（已进重试队列）` : ''
+      // 这句话现在是**实话**了（F3）：队列真的存在，退避到期会自己重传，
+      // 转手动之后的出口是侧栏那颗「重试同步」
+      const failNote = failed ? `，${failed} 篇没传上去，已排队稍后自动重试` : ''
       this.send(
         {
           type: 'stage',
@@ -848,6 +868,8 @@ export class InboxOrchestrator {
         },
         taskId
       )
+      // 失败的那几篇要立刻反映到侧栏的「N 条待同步」上，不能等下一次 30 秒扫描
+      if (failed) tasks.setCloud({ pendingSync: pendingSyncTotal() })
     } catch (e) {
       this.send({ type: 'stage', stage: 'cloud_sync', status: 'error', message: String(e) }, taskId)
     }

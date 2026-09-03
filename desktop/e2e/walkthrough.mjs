@@ -1895,6 +1895,27 @@ try {
           throw new Error('步骤流里始终没有"进行中"的那一条（当前步骤该转圈）：' + JSON.stringify(live))
         await snap('48-步骤流-进行中', 150)
         console.log('步骤流进行中 ✓', JSON.stringify(live.map((r) => `${r.status}|${r.text}`)))
+
+        /**
+         * F17 半 · 轮内状态行：`用时 Xs · N 步 · 标准档`。
+         * 这一轮已经跑了多久、做了几步、按哪一档在跑——以前一个都看不到，
+         * 用户唯一能判断"是不是卡住了"的依据是那三个跳动的点。
+         *
+         * **档位从另一侧取**（会话对象），不在断言里再抄一份常量。
+         */
+        const status = win.locator('[data-testid="turn-status"]')
+        await status.waitFor({ timeout: 30000 })
+        const statusText = (await status.innerText()).trim()
+        if (!/用时\s*\d+s/.test(statusText)) throw new Error(`轮内状态行没有用时：「${statusText}」`)
+        if (!/\d+\s*步/.test(statusText)) throw new Error(`轮内状态行没有步数：「${statusText}」`)
+        const liveTier = await status.getAttribute('data-tier')
+        const wantTier = await win.evaluate(async () => (await window.api.chat.list())[0]?.tier ?? 'standard')
+        if (liveTier !== wantTier)
+          throw new Error(`轮内状态行的档位(${liveTier}) 与会话记的档位(${wantTier}) 对不上`)
+        if (!statusText.includes(wantTier === 'enhanced' ? '增强档' : '标准档'))
+          throw new Error(`轮内状态行没说清档位：「${statusText}」`)
+        await snap('60-轮内状态行', 150)
+        console.log('F17 轮内状态行 ✓', JSON.stringify(statusText))
       }
       // 流式中：等第一段正文出来再截，光标才有东西可跟
       await win.locator('.streaming-body, .thinking-dots').first().waitFor({ timeout: 60000 }).catch(() => {})
@@ -2059,10 +2080,28 @@ try {
             throw new Error(
               `折叠摘要的资料数不对：界面「${sumText}」，按步骤明细应为 ${wantN}\n${JSON.stringify(last)}`
             )
-        } else if (!/未找到相关资料/.test(sumText)) {
+        } else if (!/未找到相关资料|已生成产物/.test(sumText)) {
+          // Q7 起有第三种合法收场：一次检索都没有、但做出了产物（"把 XX 做成 PPT"）。
+          // 两种都断言，不许 try/catch 一裹了事（desktop/CLAUDE.md：真有两种合法状态就两种都断言）
           throw new Error(`零命中那一轮的摘要文案不对：「${sumText}」`)
         }
         if (!/用时\s*\d+(\.\d+)?s/.test(sumText)) throw new Error(`折叠摘要没有用时：「${sumText}」`)
+        /**
+         * Q15 档位实际生效：**界面说的档必须 = 主进程给的档**，而且是从另一侧取
+         * （`data-tier` 由 `agent:stream` 的 assistant 事件带上来，不是界面自己知道的）——
+         * 在断言里再抄一份档位常量的话，这条断言就永远是绿的（CLAUDE.md 三条规矩之一）。
+         */
+        const sumTier = await summary.getAttribute('data-tier')
+        const sumDegraded = await summary.getAttribute('data-degraded')
+        const convTier = await win.evaluate(async () => {
+          const list = await window.api.chat.list()
+          return list[0]?.tier ?? 'standard'
+        })
+        if (sumTier !== convTier) throw new Error(`摘要上的档位(${sumTier}) 与会话记的档位(${convTier}) 对不上`)
+        const wantNote = sumDegraded ? '已按标准档执行' : convTier === 'enhanced' ? '增强档' : '标准档'
+        if (!sumText.includes(wantNote))
+          throw new Error(`折叠摘要没说清这一轮按哪档跑的（应含「${wantNote}」）：「${sumText}」`)
+        console.log('Q15 档位可见 ✓', JSON.stringify({ 档位: sumTier, 降级: !!sumDegraded, 摘要: sumText }))
 
         // ③ 点开看明细
         await summary.click()
@@ -4686,13 +4725,16 @@ try {
   // ---- M-03 syncQueue 真重试：退避阶梯 → 转手动 → Dock「重试」→ 成功后自动清队 ----
   // 需要登录（未登录时 syncConversation 直接返回，本来就不算失败），所以只在 E2E_CHAT 下跑
   if (CHAT) {
-    const readQueue = () => {
+    const readTasksJson = () => {
       try {
-        return JSON.parse(readFileSync(join(userData, 'tasks.json'), 'utf-8')).syncQueue ?? []
+        return JSON.parse(readFileSync(join(userData, 'tasks.json'), 'utf-8'))
       } catch {
-        return []
+        return {}
       }
     }
+    const readQueue = () => readTasksJson().syncQueue ?? []
+    /** F3：笔记上云失败的队列。`pendingSync` 是**两条队列之和**，断言别只看一条 */
+    const readNoteQueue = () => readTasksJson().noteSyncQueue ?? []
     const waitQueue = async (pred, ms = 30000) => {
       const t0 = Date.now()
       let q = readQueue()
@@ -4790,11 +4832,24 @@ try {
     q = await waitQueue((x) => !x.some((i) => i.convId === badConv), 40000)
     if (q.some((i) => i.convId === badConv)) throw new Error('同步成功后队列没清掉这条')
     // pendingSync 是队列长度的投影：这里不能直接断言 0（走查后面还会造别的失败会话），
-    // 断言"跟盘上的队列一致"才是真相源一致性
+    // 断言"跟盘上的队列一致"才是真相源一致性。
+    // **F3 起分母是两条队列之和**（聊天记录 + 笔记上云），只看一条会在有笔记排队时误报
     const pend = await win.evaluate(async () => (await window.api.tasks.list()).cloud.pendingSync)
-    if (pend !== readQueue().length)
-      throw new Error(`cloud.pendingSync(${pend}) 与盘上的队列(${readQueue().length}) 对不上`)
-    console.log('M-03 恢复后自动清队 ✓')
+    const onDisk = readQueue().length + readNoteQueue().length
+    if (pend !== onDisk)
+      throw new Error(
+        `cloud.pendingSync(${pend}) 与盘上的两条队列(${readQueue().length}+${readNoteQueue().length}) 对不上`
+      )
+    /**
+     * F3 / Q2：这一轮走查跑过真实入库（含 `cloudSync`）。上云都成功的话
+     * `noteSyncQueue` 该是空的；有失败的话每一条都得**带得出原因**——
+     * 老实现连队列都没有，文案却说「已进重试队列」，那才是这条断言要防的事。
+     */
+    for (const n of readNoteQueue()) {
+      if (!n.root || !n.rel || !n.lastError)
+        throw new Error('noteSyncQueue 里有说不清来历的条目：' + JSON.stringify(n))
+    }
+    console.log('M-03 恢复后自动清队 ✓', JSON.stringify({ 对话队列: readQueue().length, 笔记队列: readNoteQueue().length }))
   } else {
     console.log('⚠️ 未开 E2E_CHAT，跳过 syncQueue 重试断言（需要登录态才能制造真实同步失败）')
   }
@@ -5174,6 +5229,75 @@ try {
     console.log('H-01 工作台拖入 ✓（应用未被替换 + 文件进队列）', dropName)
   }
 
+  // ==== PLAN-v2 批 2：静默消灭 + 透明度 ====
+
+  // ---- Q8 引用存疑角标：本轮没读过的 [[引用]] 要在气泡下面标出来，**且不掺进正文** ----
+  // 造法用桩数据（`chat.save` 直接写一条带 `unverified` 的消息）：真造它得让模型
+  // 编一个不存在的笔记名出来，靠不住也要花钱。这里验的是"主进程给了结论、界面怎么呈现"
+  {
+    await win.evaluate(() =>
+      window.api.chat.save({
+        id: 'e2e-unverified',
+        title: 'e2e 引用存疑样例',
+        messages: [
+          { role: 'user', text: '灰太太的年框签了吗' },
+          { role: 'assistant', text: '签了，见 [[年框合作]] 与 [[根本不存在的笔记]]。', unverified: ['年框合作', '根本不存在的笔记'] },
+        ],
+        updatedAt: Date.now(),
+      })
+    )
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(1500)
+    await win.click('text=e2e 引用存疑样例')
+    const badge = win.locator('[data-testid="unverified-badge"]')
+    await badge.waitFor({ timeout: 10000 })
+    if ((await badge.getAttribute('data-count')) !== '2')
+      throw new Error('引用存疑角标的条数不对：' + (await badge.getAttribute('data-count')))
+    const badgeText = (await badge.innerText()).trim()
+    if (!/2 处引用存疑/.test(badgeText)) throw new Error(`角标文案不对：「${badgeText}」`)
+    // **正文一个字都不许被改写**：老写法把 `> ⚠️ …` 拼进 text，于是复制走的是掺了提示语的版本，
+    // 重建上下文时那段话还会被喂回给模型
+    const bodyText = await win.locator('[data-testid="workbench-root"]').innerText()
+    if (/并未真正读取/.test(bodyText)) throw new Error('提示语又被拼进正文了（Q8 的整改点就是这个）')
+    await snap('56-引用存疑角标', 250)
+    console.log('Q8 引用存疑角标 ✓', JSON.stringify(badgeText))
+  }
+
+  // ---- Q13 / Q14：诊断导出有 busy 与结论、设置项落盘有反馈 ----
+  {
+    await win.click('text=设置')
+    await win.waitForTimeout(600)
+
+    // Q14：勾一个复选框，必须给「已保存」——原来五处 set* 的返回值全被 void 扔了，
+    // 成功和失败长得一模一样（都是什么都不发生）
+    await win.click('[data-testid="show-cost-toggle"]')
+    const savedToast = win.locator('[data-testid="toast"]', { hasText: '已保存' })
+    await savedToast.waitFor({ timeout: 8000 })
+    if ((await savedToast.first().getAttribute('data-kind')) !== 'ok')
+      throw new Error('保存成功的 toast 语义不是 ok（绿勾那一档）')
+    await snap('57-设置项保存反馈', 200)
+    await win.click('[data-testid="show-cost-toggle"]') // 复位，别影响后面的用量页断言
+    await win.waitForTimeout(400)
+
+    // Q13：导出诊断报告。原来无 try/catch 且**无条件报成功**——
+    // 满盘/无权限时把失败说成"已导出"，而这是客服排查的最后一个抓手
+    const before = readdirSync(homedir() + '/Desktop').filter((f) => /^SamePage诊断_/.test(f))
+    await win.click('[data-testid="diag-export"]')
+    const diagToast = win.locator('[data-testid="toast"]', { hasText: '诊断报告已导出' })
+    await diagToast.waitFor({ timeout: 20000 })
+    const diagText = (await diagToast.first().innerText()).trim()
+    // 报的是文件名而不是"已导出到桌面"：桌面上东西多，得让他知道找哪个
+    if (!/SamePage诊断_/.test(diagText)) throw new Error(`导出 toast 没报文件名：「${diagText}」`)
+    const after = readdirSync(homedir() + '/Desktop').filter((f) => /^SamePage诊断_/.test(f))
+    const fresh = after.filter((f) => !before.includes(f))
+    // **文件必须真的在盘上**：断言 toast 文案等于把"它自己说成功了"当成证据
+    if (!after.length) throw new Error('toast 说导出成功，但桌面上一个诊断报告都没有')
+    for (const f of fresh) rmSync(join(homedir(), 'Desktop', f), { force: true }) // 走查不许在真人桌面留垃圾
+    await snap('57b-诊断报告已导出', 200)
+    console.log('Q13/Q14 ✓', JSON.stringify({ 保存反馈: '已保存', 诊断: diagText }))
+  }
+
   // ---- toast 一家人检查：把整轮采到的几何样本统一比一遍（采集点见 grabToastGeo）----
   assertToastConsistency()
 
@@ -5219,6 +5343,100 @@ try {
 } finally {
   // app.close() 偶尔挂住（SDK 子进程还在重试连接时），别让它把失败原因一起埋掉
   if (!closed) await Promise.race([app.close(), new Promise((r) => setTimeout(r, 20000))])
+}
+
+/**
+ * ==== 独立实例 · F1 白屏保护（PLAN-v2 批 2）====
+ *
+ * 造法只能是开关（`MCNAI_E2E_THROW=1` → `CrashProbe` 在渲染期抛一次）：真造一次渲染层崩溃
+ * 要等一条形状没料到的数据出现在真实客户机上，判据同 §4-22 的 R3 超时开关。
+ * **验的不是"长这样"，是那两个出口真的在**——白屏那一刻用户手里只有这两颗按钮。
+ */
+{
+  const crashUser = '/tmp/mcnai-e2e-crash'
+  rmSync(crashUser, { recursive: true, force: true })
+  seedProvision(crashUser)
+  const aC = await launch({ ...process.env, MCNAI_USER_DATA: crashUser, MCNAI_VAULT: vaultCopy, MCNAI_E2E_THROW: '1' })
+  const wC = await aC.firstWindow()
+  try {
+    await prepWindow(aC, wC)
+    const page = wC.locator('[data-testid="crash-page"]')
+    await page.waitFor({ timeout: 20000 })
+    // ① 不是白屏：说清发生了什么、也说清数据没事
+    const text = await page.innerText()
+    if (!/知识库文件与聊天记录都还在原处/.test(text)) throw new Error(`崩溃页没安抚数据安全：「${text}」`)
+    if (!/e2e 模拟的渲染层崩溃/.test(await wC.locator('[data-testid="crash-reason"]').innerText()))
+      throw new Error('崩溃页没有把错误原文摆出来（管理员排查就没有线索了）')
+    // ② 两个出口都在，且**导出诊断真的落了文件**——只截图不点等于没验
+    const before = readdirSync(homedir() + '/Desktop').filter((f) => /^SamePage诊断_/.test(f))
+    await wC.click('[data-testid="crash-export"]')
+    let fresh = []
+    for (let i = 0; i < 40 && !fresh.length; i++) {
+      await wC.waitForTimeout(500)
+      fresh = readdirSync(homedir() + '/Desktop').filter((f) => /^SamePage诊断_/.test(f) && !before.includes(f))
+    }
+    if (!fresh.length) throw new Error('崩溃页的「导出诊断报告」点了没有产出文件')
+    for (const f of fresh) rmSync(join(homedir(), 'Desktop', f), { force: true })
+    await wC.waitForTimeout(300)
+    await wC.screenshot({ path: join(shots, '58-白屏保护-崩溃页.png') })
+    record('58-白屏保护-崩溃页')
+    // ③ 「重新加载」真的重来一次：开关还在，所以它会再崩一次——**这恰好证明按钮接线是通的**
+    await wC.click('[data-testid="crash-reload"]')
+    await wC.locator('[data-testid="crash-page"]').waitFor({ timeout: 20000 })
+    console.log('F1 白屏保护 ✓（崩溃页出现 + 导出诊断真落盘 + 重载按钮真重来）')
+  } finally {
+    await Promise.race([aC.close(), new Promise((r) => setTimeout(r, 20000))])
+  }
+}
+
+/**
+ * ==== 独立实例 · Q9 更新安装失败（PLAN-v2 批 2）====
+ *
+ * 更新链路在 dev 形态下整条不存在（没有 app-update.yml），三种形态在走查里**一张截图都没有**。
+ * `MCNAI_E2E_UPDATE=fail` 只做一件事：把状态种成「已就绪」，之后走的是与真实
+ * **完全同一条**路——同一颗按钮、同一个 `installUpdateNow`、同一个失败收口。
+ *
+ * 验的是 0.1.2 那次只修了一半的东西：`void install()` 那一半修了，
+ * 而 `quitAndInstall` 在 setImmediate 里抛错的那一半只有一行 log.error，
+ * 界面**永远停在「正在重启…」**。
+ */
+{
+  const upUser = '/tmp/mcnai-e2e-update-fail'
+  rmSync(upUser, { recursive: true, force: true })
+  seedProvision(upUser)
+  const aU = await launch({ ...process.env, MCNAI_USER_DATA: upUser, MCNAI_VAULT: vaultCopy, MCNAI_E2E_UPDATE: 'fail' })
+  const wU = await aU.firstWindow()
+  try {
+    await prepWindow(aU, wU)
+    const skip = wU.locator('text=暂不登录')
+    await skip.waitFor({ timeout: 20000 })
+    await skip.click()
+    const bar = wU.locator('[data-testid="update-bar"]')
+    await bar.waitFor({ timeout: 20000 })
+    if ((await bar.getAttribute('data-phase')) !== 'ready')
+      throw new Error('种了就绪态却不是 ready：' + (await bar.getAttribute('data-phase')))
+    await wU.waitForTimeout(300)
+    await wU.screenshot({ path: join(shots, '59-更新条-已就绪.png') })
+    record('59-更新条-已就绪')
+
+    await wU.click('[data-testid="update-install"]')
+    // 失败必须**主动推上来**：`install()` 已经回过 `{ok:true}` 了，这条路上只有一次说话的机会
+    for (let i = 0; i < 40 && (await bar.getAttribute('data-phase')) !== 'error'; i++) await wU.waitForTimeout(250)
+    if ((await bar.getAttribute('data-phase')) !== 'error')
+      throw new Error('安装抛错之后更新条没有转成失败态（还停在「正在重启…」，Q9 没修好）')
+    const failText = await wU.locator('[data-testid="update-text"]').innerText()
+    if (!/更新失败/.test(failText) || !/安装器启动失败/.test(failText))
+      throw new Error(`失败文案没说清原因：「${failText}」`)
+    // 失败态不该再摆一颗「立即重启」——按了什么都不会发生的按钮比没有更糟
+    if (await wU.locator('[data-testid="update-install"]').count())
+      throw new Error('已经失败了却还留着「立即重启」按钮')
+    await wU.waitForTimeout(300)
+    await wU.screenshot({ path: join(shots, '59b-更新条-安装失败.png') })
+    record('59b-更新条-安装失败')
+    console.log('Q9 更新安装失败 ✓', JSON.stringify(failText.trim()))
+  } finally {
+    await Promise.race([aU.close(), new Promise((r) => setTimeout(r, 20000))])
+  }
 }
 
 // ---- 收尾体检：shots/ 里凡是本次没刷新的 png 一律报警（旧版本残留会污染验收基线） ----
@@ -5269,6 +5487,8 @@ const ONLY_IN_CHAT_RUN = {
   '52-产物步骤-无历史时长.png': '产物步骤（本机还没有历史耗时）',
   '52b-产物步骤-有历史时长.png': '产物步骤（秒数取自本机耗时中位数）',
   '53-步骤流-失败步骤.png': '工具失败的那一步标出来（靠模型肯照做，抓不到会打印跳过原因）',
+  // PLAN-v2 批 2 · F17 半：轮内状态行只在真有一轮在跑的时候才出现
+  '60-轮内状态行.png': '用时 · 步数 · 档位（要真有一轮在生成才看得到）',
   // 45e（老用户升级机：迁移 v2 + 增强线路未配置）两轮都刷得到，不列进来
   // 47b/47c 两轮都刷得到，不列进来
 }

@@ -10,7 +10,8 @@ import { ui } from '../components/ui'
 import { X, Inbox, MoveUpLeft, MoreHorizontal, Loader2, FileWarning, RotateCcw } from 'lucide-react'
 import { pendingNote, inboxPanel } from '../lib/bus'
 import { GRAPH_KIND_TOKEN, GRAPH_LEGEND, token, tokenPx } from '../theme'
-import { EMPTY_MARK, formatFrontmatterValue, formatNoteBody } from '../lib/note-format'
+import { EMPTY_MARK, fmLabel, formatFrontmatterValue, formatNoteBody, splitFrontmatter } from '../lib/note-format'
+import { STAGE_LABEL } from '../config/stages'
 import { errText } from '../lib/err'
 import { enqueueMessage, pathOfDropped } from '../lib/enqueue'
 import { useTask } from '../hooks/useTasks'
@@ -143,22 +144,12 @@ export default function VaultPage() {
   return <Explorer vault={vault} onSwitch={() => setSwitching(true)} />
 }
 
-const STAGE_ZH: Record<string, string> = {
-  init: '检查',
-  enqueue: '入箱',
-  convert: '转换',
-  pii_guard: 'PII守卫',
-  tag_llm: '智能打标',
-  tag_rules: '规则打标',
-  convert_failures: '转换结果',
-  sensitive_enrich: '实体建链',
-  gen_moc: '索引重建',
-  build_cards: '实体建卡',
-  archive: '归档',
-  spawn: '引擎启动',
-  done: '完成',
-  cloud_sync: '上云', // 缺这条时日志里会直接漏出英文 stage id
-}
+/**
+ * 阶段名的用户词现在只有**一份**，在 `config/stages.ts`（U3 #6）。
+ * 这里原来自己抄了一份 `STAGE_ZH`，与 `tasks/types.ts` 的 `INBOX_FLOW` 各写各的——
+ * 同一个阶段在 Dock 和面板里叫同一个名字纯属它们碰巧一致，改一处必漏另一处。
+ */
+const STAGE_ZH = STAGE_LABEL
 
 /**
  * 投递箱状态**不再由本页面持有**——它挂在 App 层的任务状态层里，切页面不会丢（H-07/H-08）。
@@ -634,7 +625,10 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
     if (!(await confirmDiscard())) return
     const ok = await ui.confirm({
       title: '切换到另一个知识库？',
-      message: `当前库：${vault.path}\n\n会回到建库/选库引导，在那里点「返回当前库」可以随时回来。`,
+      // U3 #5：**不摆绝对路径**。`/Users/xxx/Documents/AI/maggie-vault` 里既有用户名
+      // 也有我们的目录结构，对"我要不要切"这个决定一点帮助都没有。只留文件夹名，
+      // 真要看全路径的人有「在访达中显示」
+      message: `当前知识库：${vault.path.split('/').filter(Boolean).pop() ?? vault.path}\n\n会回到建库/选库引导，在那里点「返回当前库」可以随时回来。`,
       okText: '去换库',
     })
     if (ok) onSwitch()
@@ -1482,8 +1476,10 @@ function NoteView({
     }
   }
 
-  // 空值不再整条丢掉，而是显示破折号——字段在不在，用户一眼能看见
-  const fmEntries = Object.entries(note.frontmatter)
+  // 空值不再整条丢掉，而是显示破折号——字段在不在，用户一眼能看见。
+  // U3 #1：键名走中文映射、值里的英文枚举一并映射、内部字段折进「更多字段」
+  const fm = splitFrontmatter(note.frontmatter)
+  const fmEntries = fm.shown
   const emptyBody = note.body.trim().length === 0
   const shownBody = formatNoteBody(note.body)
   const oversize = shownBody.length > RENDER_CAP
@@ -1570,18 +1566,33 @@ function NoteView({
       ) : (
         <div className="flex-1 overflow-auto">
           <div className="mx-auto max-w-3xl px-8 py-6">
-            {fmEntries.length > 0 && (
-              <div className="mb-5 overflow-hidden rounded-xl border border-line">
+            {(fmEntries.length > 0 || fm.more.length > 0) && (
+              <div data-testid="note-frontmatter" className="mb-5 overflow-hidden rounded-xl border border-line">
                 {fmEntries.map(([k, v]) => {
-                  const shown = formatFrontmatterValue(v)
+                  const shown = formatFrontmatterValue(v, k)
                   return (
-                    <div key={k} className="flex border-b border-line text-sm last:border-0">
+                    <div key={k} data-fm-key={k} className="flex border-b border-line text-sm last:border-0">
                       {/* 属性卡片的键列跟 markdown 表头同一个暖灰底，两处观感统一 */}
-                      <div className="w-32 shrink-0 bg-table-head px-3 py-1.5 text-muted">{k}</div>
+                      <div className="w-32 shrink-0 bg-table-head px-3 py-1.5 text-muted">{fmLabel(k)}</div>
                       <div className={`px-3 py-1.5 ${shown === EMPTY_MARK ? 'text-muted-soft' : ''}`}>{shown}</div>
                     </div>
                   )
                 })}
+                {fm.more.length > 0 && (
+                  // 内部字段（`rule_tagged` / `schema_rev` …）与没见过的键：折起来但不丢掉——
+                  // 排查"这篇为什么没被打标"的时候要靠它们
+                  <details data-testid="note-frontmatter-more" className="border-t border-line text-sm">
+                    <summary className="cursor-pointer bg-table-head px-3 py-1.5 text-muted">
+                      更多字段（{fm.more.length}）
+                    </summary>
+                    {fm.more.map(([k, v]) => (
+                      <div key={k} data-fm-key={k} className="flex border-t border-line">
+                        <div className="w-32 shrink-0 px-3 py-1.5 font-mono text-muted-soft">{k}</div>
+                        <div className="px-3 py-1.5">{formatFrontmatterValue(v, k)}</div>
+                      </div>
+                    ))}
+                  </details>
+                )}
               </div>
             )}
             {emptyBody ? (

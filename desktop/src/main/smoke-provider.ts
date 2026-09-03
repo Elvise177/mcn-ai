@@ -296,12 +296,12 @@ async function main(): Promise<void> {
     console.error(
       'SMOKE FAIL: 一条线路的 key 都没给（SMOKE_DEEPSEEK_KEY / SMOKE_ENHANCED_KEY / SMOKE_INFERERA_KEY / SMOKE_CUSTOM_KEY）'
     )
-    app.exit(1)
+    await shutdown(1)
     return
   }
   if (!existsSync(VAULT)) {
     console.error(`SMOKE FAIL: 知识库不存在 ${VAULT}（用 SMOKE_VAULT 指定）`)
-    app.exit(1)
+    await shutdown(1)
     return
   }
 
@@ -322,7 +322,38 @@ async function main(): Promise<void> {
     )
     for (const r of rs) console.log(`    ${r.ok ? '·' : '!'} ${r.name} ${r.ms}ms ${r.note}`)
   }
-  app.exit(bad ? 1 : 0)
+  await shutdown(bad ? 1 : 0)
+}
+
+/**
+ * 收尾（HANDOFF §0-新f 挂账，2026-09-03）：**汇总打完之后进程挂了 11 分钟。**
+ *
+ * 病根与 `before-quit` 那条同源：Electron 43 起，开过库（= 起了 chokidar watcher）的实例
+ * 不显式关 watcher 就退不掉——`main()` 里 `vaultManager.open(VAULT)` 正是它。
+ * SDK 的 CLI 子进程同理：没 abort 的话它的 stdio 管道也会把事件循环吊着。
+ *
+ * 所以退出分三步，一步比一步硬：
+ *  ① 关 watcher + abort 在跑的对话（治本，与 `before-quit` 完全同一套动作）
+ *  ② `app.exit()`
+ *  ③ 5 秒后 `process.exit()` 兜底 —— **冒烟脚本挂住比退错码更糟**：
+ *     CI/人守着的是"跑完没有"，一个不返回的进程会把整条验收线卡住。
+ */
+async function shutdown(code: number): Promise<void> {
+  try {
+    const { vaultManager } = await import('./vault')
+    const { agentManager } = await import('./agent')
+    const aborted = agentManager.abortAll('quit')
+    if (aborted) console.log(`收尾：中止了 ${aborted} 个还在跑的对话`)
+    await vaultManager.close()
+  } catch (e) {
+    console.error('收尾清理出错（不影响退出码）：', e)
+  }
+  // 兜底闸门：`unref` 不能加——就是要让它有机会烧到点
+  setTimeout(() => {
+    console.error('SMOKE: app.exit() 5 秒没退掉，强制终止')
+    process.exit(code)
+  }, 5000)
+  app.exit(code)
 }
 
 app.whenReady().then(main)

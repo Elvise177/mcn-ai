@@ -3,6 +3,9 @@ import { computeInboxProgress, judgeBackfill } from './tasks/types'
 import { describeStep, durationHint, scanTarget } from '../renderer/src/config/steps'
 import { failedCount, producedArtifact, summaryText, tierNote, type SummaryStep } from '../renderer/src/lib/turn-summary'
 import { backoffMs, isTransient, retryNotice, shouldAnnounceRetry } from './lib/backoff'
+import { nextRetryAt, notesForRoot, pickDue } from './lib/retry-ladder'
+import { INBOX_STAGES, STAGE_LABEL } from '../renderer/src/config/stages'
+import { fmLabel, formatFrontmatterValue, splitFrontmatter } from '../renderer/src/lib/note-format'
 
 /**
  * 过程可见性的**纯逻辑冒烟**：参数提取、结果计数、中文文案映射。零网络、零 token。
@@ -129,11 +132,11 @@ check('没指路径时位置就是「库」', scanTarget({ pattern: '灰太太' 
 console.log('\n【5】中文文案：进得去工具名，出不来工具名')
 const zh = (t: string, a: Record<string, string>, c: Parameters<typeof describeStep>[2] = {}): string =>
   describeStep(t, a, c).text
-check('检索（进行中，带真实关键词）', zh('search_knowledge', { query: '年度目标' }) === '正在检索资料库：年度目标')
-check('检索（完成，带命中数）', zh('search_knowledge', { query: '年度目标' }, { done: true, count: 5 }) === '检索了资料库：年度目标（5 条）')
+check('检索（进行中，带真实关键词）', zh('search_knowledge', { query: '年度目标' }) === '正在检索知识库：年度目标')
+check('检索（完成，带命中数）', zh('search_knowledge', { query: '年度目标' }, { done: true, count: 5 }) === '检索了知识库：年度目标（5 条）')
 check(
   '检索（完成，相近结果要标出来）',
-  zh('search_knowledge', { query: '灰太太' }, { done: true, count: 6, approx: true }) === '检索了资料库：灰太太（相近结果 6 条）'
+  zh('search_knowledge', { query: '灰太太' }, { done: true, count: 6, approx: true }) === '检索了知识库：灰太太（相近结果 6 条）'
 )
 check('阅读用书名号', zh('Read', { file: '20_公司管理/灰太太.md' }) === '正在阅读《灰太太》')
 check('核对（进行中）', zh('Grep', { pattern: '年度目标' }) === '正在逐份核对含「年度目标」的笔记')
@@ -250,19 +253,19 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   // ① 打标进行中：上一个**阶段事件**还停在 pii_guard（篇级进度刻意不进 stages），
   //    界面必须已经显示「智能打标 · 第 n/N 篇」，而不是停在「PII守卫」
   const running = computeInboxProgress([stage('convert'), stage('pii_guard')], { done: 3, total: 166 })
-  check('打标中：标签切到智能打标并带篇数', running.label === '智能打标 · 第 4/166 篇', running.label)
+  check('打标中：标签切到打标那一格并带篇数（U3 #6 起用户词是「整理中」）', running.label === '整理中 · 第 4/166 篇', running.label)
   check('打标中：阶段推进到第 3 格', running.done === 3, String(running.done))
 
   // ② 没有篇级进度时按阶段事件走（老行为不变）
   const plain = computeInboxProgress([stage('convert'), stage('pii_guard')], null)
-  check('无篇级进度：显示 PII守卫', plain.label === 'PII守卫', plain.label)
+  check('无篇级进度：显示上一个阶段的用户词', plain.label === '检查中', plain.label)
 
   // ③ 打标已经过去：后面的阶段来了，不许被篇数标签顶回去
   const later = computeInboxProgress(
     [stage('convert'), stage('pii_guard'), stage('tag_llm'), stage('sensitive_enrich')],
     { done: 166, total: 166 }
   )
-  check('打标之后：标签跟着后续阶段走', later.label === '实体建链', later.label)
+  check('打标之后：标签跟着后续阶段走', later.label === '建立关联', later.label)
   check('打标之后：进度不被拉回', later.done === 5, String(later.done))
 
   // ④ 一个文件都没有时不许出现「第 1/0 篇」这种话
@@ -377,6 +380,77 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   check('非瞬态：业务错误', !isTransient({ error: new Error('row violates row-level security policy') }))
   check('首次静默、第二次起才说话', !shouldAnnounceRetry(0) && shouldAnnounceRetry(1) && shouldAnnounceRetry(2))
   check('重试文案是人话且带次数', retryNotice('云端同步', 1, 3) === '云端同步没成功，正在重试（第 2/3 次）', retryNotice('云端同步', 1, 3))
+}
+
+/**
+ * ---- 同步重试阶梯（F3：笔记上云失败真进队列）----
+ *
+ * 「第 4 次转手动」要等 36 分钟才走得到，「换库之后不重传别人家的笔记」要真换一次库，
+ * 两条都是没人会为它跑一遍的分支——所以判据搬进了 `lib/retry-ladder.ts`。
+ */
+{
+  console.log('\n【F3 同步重试阶梯】')
+  const T = 1_000_000
+  check('第 1 次失败 → 1 分钟后', nextRetryAt(1, T) === T + 60_000)
+  check('第 2 次 → 5 分钟', nextRetryAt(2, T) === T + 5 * 60_000)
+  check('第 3 次 → 30 分钟', nextRetryAt(3, T) === T + 30 * 60_000)
+  check('第 4 次 → 0 = 转手动（出口只剩 Dock 上那颗「重试」）', nextRetryAt(4, T) === 0)
+  check('tries 为 0/负数也当转手动，不许算出一个过去的时间', nextRetryAt(0, T) === 0 && nextRetryAt(-1, T) === 0)
+  check(
+    '到点的才取，转手动的（0）永远不进自动重试',
+    JSON.stringify(pickDue([{ nextRetryAt: T - 1 }, { nextRetryAt: T + 1 }, { nextRetryAt: 0 }], T)) ===
+      JSON.stringify([{ nextRetryAt: T - 1 }])
+  )
+  // 换库之后拿新库的根去读旧库的相对路径，读到的要么是别的文件、要么读不到——
+  // 前一种会把**错内容真传上云**，这是这条闸门存在的全部理由
+  const q = [
+    { root: '/vault-a', rel: '80_资料库/年框.md' },
+    { root: '/vault-b', rel: '80_资料库/年框.md' },
+  ]
+  check('只重传属于当前库的那些', JSON.stringify(notesForRoot(q, '/vault-a')) === JSON.stringify([q[0]]))
+  check('没开库时一条都不重传', notesForRoot(q, null).length === 0)
+}
+
+/**
+ * ---- U3 文案层（PLAN-v2 批 2 的前四条）----
+ *
+ * 这一批的验收判据是"界面上不许再出现某些词"，而那种事**只在真人看截图时才发现**——
+ * 附录 B 那 11 条文案缺陷就是这么攒出来的。能用断言守的先守住。
+ */
+{
+  console.log('\n【U3 文案层】阶段名用户词 / frontmatter 中文映射')
+  // #6：阶段名不许再出现技术黑话。判据取"整张表"，加新阶段时也跑得到
+  const JARGON = ['PII', '打标', '实体', 'MOC', '上云', '归档', 'guard', 'moc']
+  for (const [id, label] of Object.entries(STAGE_LABEL)) {
+    const bad = JARGON.find((w) => label.includes(w))
+    check(`阶段「${id}」的用户词不含黑话`, !bad, `${label} 含「${bad}」`)
+    check(`阶段「${id}」有中文用户词`, /[一-龥]/.test(label), label)
+  }
+  // 主流程八个阶段一个都不许漏映射（漏了就会在进度条上直接露出英文 stage id）
+  for (const s of INBOX_STAGES) check(`主流程阶段 ${s} 有映射`, STAGE_LABEL[s] !== undefined)
+
+  // #1：frontmatter 属性卡。真实键集来自走查库（doc_type/entity_kind/entities_*/rule_tagged…）
+  const fm = {
+    doc_type: '数据表',
+    entity_kind: 'partner',
+    entities_talent: ['灰太太', '皮蛋'],
+    rule_tagged: true,
+    sub_category: '年框',
+    schema_rev: 1,
+    某个没见过的键: 'x',
+  }
+  const split = splitFrontmatter(fm)
+  const shownKeys = split.shown.map(([k]) => k)
+  check('内部字段折进「更多字段」', !shownKeys.includes('rule_tagged') && !shownKeys.includes('schema_rev'))
+  check('没见过的键也折起来（不摆一个英文标识符给用户）', !shownKeys.includes('某个没见过的键'))
+  check('认识的键留在第一屏', shownKeys.includes('doc_type') && shownKeys.includes('entities_talent'))
+  check('顺序稳定（不跟着文件里的书写顺序走）', shownKeys.indexOf('doc_type') < shownKeys.indexOf('sub_category'), shownKeys.join(','))
+  check('键名给中文', fmLabel('doc_type') === '类型' && fmLabel('entities_talent') === '涉及达人')
+  check('第一屏的键一个英文标识符都不许有', shownKeys.every((k) => /[一-龥]/.test(fmLabel(k))), shownKeys.map(fmLabel).join(','))
+  check('值里的英文枚举也映射', formatFrontmatterValue('partner', 'entity_kind') === '合作方')
+  check('裸 true/false 渲染成是/否', formatFrontmatterValue(true) === '是' && formatFrontmatterValue(false) === '否')
+  check('数组照旧用斜杠连', formatFrontmatterValue(['灰太太', '皮蛋']) === '灰太太 / 皮蛋')
+  check('空值仍是破折号', formatFrontmatterValue(null) === '—' && formatFrontmatterValue('  ') === '—')
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

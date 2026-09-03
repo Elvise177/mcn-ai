@@ -7,7 +7,7 @@ import { errText } from '../lib/err'
 export function VaultWizard({
   onReady,
   onSkip,
-  skipLabel = '暂时跳过，之后可在「个人知识库」里建',
+  skipLabel = '暂时跳过，之后可在「知识库」里建',
 }: {
   onReady: (v: { path: string; noteCount: number }) => void
   onSkip?: () => void
@@ -73,7 +73,7 @@ export function VaultWizard({
   if (step === 'template') {
     return (
       <div className="fade-up flex flex-col items-center" data-testid="wizard-templates">
-        <h1 className="mb-2 text-3xl font-semibold">你的库放什么内容？</h1>
+        <h1 className="mb-2 text-3xl font-semibold">你的知识库放什么内容？</h1>
         <p className="mb-10 text-md text-muted">决定分类方式与 AI 的理解口径，之后随时能改</p>
         <div className="flex gap-6">
           {TEMPLATES.map((t) => (
@@ -119,7 +119,7 @@ export function VaultWizard({
           onClick={() => setStep('template')}
           className="w-64 rounded-xl border border-line bg-card p-6 text-left transition-colors hover:border-accent hover:bg-accent-soft disabled:opacity-60"
         >
-          {cardBody('create', '新建库', '选一套模板，建一个干净的库——只有投递箱和资料库')}
+          {cardBody('create', '新建知识库', '选一套模板，建一个干净的库——只有投递箱和资料库')}
         </button>
         <button
           data-testid="wizard-existing"
@@ -127,7 +127,7 @@ export function VaultWizard({
           onClick={() => pick(false)}
           className="w-64 rounded-xl border border-line bg-card p-6 text-left transition-colors hover:border-accent hover:bg-accent-soft disabled:opacity-60"
         >
-          {cardBody('existing', '使用已有库', '指向现有 Obsidian vault 或任何 markdown 文件夹')}
+          {cardBody('existing', '使用已有知识库', '指向现有 Obsidian vault 或任何 markdown 文件夹')}
         </button>
       </div>
       {/* 同样是真入口，给下划线链接样式，别混进说明文字里 */}

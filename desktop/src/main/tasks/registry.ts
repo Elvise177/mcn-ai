@@ -1,6 +1,6 @@
 import type { BrowserWindow } from 'electron'
 import type { CloudState, Task, TaskEventPayload, TaskStatus } from './types'
-import { getSyncQueue } from './persist'
+import { pendingSyncTotal } from './persist'
 
 /**
  * 全局任务注册表（设计见 docs/DESIGN-task-state.md §1.5 / §2）。
@@ -43,7 +43,7 @@ class TaskRegistry {
 
   attachWindow(win: BrowserWindow): void {
     this.win = win
-    this.cloud = { ...this.cloud, pendingSync: getSyncQueue().length }
+    this.cloud = { ...this.cloud, pendingSync: pendingSyncTotal() }
   }
 
   private emit(payload: TaskEventPayload): void {

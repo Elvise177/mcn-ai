@@ -44,6 +44,9 @@ const JOBS = [
   { level: 'L3', name: 'a1-enqueue（投递链路）', cmd: ['node', ['e2e/a1-enqueue.mjs']] },
   { level: 'L3', name: '附件（含 B7 文档附件）', cmd: ['node', ['e2e/attachments.mjs']] },
   { level: 'L3', name: '资产协议（库内图片）', cmd: ['node', ['e2e/assets-render.mjs']] },
+  // Q11 之前它是**故意红的**（离线条不会自己下去，只能靠重启）。周期重探落地后它该常绿，
+  // 所以从"专项脚本"提进总控——不进来的话没人会想起跑它，回归了也不会有人知道
+  { level: 'L3', name: '离线恢复（Q11 周期重探）', cmd: ['node', ['e2e/offline-recovery.mjs']] },
   { level: 'L4', name: 'fresh-install（真实调用 ≈¥0.4）', cmd: ['node', ['e2e/fresh-install.mjs']], paid: true },
   { level: 'L4', name: 'upgrade-path（老 userData 接管）', cmd: ['node', ['e2e/upgrade-path.mjs']] },
 ]

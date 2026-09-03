@@ -92,12 +92,75 @@ export function formatNoteBody(md: string): string {
 }
 
 /** frontmatter 属性值的展示：空值统一给破折号 */
-export function formatFrontmatterValue(v: unknown): string {
+export function formatFrontmatterValue(v: unknown, key?: string): string {
   if (v == null) return EMPTY_MARK
+  // 裸 `true`/`false` 是给机器看的（附录 B #1）：用户读到的应该是「是 / 否」
+  if (typeof v === 'boolean') return v ? '是' : '否'
   if (Array.isArray(v)) {
     const items = v.map((x) => String(x).trim()).filter(Boolean)
     return items.length ? items.join(' / ') : EMPTY_MARK
   }
   const s = String(v).trim()
-  return s || EMPTY_MARK
+  if (!s) return EMPTY_MARK
+  // 值本身也可能是英文枚举（`entity_kind: partner`）
+  return (key && FM_VALUE[key]?.[s]) ?? s
 }
+
+// ---- U3 #1：frontmatter 属性卡的中文映射 ----
+//
+// 病症（PRODUCT-AUDIT 附录 B #1，严重度最高的一条）：属性卡直接显示英文技术键
+// `doc_type / entity_kind / entities_talent / rule_tagged / sub_category` 与裸 `true`，
+// **几乎每篇笔记可见**。用户打开自己的笔记，第一眼看到的是我们的内部字段名。
+//
+// 三条处理：键名映射成中文、值里的英文枚举一并映射、只有系统才关心的字段折进「更多字段」。
+
+/** 键名 → 用户词。映射不到的一律进「更多字段」，宁可折起来也不摆一个英文标识符 */
+export const FM_LABEL: Record<string, string> = {
+  doc_type: '类型',
+  category: '分类',
+  sub_category: '子分类',
+  summary: '摘要',
+  tags: '标签',
+  entity_name: '名称',
+  entity_kind: '身份',
+  entities_talent: '涉及达人',
+  entities_product: '涉及产品',
+  entities_partner: '涉及合作方',
+  sensitive: '敏感资料',
+  source: '来源',
+  created: '创建时间',
+  updated: '更新时间',
+  title: '标题',
+  aliases: '别名',
+}
+
+/** 值也是英文枚举的那几个字段 */
+const FM_VALUE: Record<string, Record<string, string>> = {
+  entity_kind: { talent: '达人', product: '产品', partner: '合作方' },
+}
+
+/**
+ * 只有系统内部才关心的字段。**不是"没用"，是"不该占着第一屏"**——
+ * 用户需要它们的时候（排查为什么这篇没被打上标签）展开「更多字段」就看得到。
+ */
+const FM_INTERNAL = new Set(['rule_tagged', 'ai_tagged', 'schema_rev', 'auto_hash', 'doc_id', 'id', 'rev'])
+
+/**
+ * 属性卡分两段：认识的键按 `FM_LABEL` 的顺序摆在上面，其余（内部字段 + 没见过的键）
+ * 折进「更多字段」。
+ *
+ * **顺序必须是稳定的**：`Object.entries` 给的是文件里的书写顺序，同一类笔记
+ * 由不同阶段写出来就会长得不一样（附录 B #13 chips 锁序同一个病）。
+ */
+export function splitFrontmatter(
+  fm: Record<string, unknown>
+): { shown: Array<[string, unknown]>; more: Array<[string, unknown]> } {
+  const order = Object.keys(FM_LABEL)
+  const entries = Object.entries(fm)
+  const known = entries.filter(([k]) => k in FM_LABEL && !FM_INTERNAL.has(k))
+  known.sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]))
+  return { shown: known, more: entries.filter(([k]) => !(k in FM_LABEL) || FM_INTERNAL.has(k)) }
+}
+
+/** 键名的展示写法：认识的给中文，不认识的原样（它只会出现在「更多字段」里） */
+export const fmLabel = (k: string): string => FM_LABEL[k] ?? k

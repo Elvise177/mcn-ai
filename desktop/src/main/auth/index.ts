@@ -4,7 +4,7 @@ import WebSocket from 'ws'
 import { BrowserWindow } from 'electron'
 import Store from 'electron-store'
 import { tasks } from '../tasks/registry'
-import { clearSyncQueue, getSyncQueue } from '../tasks/persist'
+import { clearSyncQueue, pendingSyncTotal } from '../tasks/persist'
 import { SecretVault, type SecretBackend } from '../secrets'
 import { log } from '../lib/logger'
 import type { TierProvision } from '../ai/tiers'
@@ -312,7 +312,7 @@ export async function probeCloud(): Promise<void> {
   if (reachable) stopReprobe()
   else scheduleReprobe()
   const s = await getSession().catch(() => null)
-  tasks.setCloud({ loggedIn: !!s, email: s?.user.email ?? undefined, pendingSync: getSyncQueue().length })
+  tasks.setCloud({ loggedIn: !!s, email: s?.user.email ?? undefined, pendingSync: pendingSyncTotal() })
 }
 
 /** 任何一次真实请求成功都顺带证明云端可达，不必额外发探测请求 */

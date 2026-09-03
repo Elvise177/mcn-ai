@@ -4,7 +4,7 @@ import { join } from 'path'
 import { store } from '../store'
 import { getAccessToken, getSupabase, getSession, markCloudReachable, markCloudUnreachable } from '../auth'
 import { tasks } from '../tasks/registry'
-import { dropSyncFailure, getSyncQueue, pushSyncFailure } from '../tasks/persist'
+import { dropSyncFailure, pendingSyncTotal, pushSyncFailure } from '../tasks/persist'
 import { backoffMs, isTransient, retryNotice, shouldAnnounceRetry } from '../lib/backoff'
 import { vaultManager } from '../vault'
 
@@ -78,7 +78,13 @@ const clearRetryNotice = (): void => {
   if (tasks.getCloud().retrying) tasks.setCloud({ retrying: undefined })
 }
 
-/** 单篇笔记上云（私人层）：内容哈希去重，未变更服务端直接跳过 */
+/**
+ * 单篇笔记上云（私人层）：内容哈希去重，未变更服务端直接跳过。
+ *
+ * **它不抛**（F3 改）：以前网络层失败会从 `authedFetch` 一路抛到 `cloudSync` 的外层 catch，
+ * 于是**一篇失败就把整轮上云掐断**，后面几十篇连试都没试过就被记成"这一轮上云出错"。
+ * 现在每一篇的失败各自归各自，由调用方决定进不进重试队列。
+ */
 export async function ingestNote(relPath: string): Promise<{ ok: boolean; skipped?: boolean; error?: string }> {
   const root = vaultManager.currentRoot
   if (!root) return { ok: false, error: 'vault 未打开' }
@@ -91,16 +97,20 @@ export async function ingestNote(relPath: string): Promise<{ ok: boolean; skippe
   if (content.trim().length < 20) return { ok: true, skipped: true }
 
   const contentHash = createHash('sha256').update(content).digest('hex')
-  const res = await authedFetch('/api/v1/knowledge/personal/ingest', {
-    content,
-    filePath: relPath,
-    contentHash,
-    sourceType: 'my_script',
-  })
-  if (!res) return { ok: false, error: '未登录' }
-  if (!res.ok) return { ok: false, error: `${res.status} ${await res.text().catch(() => '')}` }
-  const data = (await res.json()) as { skipped?: boolean }
-  return { ok: true, skipped: data.skipped }
+  try {
+    const res = await authedFetch('/api/v1/knowledge/personal/ingest', {
+      content,
+      filePath: relPath,
+      contentHash,
+      sourceType: 'my_script',
+    })
+    if (!res) return { ok: false, error: '未登录' }
+    if (!res.ok) return { ok: false, error: `${res.status} ${await res.text().catch(() => '')}` }
+    const data = (await res.json()) as { skipped?: boolean }
+    return { ok: true, skipped: data.skipped }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
 }
 
 /** 三层云端检索；未登录/失败返回 null（调用方回退本地检索） */
@@ -116,7 +126,7 @@ export async function searchCloud(query: string, matchCount = 6): Promise<CloudM
 }
 
 const syncPending = (): void => {
-  tasks.setCloud({ pendingSync: getSyncQueue().length })
+  tasks.setCloud({ pendingSync: pendingSyncTotal() })
 }
 
 /**

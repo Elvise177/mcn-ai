@@ -131,7 +131,8 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
               setRetrying(true)
               try {
                 const r = await window.api.tasks.retrySync()
-                ui.toast(r.pending === 0 ? '待同步的聊天记录已全部补上' : `还有 ${r.pending} 条没同步上去，稍后会自动再试`)
+                // 队列里现在有两种东西（聊天记录 + 上云失败的笔记，F3），文案别只说其中一种
+                ui.toast(r.pending === 0 ? '待同步的内容已全部补上' : `还有 ${r.pending} 条没同步上去，稍后会自动再试`)
               } finally {
                 setRetrying(false)
               }

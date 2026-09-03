@@ -162,12 +162,12 @@ export const STEP_MAP: Record<string, Phraser> = {
   search_knowledge: (a, c) => {
     const q = a.query?.trim()
     const kw = q ? `：${q}` : ''
-    if (!c.done) return { kind: 'search', text: `正在检索资料库${kw}` }
+    if (!c.done) return { kind: 'search', text: `正在检索知识库${kw}` }
     // 条数与"返回给模型的内容"严格一致，但**相近结果必须标出来**：
     // 云端语义检索没有相关度闸门，恒定返回 top-6（§3-13）。不标的话界面说"检索到 6 份"、
     // 正文说"没找到"，用户只会觉得有一边在撒谎——而两边都没撒谎
     const n = c.count === undefined ? '' : c.approx ? `（相近结果 ${c.count} 条）` : `（${c.count} 条）`
-    return { kind: 'search', text: `检索了资料库${kw}${n}` }
+    return { kind: 'search', text: `检索了知识库${kw}${n}` }
   },
 
   Read: (a, c) => {

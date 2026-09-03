@@ -291,7 +291,7 @@ export default function Workbench({
             </h1>
             {/* 空库时不说「问你的库」——库里什么都没有，那是句假承诺（R-3） */}
             <p className="mb-8 text-md text-muted" data-testid="home-subtitle">
-              {vaultEmpty ? '把资料拖进来，或直接问我' : '问你的库，或直接说要做什么'}
+              {vaultEmpty ? '把资料拖进来，或直接问我' : '问你的知识库，或直接说要做什么'}
             </p>
             <InputBox
               value={input}
@@ -323,7 +323,7 @@ export default function Workbench({
                 className="mt-6 flex items-center gap-2 text-base text-muted"
               >
                 <Inbox size={16} className="text-accent" />
-                <span>知识库还是空的——把文件拖进这个窗口就会自动入库，也可以在左侧「个人知识库」里用投递箱导入</span>
+                <span>知识库还是空的——把文件拖进这个窗口就会自动入库，也可以在左侧「知识库」里用投递箱导入</span>
               </div>
             )}
             <RecentDock convs={recentConvs} onOpenConv={onOpenConv} />
@@ -699,7 +699,7 @@ function InputBox({
             }
           }}
           rows={1}
-          placeholder={placeholder ?? '问你的库，或说"把XX做成PPT"…'}
+          placeholder={placeholder ?? '问你的知识库，或说"把XX做成PPT"…'}
           className="max-h-32 flex-1 resize-none self-center overflow-y-auto bg-transparent py-1 text-md leading-6 outline-none"
         />
         {streaming ? (
@@ -851,7 +851,9 @@ function ArtifactPanel({ homeEmpty, onOpenNote }: { homeEmpty: boolean; onOpenNo
     <div className="slide-in-right flex w-artifact-panel shrink-0 flex-col border-l border-line">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <div className="text-md font-medium">
-          产物 <span className="text-xs font-normal text-muted">90_产物/</span>
+          {/* U3 #5：标题里不摆内部目录名。「90_产物/」是我们的落位约定，
+              对用户只是一串看不懂的前缀；真要知道它在哪儿的人点「在 Finder 中显示」 */}
+          产物
         </div>
         <button onClick={() => setVisible(false)} title="关闭产物面板" className="rounded p-1 text-muted hover:text-accent">
           <X size={14} />

@@ -34,7 +34,7 @@ const useAppVersion = (): string => {
 }
 
 const NAV: [Page, string, typeof Library][] = [
-  ['vault', '个人知识库', Library],
+  ['vault', '知识库', Library],
   ['settings', '设置', SettingsIcon],
 ]
 
@@ -606,7 +606,8 @@ function IngestSection() {
         AI 生成的产物自动入库（送入投递箱转为可检索知识）
       </label>
       <div className="text-sm leading-5 text-muted">
-        关闭时产物仅保存在 90_产物/，可在产物面板对单个文件点「入库」；开启后每个新产物自动转为知识库笔记并参与 AI 检索。
+        {/* U3 #5：不摆内部目录名（`90_产物/` 是落位约定，不是用户要记的东西） */}
+        关闭时产物只留在产物目录里，可在产物面板对单个文件点「入库」；开启后每个新产物自动转为知识库笔记并参与 AI 检索。
       </div>
     </div>
   )
