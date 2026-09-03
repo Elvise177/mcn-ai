@@ -1,6 +1,8 @@
 import { countToolResults, isStepWorthy, pickStepArgs, shortToolName, toolResultText } from './agent/steps'
 import { computeInboxProgress, judgeBackfill } from './tasks/types'
 import { describeStep, durationHint, scanTarget } from '../renderer/src/config/steps'
+import { failedCount, producedArtifact, summaryText, tierNote, type SummaryStep } from '../renderer/src/lib/turn-summary'
+import { backoffMs, isTransient, retryNotice, shouldAnnounceRetry } from './lib/backoff'
 
 /**
  * 过程可见性的**纯逻辑冒烟**：参数提取、结果计数、中文文案映射。零网络、零 token。
@@ -297,6 +299,84 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   const both = judgeBackfill({ vaultRoot: null, running: true, hasKey: false, staleCount: 0 })
   check('多个前提都不满足时报最根本的', both.ok === false && both.reason === 'no-vault',
     both.ok ? '' : both.reason)
+}
+
+/**
+ * ---- 折叠摘要：Q7 第三分支 · N9 失败数 · Q15 档位（PLAN-v2 批 2）----
+ *
+ * 三条都是**只在真实调用下才走到**的判据：产物轮要真做一个 PPT、失败步要真挂一次工具、
+ * 服务端换模型（degraded）更是想造都造不出来。抽成纯函数之后在这里几毫秒验完（铁律）。
+ */
+{
+  console.log('\n【折叠摘要】Q7 产物轮 / N9 失败数 / Q15 档位')
+  let seq = 0
+  const step = (tool: string, p: Partial<SummaryStep> = {}): SummaryStep => ({
+    id: `s${++seq}`,
+    tool,
+    args: {},
+    status: 'done',
+    ...p,
+  })
+  const search = (count: number): SummaryStep => step('search_knowledge', { count, unit: 'file' })
+
+  // Q7：纯产物轮以前说的是「核对完成，未找到相关资料」——正文里 PPT 明明已经出来了
+  const artifactOnly = [step('render_pptx')]
+  check('Q7 纯产物轮不再自打脸', summaryText(artifactOnly, 4200) === '已生成产物 · 用时 4.2s', summaryText(artifactOnly, 4200))
+  check('Q7 判据只认成功的产物步', !producedArtifact([step('render_pptx', { status: 'failed' })]))
+  check('Q7 检索 + 产物两截都说', summaryText([search(3), step('render_document')], 1000).startsWith('检索了 3 份资料 · 已生成产物'))
+  check('Q7 什么都没有仍是老那句', summaryText([search(0)], 1000) === '核对完成，未找到相关资料 · 用时 1.0s', summaryText([search(0)], 1000))
+
+  // N9：折叠之后失败的那几步就藏起来了，摘要必须报出来
+  check('N9 失败数进摘要', summaryText([search(5), step('Grep', { status: 'failed' })], 2000) === '检索了 5 份资料 · 1 步没成功 · 用时 2.0s',
+    summaryText([search(5), step('Grep', { status: 'failed' })], 2000))
+  check('N9 被护栏拦下的不算失败', failedCount([step('Grep', { status: 'failed', capped: true })]) === 0)
+  check('N9 全成功时不出现「0 步没成功」', !summaryText([search(2)], 1000).includes('没成功'))
+  check('N9 单步失败文案由 config/steps 统一给', zh('Grep', { pattern: '达人' }, { done: true, failed: true }).endsWith('（没成功）'),
+    zh('Grep', { pattern: '达人' }, { done: true, failed: true }))
+  check('N9 成功的步骤不带失败后缀', !zh('Grep', { pattern: '达人' }, { done: true, count: 1, unit: 'file' }).includes('没成功'))
+
+  // Q15：档位与降级。degraded 只有真实调用才可能为真——这正是它必须在这里被验的理由
+  check('Q15 标准档', tierNote('standard') === '标准档')
+  check('Q15 增强档', tierNote('enhanced') === '增强档')
+  check('Q15 降级时说的是「实际按什么跑的」', tierNote('enhanced', true) === '已按标准档执行', tierNote('enhanced', true))
+  check('Q15 不知道档位就什么都不说', tierNote(undefined) === '')
+  check(
+    'Q15 档位挂在摘要末尾',
+    summaryText([search(2)], 3000, { tier: 'enhanced' }) === '检索了 2 份资料 · 用时 3.0s · 增强档',
+    summaryText([search(2)], 3000, { tier: 'enhanced' })
+  )
+  check(
+    'Q15 降级 + 失败数同时出现时次序稳定',
+    summaryText([search(2), step('Grep', { status: 'failed' })], 3000, { tier: 'enhanced', degraded: true }) ===
+      '检索了 2 份资料 · 1 步没成功 · 用时 3.0s · 已按标准档执行',
+    summaryText([search(2), step('Grep', { status: 'failed' })], 3000, { tier: 'enhanced', degraded: true })
+  )
+}
+
+/**
+ * ---- 退避重试（N4）----
+ *
+ * 429 / 503 / 网络抖动在走查里造不出来，抽成纯函数才有人测（铁律）。
+ */
+{
+  console.log('\n【N4 退避重试】')
+  const half = () => 0.5 // 抖动固定成中值：要测的是公式，不是掷骰子
+  check('第 0 次 = 200ms', backoffMs(0, { rnd: half }) === 200, String(backoffMs(0, { rnd: half })))
+  check('指数增长 200/400/800', [0, 1, 2].map((n) => backoffMs(n, { rnd: half })).join('/') === '200/400/800')
+  check('封顶 30s', backoffMs(30, { rnd: half }) === 30_000, String(backoffMs(30, { rnd: half })))
+  check('抖动落在 0.9–1.1 之间', backoffMs(3, { rnd: () => 0 }) === 1440 && backoffMs(3, { rnd: () => 0.999 }) === 1760,
+    `${backoffMs(3, { rnd: () => 0 })}/${backoffMs(3, { rnd: () => 0.999 })}`)
+  check('Retry-After（秒）优先于公式', backoffMs(0, { retryAfter: '5', rnd: half }) === 5000)
+  check('Retry-After（HTTP-date）', backoffMs(0, { retryAfter: new Date(1_000_000 + 30_000).toUTCString(), now: 1_000_000 }) === 30_000)
+  check('Retry-After 荒唐值封顶 60s', backoffMs(0, { retryAfter: '99999', rnd: half }) === 60_000)
+  check('Retry-After 已过期 → 回落公式', backoffMs(1, { retryAfter: new Date(0).toUTCString(), now: 1_000_000, rnd: half }) === 400)
+  check('Retry-After 认不出来 → 回落公式', backoffMs(1, { retryAfter: '稍后再试', rnd: half }) === 400)
+  check('瞬态：429 / 500 / 503 / 408', [408, 429, 500, 503].every((s) => isTransient({ status: s })))
+  check('非瞬态：401 / 403 / 404 / 422（重试只是把同一句拒绝听三遍）', ![401, 403, 404, 422].some((s) => isTransient({ status: s })))
+  check('瞬态：网络层错误', isTransient({ error: new Error('fetch failed') }) && isTransient({ error: new Error('ECONNRESET') }))
+  check('非瞬态：业务错误', !isTransient({ error: new Error('row violates row-level security policy') }))
+  check('首次静默、第二次起才说话', !shouldAnnounceRetry(0) && shouldAnnounceRetry(1) && shouldAnnounceRetry(2))
+  check('重试文案是人话且带次数', retryNotice('云端同步', 1, 3) === '云端同步没成功，正在重试（第 2/3 次）', retryNotice('云端同步', 1, 3))
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

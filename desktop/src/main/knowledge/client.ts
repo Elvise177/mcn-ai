@@ -5,6 +5,7 @@ import { store } from '../store'
 import { getAccessToken, getSupabase, getSession, markCloudReachable, markCloudUnreachable } from '../auth'
 import { tasks } from '../tasks/registry'
 import { dropSyncFailure, getSyncQueue, pushSyncFailure } from '../tasks/persist'
+import { backoffMs, isTransient, retryNotice, shouldAnnounceRetry } from '../lib/backoff'
 import { vaultManager } from '../vault'
 
 export interface CloudMatch {
@@ -19,21 +20,62 @@ function apiBase(): string {
   return store.get('apiBaseUrl')
 }
 
+/**
+ * 瞬态失败最多重试这么多次（N4）。三次之外不再自作主张——
+ * 上云失败已经有 `noteSyncQueue` 兜着，聊天记录失败有 syncQueue 兜着，
+ * 这里的重试只负责"抹平一次抖动"，不负责"替用户扛住一次停机"。
+ */
+const MAX_RETRIES = 3
+
+/**
+ * 带退避重试的云端请求（N4）。
+ *
+ * 重试**只针对瞬态失败**（连不上 / 429 / 5xx）：401、403、422 这些是服务端明确拒了这条数据，
+ * 重试三次只是把同一句拒绝听三遍，还把真正的原因往后拖了两秒。
+ *
+ * 重试过程走 `tasks.setCloud({ retrying })` 落到 TaskDock 那一条上——
+ * **不弹 toast、不进对话历史**（Codex §9 的取向：瞬态噪音归状态区，不归历史）。
+ */
 async function authedFetch(path: string, body: unknown): Promise<Response | null> {
   const token = await getAccessToken()
   if (!token) return null
-  try {
-    const res = await fetch(`${apiBase()}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-    })
-    markCloudReachable() // 拿到任何响应都说明够得着云端，不必额外发探测
-    return res
-  } catch (e) {
-    markCloudUnreachable(e)
-    throw e
+  const url = `${apiBase()}${path}`
+  let lastErr: unknown = null
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      })
+      markCloudReachable() // 拿到任何响应都说明够得着云端，不必额外发探测
+      if (res.ok || attempt === MAX_RETRIES || !isTransient({ status: res.status })) {
+        clearRetryNotice()
+        return res
+      }
+      await waitBeforeRetry(attempt, res.headers.get('retry-after'))
+      continue
+    } catch (e) {
+      lastErr = e
+      markCloudUnreachable(e)
+      if (attempt === MAX_RETRIES || !isTransient({ error: e })) break
+      await waitBeforeRetry(attempt, null)
+    }
   }
+  clearRetryNotice()
+  throw lastErr
+}
+
+/** 退避 + 把「正在重试」摆到 TaskDock 上（首次静默） */
+async function waitBeforeRetry(attempt: number, retryAfter: string | null): Promise<void> {
+  if (shouldAnnounceRetry(attempt)) {
+    tasks.setCloud({ retrying: retryNotice('云端同步', attempt, MAX_RETRIES) })
+  }
+  await new Promise((r) => setTimeout(r, backoffMs(attempt, { retryAfter })))
+}
+
+const clearRetryNotice = (): void => {
+  if (tasks.getCloud().retrying) tasks.setCloud({ retrying: undefined })
 }
 
 /** 单篇笔记上云（私人层）：内容哈希去重，未变更服务端直接跳过 */

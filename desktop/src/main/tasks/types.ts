@@ -104,6 +104,12 @@ export interface CloudState {
   checkedAt: number
   /** 待重试的同步条数，>0 时 Dock 显示「N 条待同步」 */
   pendingSync: number
+  /**
+   * N4：正在做的瞬态重试，一句话。**首次静默**（第一次重试 200ms 就过去了，
+   * 报出来只是让界面闪一下），从第二次起才有值；成功或放弃即清空。
+   * 它落在 TaskDock 那条上，**绝不进对话历史**——那是"这一次的运行状况"，不是 AI 说的话。
+   */
+  retrying?: string
 }
 
 export type TaskEventPayload =

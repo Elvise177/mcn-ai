@@ -30,6 +30,14 @@ export interface StepCtx {
   /** 已经拿到结果了（进行中 / 已完成两套文案） */
   done?: boolean
   /**
+   * 这一步自己报错了（N9 的「失败数」在单步这一级的形态）。
+   *
+   * 以前这句话是**组件里拼的**（StepStream 里一段 `（这一步没成功）`），
+   * 于是"文案唯一真相源在 config/steps.ts"这条约定有一个例外——而且是最该说清楚的那一句。
+   * 收回来之后，走查扫"步骤文案里不许有工具原名"这类断言才真的覆盖得到它。
+   */
+  failed?: boolean
+  /**
    * 产物类任务的历史耗时中位数（毫秒），来自 usage jsonl 的 `byType.medianMs`。
    * **禁止写死时长**：机器快慢、模型、资料量都不一样，写死的数字第一天就是错的。
    */
@@ -228,9 +236,17 @@ function artifactPhrase(tool: string, a: Record<string, string>, c: StepCtx): St
   return { kind: 'artifact', text: `正在生成${sep}${what}（${durationHint(c.medianMs)}）` }
 }
 
-/** 查表出文案。工具名进得来、出不去——返回值里只有中文业务语言 */
+/**
+ * 查表出文案。工具名进得来、出不去——返回值里只有中文业务语言。
+ *
+ * N9 的句法：**动词 + 数量 + 失败数**。前两截由各自的 phraser 给，
+ * 最后一截在这里统一补——「没成功」四个字不该有三种写法。
+ */
 export function describeStep(tool: string, args: Record<string, string>, ctx: StepCtx): StepPhrase {
   // 护栏拦下的那一步：它没去找、也没出错，说成「核对了…」或「没成功」都是假话
   if (ctx.capped) return { kind: 'other', text: '已达本轮文件查找上限，改用已有材料作答' }
-  return (STEP_MAP[tool] ?? FALLBACK)(args ?? {}, ctx)
+  const p = (STEP_MAP[tool] ?? FALLBACK)(args ?? {}, ctx)
+  // 失败态复用"进行中"的动词会说成「正在检索…（没成功）」，读起来自相矛盾；
+  // phraser 拿到的 done 由调用方保证（失败也算"这一步结束了"）
+  return ctx.failed ? { ...p, text: `${p.text}（没成功）` } : p
 }

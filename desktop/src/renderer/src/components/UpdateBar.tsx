@@ -47,7 +47,8 @@ export function UpdateBar() {
   if (!failed && !downloading && !st.ready) return null
 
   const tone = failed
-    ? 'border-danger-line bg-danger-soft text-danger'
+    // `border-danger-line` 这个 token 不存在，Tailwind 静默不生成 → 失败态一直没有描边色（2026-09-03 修 Q9 时发现）
+    ? 'border-danger bg-danger-soft text-danger'
     : 'border-accent-line bg-accent-soft text-accent'
 
   return (

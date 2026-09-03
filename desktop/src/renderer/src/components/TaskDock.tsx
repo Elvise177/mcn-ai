@@ -57,8 +57,13 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
   // sync 也排除：它的失败已经由 pendingSync 表达成「N 条待同步」，两条都挂等于说两遍
   const failed = all.filter((t) => t.status === 'failed' && t.kind !== 'sync')
   const pendingSync = cloud.pendingSync
+  /**
+   * N4：瞬态重试**只在这里说**，不弹 toast、更不进对话历史。
+   * 首次静默由主进程决定（`shouldAnnounceRetry`），到这儿有值就是"已经不止一次了"。
+   */
+  const retryNote = cloud.retrying
 
-  const show = active.length > 0 || failed.length > 0 || pendingSync > 0
+  const show = active.length > 0 || failed.length > 0 || pendingSync > 0 || !!retryNote
   // 收起时把展开态一并复位，否则下次出现会直接是展开的
   useEffect(() => {
     if (!show) setExpanded(false)
@@ -79,12 +84,14 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
     only?.title ??
     (active.length > 1
       ? `${active.length} 项进行中`
-      : failed.length > 0
-        ? failed[0].title
-        : `${pendingSync} 条待同步`)
+      : retryNote
+        ? retryNote
+        : failed.length > 0
+          ? failed[0].title
+          : `${pendingSync} 条待同步`)
 
   return (
-    <div data-testid="task-dock" className={`task-dock ${show ? 'task-dock-open' : ''}`}>
+    <div data-testid="task-dock" data-retrying={retryNote ?? ''} className={`task-dock ${show ? 'task-dock-open' : ''}`}>
       <div ref={boxRef} className="relative px-3 pb-2">
         <button
           data-testid="task-dock-btn"
@@ -97,7 +104,7 @@ export function TaskDock({ onOpen }: { onOpen: (page: 'workbench' | 'vault' | 's
           className="w-full rounded-md border border-line bg-card px-3 py-2 text-left hover:bg-hover"
         >
           <div className="flex items-center gap-2 text-xs">
-            {active.length > 0 ? (
+            {active.length > 0 || retryNote ? (
               <Loader2 size={12} className="shrink-0 animate-spin text-accent" />
             ) : failed.length > 0 ? (
               <AlertCircle size={12} className="shrink-0 text-danger" />

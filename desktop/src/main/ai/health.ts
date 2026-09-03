@@ -1,4 +1,5 @@
 import { describeTier, resolveTierForRequest, normalizeTier, type TierId } from './tiers'
+import { backoffMs, isTransient } from '../lib/backoff'
 import { log } from '../lib/logger'
 
 /**
@@ -50,7 +51,30 @@ function e2eOverride(): 'up' | 'down' | null {
   return v === 'up' || v === 'down' ? v : null
 }
 
+/**
+ * 瞬态失败重试次数（N4）。**这里比别处更该有**：探测失败的后果是选择器里那一档
+ * 直接置灰，一次网络抖动就把用户挡在增强档外面，而他其实什么问题都没有。
+ * 密钥无效（401/403）这类明确结论不重试——重试三次只是把同一句拒绝听三遍。
+ */
+const PROBE_RETRIES = 2
+
 async function probe(tier: TierId): Promise<TierHealth> {
+  for (let attempt = 0; ; attempt++) {
+    const r = await probeOnce(tier)
+    if (r.ok || attempt >= PROBE_RETRIES || !r.transient) return stripTransient(r)
+    log('info', 'ai-health', `${tier} 探测失败（${r.reason}），第 ${attempt + 1}/${PROBE_RETRIES} 次重试`)
+    await new Promise((s) => setTimeout(s, backoffMs(attempt, { retryAfter: r.retryAfter })))
+  }
+}
+
+/** `transient`/`retryAfter` 只在重试循环内部用，不外泄到 IPC 契约上 */
+type ProbeResult = TierHealth & { transient?: boolean; retryAfter?: string | null }
+const stripTransient = (r: ProbeResult): TierHealth => {
+  const { transient: _t, retryAfter: _r, ...rest } = r
+  return rest
+}
+
+async function probeOnce(tier: TierId): Promise<ProbeResult> {
   const now = Date.now()
   const forced = e2eOverride()
   if (forced) {
@@ -92,12 +116,28 @@ async function probe(tier: TierId): Promise<TierHealth> {
           ? '线路繁忙，请稍后再试'
           : `线路返回 ${res.status}`
     log('warn', 'ai-health', `${tier} 探测失败：${reason}（${baseUrl}）`)
-    return { tier, ok: false, reason, checkedAt: Date.now(), cached: false }
+    return {
+      tier,
+      ok: false,
+      reason,
+      checkedAt: Date.now(),
+      cached: false,
+      transient: isTransient({ status: res.status }),
+      retryAfter: res.headers.get('retry-after'),
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     const reason = ctl.signal.aborted ? '线路响应超时' : '连不上这条线路'
     log('warn', 'ai-health', `${tier} 探测失败：${reason}（${baseUrl}：${msg}）`)
-    return { tier, ok: false, reason, checkedAt: Date.now(), cached: false }
+    // **超时不重试**：8 秒都没回话不叫抖动，再等两轮只是让选择器多转 16 秒
+    return {
+      tier,
+      ok: false,
+      reason,
+      checkedAt: Date.now(),
+      cached: false,
+      transient: !ctl.signal.aborted && isTransient({ error: e }),
+    }
   } finally {
     clearTimeout(timer)
   }

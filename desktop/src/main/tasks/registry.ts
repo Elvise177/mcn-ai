@@ -159,6 +159,7 @@ class TaskRegistry {
       next.loggedIn === this.cloud.loggedIn &&
       next.email === this.cloud.email &&
       next.lastError === this.cloud.lastError &&
+      next.retrying === this.cloud.retrying &&
       next.pendingSync === this.cloud.pendingSync
     this.cloud = next
     if (!same) this.emit({ type: 'cloud', cloud: next })

@@ -6,6 +6,8 @@ export interface ChatMessage {
   text: string
   /** 这条是错误提示气泡（渲染层 M-11 用它挂「重试」）。会话恢复失败重建上下文时要跳过它们 */
   error?: boolean
+  /** B-6 / Q8：这条回答里没有依据的引用；渲染成角标，不进正文（重建上下文时也不会喂回模型） */
+  unverified?: string[]
 }
 
 export interface Conversation {

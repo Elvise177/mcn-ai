@@ -256,6 +256,40 @@ export async function logout(): Promise<void> {
 }
 
 /**
+ * 离线之后的**周期重探**（Q11，设计 §1.4 本来就写了，只是没实现）。
+ *
+ * 病症：`probeCloud` 只在登录/启动时各跑一次，之后再也不探。于是网线插回来、
+ * Supabase 恢复了，顶上那条「云端离线」还挂着——用户以为产品坏了，其实早就好了。
+ * 恢复本身是有信号的（任何一次真实请求成功都会 `markCloudReachable`），
+ * 但**离线时用户根本不会去发请求**，所以只能靠我们自己回头看一眼。
+ *
+ * 阶梯 60s → 2m → 4m → 8m 封顶：贴着"人会等多久"，又不至于离线一整天打几百次。
+ * 一旦够得着立刻停表；下次掉线重新从 60s 起。
+ */
+const OFFLINE_PROBE_BASE_MS = 60_000
+const OFFLINE_PROBE_MAX_MS = 8 * 60_000
+let reprobeTimer: ReturnType<typeof setTimeout> | null = null
+let reprobeAttempt = 0
+
+function scheduleReprobe(): void {
+  if (reprobeTimer) return
+  const delay = Math.min(OFFLINE_PROBE_BASE_MS * 2 ** reprobeAttempt, OFFLINE_PROBE_MAX_MS)
+  reprobeAttempt++
+  reprobeTimer = setTimeout(() => {
+    reprobeTimer = null
+    void probeCloud()
+  }, delay)
+  reprobeTimer.unref?.()
+  log('info', 'auth', `云端不可达，${Math.round(delay / 1000)}s 后重探（第 ${reprobeAttempt} 次）`)
+}
+
+function stopReprobe(): void {
+  if (reprobeTimer) clearTimeout(reprobeTimer)
+  reprobeTimer = null
+  reprobeAttempt = 0
+}
+
+/**
  * 云端状况探测（Condition，不是 Task——它没有终态）。
  * 探测本身要有超时，否则 Supabase 被暂停（域名 NXDOMAIN）时这里会挂很久。
  */
@@ -263,25 +297,34 @@ export async function probeCloud(): Promise<void> {
   const { store } = await import('../store')
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), 6000)
+  let reachable = false
   try {
     // HEAD 根路径就够回答"云端够不够得着"，不依赖任何具体业务端点
     await fetch(store.get('apiBaseUrl'), { method: 'HEAD', signal: ctl.signal })
     markCloudReachable()
+    reachable = true
   } catch (e) {
     markCloudUnreachable(e)
   } finally {
     clearTimeout(timer)
   }
+  // 通了就停表；不通就排下一次（Q11）
+  if (reachable) stopReprobe()
+  else scheduleReprobe()
   const s = await getSession().catch(() => null)
   tasks.setCloud({ loggedIn: !!s, email: s?.user.email ?? undefined, pendingSync: getSyncQueue().length })
 }
 
 /** 任何一次真实请求成功都顺带证明云端可达，不必额外发探测请求 */
 export function markCloudReachable(): void {
+  stopReprobe() // 已经通了，Q11 的重探表可以停了
   tasks.setCloud({ reachable: true, lastError: undefined })
 }
 
 export function markCloudUnreachable(e: unknown): void {
+  // Q11：真实请求失败也要挂上重探表——离线条一旦亮起来，用户就不会再主动发请求了，
+  // 没人回头看一眼的话它会一直挂到重启
+  scheduleReprobe()
   tasks.setCloud({ reachable: false, lastError: e instanceof Error ? e.message : String(e) })
 }
 

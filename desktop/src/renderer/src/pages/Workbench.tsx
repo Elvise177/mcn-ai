@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check, RotateCcw } from 'lucide-react'
+import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check, RotateCcw, AlertTriangle } from 'lucide-react'
 import { FastMarkdown } from '../components/Markdown'
 import { FileIcon } from '../components/FileIcon'
 import { ui } from '../components/ui'
@@ -11,7 +11,7 @@ import { useDragOver } from '../hooks/useDragOver'
 import { useTask } from '../hooks/useTasks'
 import { TierSelector } from '../components/TierSelector'
 import { StepStream, useArtifactMedians } from '../components/StepStream'
-import { anchorStepGroup, useSessionSteps } from '../lib/step-stream'
+import { anchorStepGroup, tierNote, useSessionSteps } from '../lib/step-stream'
 
 /**
  * 打开产物（M-05）。`shell.openPath` 失败（没装 Keynote/Office、产物已被删）以前是静默的，
@@ -384,6 +384,19 @@ export default function Workbench({
                         >
                           <FastMarkdown body={m.text} onLink={handleLink} />
                         </div>
+                        {/* Q8：本轮没读过的引用挂一个角标——**只提示不删**（模型可能是从 MOC
+                            的列表里看到的标题）。金琥珀 = 「做完了但有折损」那一档，不是错误 */}
+                        {!!m.unverified?.length && (
+                          <div
+                            data-testid="unverified-badge"
+                            data-count={m.unverified.length}
+                            title={`本轮并未读取：${m.unverified.join('、')}`}
+                            className="mt-1 inline-flex items-center gap-1 rounded-full border border-gold-line bg-gold-soft px-2 py-0.5 text-xs text-gold-ink"
+                          >
+                            <AlertTriangle size={11} className="shrink-0" />
+                            {m.unverified.length} 处引用存疑，请自行核对
+                          </div>
+                        )}
                         <div className="mt-1 flex items-center gap-2">
                           {/* 错误气泡里的「重试」常驻（不是 hover 才出）：这是用户此刻唯一想点的东西。
                               前面没有可复用的提问时不给按钮——按了什么都不会发生的按钮比没有更糟 */}
@@ -446,6 +459,7 @@ export default function Workbench({
             </div>
             <div className="border-t border-line px-8 py-4">
               <div className="mx-auto max-w-3xl">
+                <TurnStatusLine startedAt={task?.startedAt} steps={liveGroup?.steps.length ?? 0} tier={tier} live={streaming} />
                 <InputBox
                   value={input}
                   onChange={setInput}
@@ -464,6 +478,46 @@ export default function Workbench({
       </div>
       {/* 首页已经有「最近产物」卡片区，这里默认收起，避免同屏两份一样的内容 */}
       <ArtifactPanel homeEmpty={empty} onOpenNote={onOpenNote} />
+    </div>
+  )
+}
+
+/**
+ * 轮内状态行（F17 半）：`用时 12s · 3 步 · 标准档`。
+ *
+ * 为什么值得占一行：这一轮**已经跑了多久、做了几步、实际按哪一档在跑**，
+ * 以前一个都看不到——步骤流折叠之后连步数都没了，用户唯一能判断"是不是卡住了"的
+ * 依据是那三个跳动的点。而"档位"更要紧：增强档的钱是按轮花的（PRODUCT-AUDIT 2.3）。
+ *
+ * **零新 IPC**：耗时来自任务层的 `startedAt`，步数来自步骤流，档位来自会话对象。
+ * 每秒 tick 只重渲染这一个组件——步骤流那边刻意不 tick，是因为它一动就是整棵树。
+ */
+function TurnStatusLine({
+  startedAt,
+  steps,
+  tier,
+  live,
+}: {
+  startedAt?: number
+  steps: number
+  tier: TierId
+  live: boolean
+}) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!live) return
+    setNow(Date.now())
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [live, startedAt])
+
+  if (!live) return null
+  // 拿不到起点（任务事件还没回来的头几十毫秒）就先不报时间，别显示一个 0s 或者负数
+  const secs = startedAt ? Math.max(0, Math.round((now - startedAt) / 1000)) : null
+  const parts = [secs === null ? '' : `用时 ${secs}s`, steps > 0 ? `${steps} 步` : '', tierNote(tier)].filter(Boolean)
+  return (
+    <div data-testid="turn-status" data-tier={tier} className="mb-2 text-sm text-muted">
+      {parts.join(' · ')}
     </div>
   )
 }

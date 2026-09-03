@@ -71,8 +71,29 @@ function push(): void {
   win?.webContents.send('update:ready', state)
 }
 
+/**
+ * 走查专用开关（生产不读，判据同 HANDOFF §4-22）。
+ *
+ * 更新链路在 dev 形态下整条不存在（没有 app-update.yml），三种形态——下载中 / 已就绪 /
+ * 安装失败——在走查里**一张截图都没有**。真造它们要么得起一个假更新源、要么得把
+ * 缓存弄坏。这里只做一件事：把状态**种成**已就绪，之后走的是与真实完全同一条路
+ * （同一个按钮、同一个 `installUpdateNow`、同一个失败收口）。
+ *
+ *   `ready` = 只种就绪态　`fail` = 种就绪态且 `quitAndInstall` 必抛（验 Q9）
+ */
+const e2eUpdate = (): 'ready' | 'fail' | null => {
+  const v = process.env.MCNAI_E2E_UPDATE
+  return v === 'ready' || v === 'fail' ? v : null
+}
+
 export function initUpdater(window: BrowserWindow): void {
   win = window
+
+  if (e2eUpdate()) {
+    state = { ready: true, version: '9.9.9', disabledReason: null, phase: 'ready', percent: 100, error: null }
+    log('info', 'updater', `e2e 开关：种下「新版本 ${state.version} 已就绪」状态`)
+    return
+  }
 
   if (!app.isPackaged) {
     state = { ...state, disabledReason: 'dev 形态无 app-update.yml' }
@@ -169,25 +190,43 @@ export function initUpdater(window: BrowserWindow): void {
   log('info', 'updater', `自动更新已启用，源：${url}`)
 }
 
+/**
+ * 安装失败的统一收口（Q9）。
+ *
+ * `installUpdateNow` 已经回过 `{ok:true}` 了，界面此刻正停在「正在重启…」——
+ * 这条路径上**只有一次机会说话**，就是把状态改成 error 再推一次。
+ * 原来这里只有一行 `log.error`：日志里有真相，用户面前是一个永远转下去的按钮
+ * （0.1.2 的「卡在正在重启」修的是 `void install()` 那一半，这是另一半）。
+ */
+function failInstall(e: unknown): void {
+  const msg = e instanceof Error ? e.message : String(e)
+  log('error', 'updater', `quitAndInstall 抛错：${msg}`)
+  state = { ...state, phase: 'error', error: `安装没能启动（${msg}）` }
+  push()
+}
+
 /** 渲染层点「立即重启」走这里 */
 export function installUpdateNow(): { ok: boolean; error?: string } {
   if (!state.ready) return { ok: false, error: '还没有下载好的更新' }
+  const mode = e2eUpdate()
   try {
-    const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
     log('info', 'updater', `用户点了立即重启，开始安装 ${state.version}`)
-    // isSilent=false（安装器可见）、isForceRunAfter=true（装完自动开回来）
     setImmediate(() => {
+      // setImmediate 里的抛错外面 catch 不到，只能在这儿收
       try {
+        if (mode === 'fail') throw new Error('安装器启动失败（e2e 模拟）')
+        if (mode === 'ready') return // 走查后面还要接着跑，不真的退出
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { autoUpdater } = require('electron-updater') as typeof import('electron-updater')
+        // isSilent=false（安装器可见）、isForceRunAfter=true（装完自动开回来）
         autoUpdater.quitAndInstall(false, true)
       } catch (e) {
-        // setImmediate 里的抛错外面 catch 不到，只能在这儿记——
-        // 客户报「一直卡在正在重启」时，日志里有没有这一行是判断方向的关键
-        log('error', 'updater', `quitAndInstall 抛错：${e instanceof Error ? e.message : String(e)}`)
+        failInstall(e)
       }
     })
     return { ok: true }
   } catch (e) {
-    log('error', 'updater', e instanceof Error ? e : String(e))
+    failInstall(e)
     return { ok: false, error: String(e) }
   }
 }

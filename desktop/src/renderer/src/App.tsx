@@ -10,6 +10,7 @@ import Logo from './components/Logo'
 import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
 import { errText, zhError } from './lib/err'
+import { saveWithToast } from './lib/save'
 import { startTaskSync, useTask } from './hooks/useTasks'
 import { anchorStepGroup, clearStepGroups, startStepStream, trimStepGroups } from './lib/step-stream'
 import { TaskDock } from './components/TaskDock'
@@ -137,14 +138,22 @@ export default function App() {
     })
     const offStream = window.api.chat.onStream((p) => {
       if (p.kind === 'assistant' && p.text != null) {
-        // B-6：引用了这一轮没看过的笔记就在气泡下面挂一行——**只提示不删**，
-        // 模型有可能是从 MOC 的列表里看到的标题，误删会把对的也删掉
-        const note = p.unverifiedCitations?.length
-          ? `\n\n> ⚠️ 以下来源本轮并未真正读取，请自行核对：${p.unverifiedCitations.map((c) => `[[${c}]]`).join('、')}`
-          : ''
-        const at = appendMessage(p.sessionId, { role: 'assistant', text: p.text + note }, p.sdkSessionId)
-        // 过程可见性：把刚跑完那一轮的步骤钉到这条回答上（下标只有这里知道）
-        if (at >= 0) anchorStepGroup(p.sessionId, at)
+        /**
+         * B-6 / Q8：引用了这一轮没看过的笔记 → **气泡下面挂一个角标**，只提示不删
+         * （模型有可能是从 MOC 的列表里看到的标题，误删会把对的也删掉）。
+         *
+         * 原来是把一段 `> ⚠️ …` **拼进正文**，两个毛病：正文被改写之后
+         * ① 复制走的是掺了提示语的版本；② 会话恢复重建上下文时这段话会被喂回给模型。
+         * 现在它是消息上的一个字段，正文一个字不动。
+         */
+        const at = appendMessage(
+          p.sessionId,
+          { role: 'assistant', text: p.text, unverified: p.unverifiedCitations?.length ? p.unverifiedCitations : undefined },
+          p.sdkSessionId
+        )
+        // 过程可见性：把刚跑完那一轮的步骤钉到这条回答上（下标只有这里知道）；
+        // Q15 的档位结论也在这一刻交给步骤流
+        if (at >= 0) anchorStepGroup(p.sessionId, at, { tier: p.tier, degraded: p.degraded })
       } else if (p.kind === 'error') {
         // error:true → 气泡里挂「重试」（M-11）。以前出错只留一段 ⚠️ 文字，
         // 用户要重试只能把刚才那段话重新打一遍。
@@ -156,7 +165,7 @@ export default function App() {
           error: true,
         })
         // 失败那一轮的过程同样有价值（"它到底试过什么"），钉在报错气泡上
-        if (at >= 0) anchorStepGroup(p.sessionId, at)
+        if (at >= 0) anchorStepGroup(p.sessionId, at, { tier: p.tier })
       } else if (p.kind === 'notice' && p.text) {
         // 中性提示（如"旧上下文已过期、已开新会话"）。**不进对话历史**——
         // 它是这一次的运行状况，不是 AI 说的话，塞进气泡会被下次重建上下文时喂回给模型
@@ -590,7 +599,7 @@ function IngestSection() {
           checked={auto}
           onChange={(e) => {
             setAuto(e.target.checked)
-            void window.api.settings.setArtifactAutoIngest(e.target.checked)
+            void saveWithToast('产物自动入库', () => window.api.settings.setArtifactAutoIngest(e.target.checked))
           }}
           className="accent-accent"
         />
@@ -639,7 +648,7 @@ function SensitiveSection() {
   }, [])
   const pick = (k: 'local' | 'ai' | 'all'): void => {
     setMode(k)
-    void window.api.settings.setSensitiveMode(k === 'ai', k === 'all')
+    void saveWithToast('敏感资料处置', () => window.api.settings.setSensitiveMode(k === 'ai', k === 'all'))
   }
   return (
     <div className="space-y-2 border-t border-line pt-4" data-testid="settings-sensitive">
@@ -770,8 +779,11 @@ function TierConfigRow({ tier, onChanged }: { tier: AiTier; onChanged: () => voi
   }, [tier.baseUrl, tier.model, tier.fastModel])
 
   const saveConfig = async (): Promise<void> => {
-    const r = await window.api.ai.setTierConfig(tier.id, draft)
-    setDraft({ baseUrl: r.tier.baseUrl, model: r.tier.model, fastModel: r.tier.fastModel })
+    // 失焦即存，所以"没改过也会走一次"：值一个字都没变就别弹 toast（onBlur 到处都是，
+    // 光是切个输入框就冒一条「已保存」会把 toast 区糊满）
+    if (draft.baseUrl === tier.baseUrl && draft.model === tier.model && draft.fastModel === tier.fastModel) return
+    const r = await saveWithToast(`${tier.label}线路`, () => window.api.ai.setTierConfig(tier.id, draft))
+    if (r) setDraft({ baseUrl: r.tier.baseUrl, model: r.tier.model, fastModel: r.tier.fastModel })
     onChanged()
   }
 
@@ -898,7 +910,7 @@ function ShowCostToggle() {
         checked={on}
         onChange={(e) => {
           setOn(e.target.checked)
-          void window.api.settings.setShowCost(e.target.checked)
+          void saveWithToast('用量页金额显示', () => window.api.settings.setShowCost(e.target.checked))
         }}
         className="mt-1 accent-accent"
       />
@@ -1144,10 +1156,49 @@ function AdminZone({ tiers, onChanged }: { tiers: AiTier[]; onChanged: () => voi
           data-testid="admin-apibase"
           value={apiBase}
           onChange={(e) => setApiBase(e.target.value)}
-          onBlur={() => window.api.settings.setApiBase(apiBase)}
+          onBlur={() => void saveWithToast('服务器地址', () => window.api.settings.setApiBase(apiBase))}
           className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 font-mono text-sm outline-none focus:border-accent"
         />
       </div>
+    </div>
+  )
+}
+
+/**
+ * 诊断报告导出（Q13）。
+ *
+ * 原来是**无条件报成功**：`await window.api.diag.export()` 外面一个 try/catch 都没有，
+ * 后面紧跟一句 `ui.toast('已导出到桌面')`。桌面满盘、没有写权限、日志文件被占——
+ * 任何一种失败都会被说成"已导出"，而这是客服排查的**最后一个抓手**，
+ * 它失明的时候恰恰是最需要它的时候（UX-审计 M-08）。
+ *
+ * 三件事：busy 态（读 300 行日志 + 写盘不是零耗时）、成功报**落到哪儿**、失败报原因。
+ */
+function DiagnosticsCard() {
+  const [busy, setBusy] = useState(false)
+  return (
+    <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
+      <div className="text-md font-medium">遇到问题？</div>
+      <div className="text-sm text-muted">导出诊断报告（环境信息 + 最近日志，已自动去除密钥），发给管理员即可远程排查。</div>
+      <button
+        data-testid="diag-export"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true)
+          try {
+            const out = await window.api.diag.export()
+            // 报文件名而不是"已导出到桌面"：桌面上东西多，得让他知道找哪个
+            ui.toast(`诊断报告已导出：${out.split('/').pop() ?? out}`, 'ok')
+          } catch (e) {
+            ui.toast(`导出诊断报告失败：${errText(e)}`, 'error')
+          } finally {
+            setBusy(false)
+          }
+        }}
+        className="rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover disabled:opacity-60"
+      >
+        {busy ? '正在导出…' : '导出诊断报告到桌面'}
+      </button>
     </div>
   )
 }
@@ -1245,19 +1296,7 @@ function SettingsPage({
 
       {adminUnlocked && <AdminZone tiers={tiers} onChanged={refresh} />}
 
-      <div className="mb-6 max-w-xl space-y-3 rounded-xl border border-line bg-card p-6">
-        <div className="text-md font-medium">遇到问题？</div>
-        <div className="text-sm text-muted">导出诊断报告（环境信息 + 最近日志，已自动去除密钥），发给管理员即可远程排查。</div>
-        <button
-          onClick={async () => {
-            await window.api.diag.export()
-            ui.toast('诊断报告已导出到桌面')
-          }}
-          className="rounded-full border border-line px-4 py-1.5 text-base hover:bg-hover"
-        >
-          导出诊断报告到桌面
-        </button>
-      </div>
+      <DiagnosticsCard />
 
       {/* 管理员区入口：版本号连点 7 次。既不占版面，也不会被误触 */}
       <div

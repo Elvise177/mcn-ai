@@ -9,6 +9,7 @@
  * 落盘只会制造重启后永远停在"正在检索"的幽灵步骤（同任务层的「进行中永不落盘」）。
  */
 import { useSyncExternalStore } from 'react'
+import type { TurnMeta } from './turn-summary'
 
 export type StepStatus = 'running' | 'done' | 'failed'
 
@@ -45,6 +46,13 @@ export interface StepGroup {
   pinned: boolean
   /** 这一轮还在跑 */
   live: boolean
+  /**
+   * 这一轮**实际用的档位**与「被服务端换了模型」的结论（Q15）。
+   * 由 App 在收尾那一刻从 `agent:stream` 的 assistant 事件里带进来——
+   * 档位是"这一轮怎么跑的"，属于过程，不属于回答内容，所以落在分组上而不是消息上。
+   */
+  tier?: TierId
+  degraded?: boolean
   /**
    * 这一轮的过程挂在**哪一条消息**上（对话里的下标），由 App 在落消息那一刻告诉我们。
    *
@@ -171,7 +179,7 @@ function collapseLive(sessionId: string): void {
  * 只有 `done` 那条兜底路径拿不到 anchor（比如停止生成时半个字都没吐），
  * 那样的分组不挂到任何消息上——界面上什么都不显示，好过挂错地方。
  */
-function finishLive(sessionId: string, anchor?: number): void {
+function finishLive(sessionId: string, anchor?: number, meta?: TurnMeta): void {
   mutate(sessionId, (s) => {
     const last = s.groups[s.groups.length - 1]
     if (!last?.live) return null
@@ -180,6 +188,8 @@ function finishLive(sessionId: string, anchor?: number): void {
       ...last,
       live: false,
       anchor,
+      tier: meta?.tier ?? last.tier,
+      degraded: meta?.degraded ?? last.degraded,
       collapsed: last.pinned ? last.collapsed : true,
       elapsedMs: last.elapsedMs ?? Date.now() - last.startedAt,
       // 收尾时还在转圈的步骤：工具其实已经不会再回话了，留着转圈是假象
@@ -193,8 +203,8 @@ function finishLive(sessionId: string, anchor?: number): void {
  * App 在把 assistant / error 消息落进对话之后调用：把刚跑完那一轮的过程钉到 `messageIndex`。
  * 没有正在跑的分组时是空操作（这一轮压根没调过工具，比如预检就失败了）。
  */
-export function anchorStepGroup(sessionId: string, messageIndex: number): void {
-  finishLive(sessionId, messageIndex)
+export function anchorStepGroup(sessionId: string, messageIndex: number, meta?: TurnMeta): void {
+  finishLive(sessionId, messageIndex, meta)
 }
 
 /** 点摘要展开 / 点头部收起。手点过就 pin 住，后面不再自动折叠 */
@@ -255,39 +265,16 @@ export function useSessionSteps(sessionId: string): SessionSteps {
 // ---- 摘要口径 ----
 
 /**
- * 「检索了 N 份资料」里的 N：**这一轮真正被摆到眼前的资料份数**。
- *
- * 口径（走查按同一套算法独立重算一遍对账）：
- *  - 只算**份**（`unit==='file'`）：Grep 的 content 模式吐的是一篇里的几十行命中，
- *    把那个数加进来，"检索了 42 份资料"就成了瞎报——实际只翻了一篇
- *  - **失败的步骤不算**：那一步什么都没摆到眼前
- *  - **同一篇只算一次**：模型撞墙时会把同一篇读三遍
- *  - 生成产物、写文件这类动作不是"资料"，不计
- *
- * 仍然做不到的：检索与扫描之间、以及几次检索之间的**重复命中去不掉**——
- * 工具只回条数，回不了路径。所以这个数是"命中条目数"，不是"不重复的笔记数"。
+ * 摘要算法整体搬去 `lib/turn-summary.ts`（PLAN-v2 批 2）：它们全是
+ * 「只有真实调用才走得到」的判据（产物轮 / 失败步 / 服务端换模型），
+ * 必须能被主进程侧的 `smoke:steps` 零花费断言，而本文件带着 `window.api`
+ * 与 useSyncExternalStore，那边编译不过去。这里只做转出口，调用方不用改 import。
  */
-export function resourceCount(steps: StepItem[]): number {
-  let n = 0
-  /** 同一篇被读了三遍（模型撞墙重试时很常见）只能算一份 */
-  const readOnce = new Set<string>()
-  for (const s of steps) {
-    // 失败的、以及被护栏拦下的那一步，什么都没摆到眼前，不能算进"检索了 N 份资料"
-    if (s.status === 'failed' || s.capped) continue
-    if (s.tool === 'Read') {
-      const k = s.args.file ?? s.id
-      if (readOnce.has(k)) continue
-      readOnce.add(k)
-      n += 1
-    } else if (s.tool === 'search_knowledge' || s.tool === 'Grep' || s.tool === 'Glob') {
-      if (s.unit === 'file') n += s.count ?? 0
-    }
-  }
-  return n
-}
-
-export function summaryText(steps: StepItem[], elapsedMs?: number): string {
-  const n = resourceCount(steps)
-  const secs = elapsedMs ? `${(elapsedMs / 1000).toFixed(1)}s` : '—'
-  return n > 0 ? `检索了 ${n} 份资料 · 用时 ${secs}` : `核对完成，未找到相关资料 · 用时 ${secs}`
-}
+export {
+  resourceCount,
+  producedArtifact,
+  failedCount,
+  tierNote,
+  summaryText,
+  type TurnMeta,
+} from './turn-summary'

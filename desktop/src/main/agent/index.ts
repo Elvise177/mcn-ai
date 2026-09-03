@@ -53,6 +53,13 @@ export interface AgentStreamPayload {
   /** 这一轮用的档位；出错时渲染层据此给「切换到标准模式重试」的出口 */
   tier?: TierId
   /**
+   * Q15：**服务端把模型换掉了**（`modelUsage` 里没有我们点名的那个）。
+   * 这个结论原来只进主进程日志的一行 warn——用户为增强档付了钱，
+   * 界面照常显示「增强」，没有任何地方告诉他这一轮其实不是。
+   * 现在随事件上来，步骤流折叠行尾标「已按标准档执行」。
+   */
+  degraded?: boolean
+  /**
    * B-6：回答里**没有依据**的引用。分两种，都在这里：
    * 库里根本没有这篇（纯编造），或库里有但这一轮从没读过它（张冠李戴）。
    * 提示词只要求"标注来源"，没有任何机制保证标的是对的——这就是那个机制。
@@ -905,6 +912,8 @@ export class AgentManager {
             sdkSessionId: usable,
             costUsd,
             models,
+            // Q15：只在真被换掉时才带上，别给每一轮都挂一个 false
+            degraded: degraded || undefined,
             tier,
             recovered: ctx.recovered,
           })

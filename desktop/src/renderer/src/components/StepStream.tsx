@@ -38,6 +38,7 @@ export function useArtifactMedians(turnKey: number): Record<string, number> {
 
 function StepRow({ step, medians }: { step: StepItem; medians: Record<string, number> }) {
   const usageType = artifactUsageType(step.tool)
+  const failed = step.status === 'failed'
   const phrase = describeStep(step.tool, step.args, {
     verify: step.verify,
     count: step.count,
@@ -45,9 +46,9 @@ function StepRow({ step, medians }: { step: StepItem; medians: Record<string, nu
     approx: step.approx,
     capped: step.capped,
     done: step.status !== 'running',
+    failed,
     medianMs: usageType ? medians[usageType] : undefined,
   })
-  const failed = step.status === 'failed'
   // `data-verify` 单独给一个属性，**不能拿 data-kind 反推**：验证性扫描要是真扫到了东西，
   // 文案必须回到「核对了 N 份」（kind='scan'），继续说"已确认没有"就成了假话
   return (
@@ -81,8 +82,8 @@ function StepRow({ step, medians }: { step: StepItem; medians: Record<string, nu
             <RotateCcw size={9} /> 重试
           </span>
         )}
+        {/* 「没成功」由 describeStep 统一补（N9）：文案的唯一真相源是 config/steps.ts */}
         {phrase.text}
-        {failed && <span className="ml-1">（这一步没成功）</span>}
       </span>
     </div>
   )
@@ -98,13 +99,16 @@ export function StepStream({
   medians: Record<string, number>
 }) {
   if (!group.steps.length) return null
-  const summary = summaryText(group.steps, group.elapsedMs)
+  const summary = summaryText(group.steps, group.elapsedMs, { tier: group.tier, degraded: group.degraded })
   const toggle = (): void => toggleStepGroup(sessionId, group.id)
 
   if (group.collapsed) {
     return (
       <button
         data-testid="steps-summary"
+        // Q15：档位结论也上 data-*，走查断言"界面说的档 = 主进程给的档"时不必去解析中文
+        data-tier={group.tier ?? ''}
+        data-degraded={group.degraded ? '1' : ''}
         onClick={toggle}
         className="mb-1 inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-sm text-muted hover:bg-hover hover:text-ink"
       >
@@ -120,6 +124,8 @@ export function StepStream({
       // 走查里"该折叠却没折叠"只能靠猜——2026-08-18 为这个白跑过一轮
       data-live={group.live ? '1' : ''}
       data-pinned={group.pinned ? '1' : ''}
+      data-tier={group.tier ?? ''}
+      data-degraded={group.degraded ? '1' : ''}
       className="mb-1.5"
     >
       {/* 收尾之后才给头部：跑到一半就出一个"收起"按钮，等于鼓励用户把正在看的东西关掉 */}
