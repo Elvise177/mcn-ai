@@ -231,6 +231,23 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
     acc.push(ev)
     return acc
   }, [])
+  /**
+   * F6 **常驻**失败清单：上面那份 `failures` 来自 `convert_failures` 事件，
+   * 只在那一轮的面板里活着——面板会自动收起、应用会重启，而"哪些文件没进来"
+   * 是用户过几天还要回头查的东西。盘上的 `.failed/<日期>/` 才是持久记录。
+   * 事件里有就用事件里的（那是这一轮最新的），没有就读盘。
+   */
+  const [diskFailures, setDiskFailures] = useState<Array<{ rel: string; reason?: string }>>([])
+  const [retrying, setRetrying] = useState(false)
+  const refreshFailed = useCallback(async () => {
+    const r = await window.api.inbox.failedList().catch(() => null)
+    setDiskFailures((r?.files ?? []).map((f) => ({ rel: f.name, reason: f.reason })))
+  }, [])
+  useEffect(() => {
+    void refreshFailed()
+  }, [refreshFailed, running])
+  const shownFailures = failures.length ? failures : diskFailures
+
   const { done, total, label } = task?.progress ?? { done: 0, total: 6, label: '' }
   // 取消是用户主动的操作，不该看起来像出错：中性灰，不是红（设计 §5.1）
   const canceled = task?.status === 'canceled'
@@ -319,10 +336,38 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
           </div>
         </div>
       )}
-      {failures.length > 0 && (
+      {shownFailures.length > 0 && (
         <div data-testid="inbox-failures" className="border-b border-line bg-warning-soft px-4 py-2 text-sm">
-          <div className="mb-1 flex items-center gap-2">
-            <span className="font-medium">{failures.length} 个文件没能进知识库，原件都还在</span>
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <span className="font-medium">{shownFailures.length} 个文件没能进知识库，原件都还在</span>
+            {/*
+              F6 **整批重投**。以前唯一的补救办法是「在访达里打开 → 手动拖回投递箱」——
+              十几个文件就是十几次拖拽，而失败往往是一次性的（转换器缺依赖、文件当时被占用），
+              修好之后本该一键重来。走的是与拖入完全同一条链路（含格式护栏与计数）。
+            */}
+            <button
+              data-testid="inbox-retry-failed"
+              disabled={retrying}
+              onClick={async () => {
+                setRetrying(true)
+                try {
+                  const r = await window.api.inbox.retryFailed()
+                  if (!r.ok) return ui.toast(r.error ?? '重试失败', 'error')
+                  ui.toast(
+                    r.requeued
+                      ? `已把 ${r.requeued} 个文件重新投进投递箱${r.skipped ? `（${r.skipped} 个格式仍不支持，跳过）` : ''}`
+                      : '没有可以重投的文件（格式都不支持）',
+                    r.requeued ? 'ok' : 'warn'
+                  )
+                  await refreshFailed()
+                } finally {
+                  setRetrying(false)
+                }
+              }}
+              className="rounded-full border border-line px-2 py-0.5 text-xs hover:bg-card disabled:opacity-60"
+            >
+              {retrying ? '重投中…' : '全部重试'}
+            </button>
             {/*
               **常驻入口**：面板会自动收起、应用也会重启，而"哪些文件没进来、为什么"
               是用户过几天还要回头查的东西。盘上的 `.failed/失败原因.txt` 才是持久记录，
@@ -341,10 +386,10 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
             </button>
           </div>
           <ul className="ml-4 list-disc text-muted">
-            {failures.map((f) => (
-              <li key={f.rel} className="truncate" title={`${f.rel} —— ${f.reason}`}>
+            {shownFailures.map((f) => (
+              <li key={f.rel} className="truncate" title={`${f.rel}${f.reason ? ` —— ${f.reason}` : ''}`}>
                 {f.rel}
-                <span className="text-2xs"> —— {f.reason}</span>
+                {f.reason && <span className="text-2xs"> —— {f.reason}</span>}
               </li>
             ))}
           </ul>

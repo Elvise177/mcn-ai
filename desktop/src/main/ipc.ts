@@ -314,8 +314,8 @@ export function registerIpc(): void {
   // ---- 自动更新 ----
   // state 是权威快照（`update:ready` 推送在窗口 reload 期间会丢，同任务层那条约定）
   // ---- B4：AI 写知识库的确认与撤销 ----
-  ipcMain.handle('agent:confirmWrite', (_e, id: string, allow: boolean) => {
-    agentManager.resolveWriteConfirm(id, !!allow)
+  ipcMain.handle('agent:confirmWrite', (_e, id: string, allow: boolean, scope?: 'once' | 'session') => {
+    agentManager.resolveWriteConfirm(id, !!allow, scope)
     return { ok: true }
   })
   ipcMain.handle('agent:undoWrite', (_e, id: string) => undoWrite(id))
@@ -360,6 +360,10 @@ export function registerIpc(): void {
   // **不许 void**：`void promise` 把结果和异常一起丢掉，渲染层永远拿不到"为什么没开始"
   ipcMain.handle('inbox:tagBackfill', () => inboxOrchestrator.runTagBackfill())
   ipcMain.handle('inbox:openFailed', () => inboxOrchestrator.openFailedDir())
+  // F6：失败件清单与整批重投。**从盘上的 `.failed/` 读**，不是从那一轮的事件里读——
+  // 面板会收起、应用会重启，而"哪些文件没进来"是过几天还要回头查的东西
+  ipcMain.handle('inbox:failedList', () => inboxOrchestrator.failedList())
+  ipcMain.handle('inbox:retryFailed', () => inboxOrchestrator.retryFailed())
   // 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚（H-13，设计 §5.1）
   ipcMain.handle('inbox:cancel', () => inboxOrchestrator.cancel('user'))
 }
@@ -380,6 +384,11 @@ async function openVault(path: string): Promise<{ path: string; noteCount: numbe
   store.set('vaultPath', path)
   // configure → stop('switch')：上一库还在跑的 pipeline 在这里被杀干净（R2，bug#10）
   await inboxOrchestrator.configure(path)
+  /**
+   * F24：换库必须清掉「本会话此目录不再问」的批准。批准键是**目录前缀**，
+   * 换个库之后同名目录是完全另一批文件——留着等于凭空给新库开了口子。
+   */
+  agentManager.clearApprovals()
   const stoppedInbox = inboxOrchestrator.takeStoppedForSwitch()
   await artifactsWatcher.configure(path)
   await ensureRouteFolders(path)

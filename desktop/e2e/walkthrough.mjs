@@ -5063,6 +5063,26 @@ try {
     await win.locator('[data-testid="write-confirm"]').waitFor({ state: 'detached', timeout: 5000 })
     console.log('B4 确认卡 ✓ 出现/路径可见/拒绝/Esc/允许 四条路径')
 
+    /**
+     * ⑤ F24「允许，且此目录不再问」。
+     *
+     * 三档必须都在，且中间那颗的说明要说清**放开的是什么**——
+     * HANDOFF 里这条原来记的是「故意不做」，理由是没有安全的记忆位置；
+     * 现在位置有了（主进程内存 + 按会话 + 按目录），所以更要把边界写在脸上。
+     */
+    await fire('80_Library/工作-管理类/第四篇.md')
+    await win.locator('[data-testid="write-confirm"]').waitFor({ timeout: 8000 })
+    const sessionBtn = win.locator('[data-testid="write-allow-session"]')
+    if (!(await sessionBtn.count())) throw new Error('确认卡上没有「本会话此目录不再问」这一档（F24）')
+    const tip = (await sessionBtn.getAttribute('title')) ?? ''
+    // 范围**收在目录这一级**：说成"整个库不再问"的话这道确认就等于没有
+    if (!tip.includes('工作-管理类')) throw new Error(`「不再问」没说清放开的是哪个目录：「${tip}」`)
+    if (!/重启即失效|本次运行/.test(tip)) throw new Error(`「不再问」没说清它活多久：「${tip}」`)
+    await snap('68-AI写入-确认卡三档', 200)
+    await sessionBtn.click()
+    await win.locator('[data-testid="write-confirm"]').waitFor({ state: 'detached', timeout: 5000 })
+    console.log('F24 本会话此目录不再问 ✓', JSON.stringify(tip))
+
     // 撤销那条走 `npm run smoke:write`（真建文件、真改、真撤销、比对内容），这里不蹭
   }
 
@@ -5661,6 +5681,59 @@ try {
     console.log('F9 重新生成入口 ✓')
   }
 
+  /**
+   * ---- F6 失败件批量重投 ----
+   *
+   * `.failed/` 里躺的是原件，用户原来唯一的补救办法是「在访达里打开 → 手动拖回投递箱」——
+   * 十几个文件就是十几次拖拽，而失败往往是一次性的（转换器缺依赖、文件当时被占用）。
+   *
+   * 清单还必须是**常驻**的：界面上那份来自 `convert_failures` 事件，只在那一轮的面板里活着，
+   * 面板会自动收起、应用会重启，而"哪些文件没进来"是过几天还要回头查的东西。
+   */
+  {
+    const failedNow = () => win.evaluate(() => window.api.inbox.failedList())
+    let list = await failedNow()
+    if (!list.files?.length) {
+      // 造一个必然转换失败的文件（扩展名认得、内容是垃圾），走的是真链路
+      const junk = join(tmpdir(), `e2e必败件_${Date.now()}.docx`)
+      writeFileSync(junk, 'x'.repeat(4000))
+      await win.evaluate((p) => window.api.inbox.enqueue([p]), junk)
+      rmSync(junk, { force: true })
+      await waitInboxIdle(win)
+      list = await failedNow()
+    }
+    if (!list.files?.length) throw new Error('造不出失败件，F6 这一段无从验起')
+
+    // ① 清单是**从盘上读的**：reload 之后（事件全没了）它还得在
+    await win.click('aside button:has-text("知识库")')
+    await win.waitForTimeout(600)
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(2000)
+    await win.click('aside button:has-text("知识库")')
+    await win.waitForTimeout(600)
+    if (!(await win.locator('[data-testid="inbox-panel"]').count()))
+      await win.click('[data-testid="inbox-toggle"]')
+    await win.locator('[data-testid="inbox-failures"]').waitFor({ timeout: 10000 })
+    const panelText = await win.locator('[data-testid="inbox-failures"]').innerText()
+    if (!panelText.includes(list.files[0].name))
+      throw new Error(`重载之后失败清单没了/对不上：期望含「${list.files[0].name}」，实得「${panelText.slice(0, 120)}」`)
+    await snap('72-失败件清单-常驻', 250)
+
+    // ② 全部重试：走的是与拖入完全同一条链路（含格式护栏与计数）
+    const before = list.files.length
+    await win.click('[data-testid="inbox-retry-failed"]')
+    await win.locator('[data-testid="toast"]', { hasText: /重新投进投递箱|没有可以重投/ }).waitFor({ timeout: 20000 })
+    const toastText = await win.locator('[data-testid="toast"]').first().innerText()
+    await snap('72b-失败件-全部重试', 200)
+    // ③ 重投过的必须从 `.failed/` 里挪走——不挪的话下次「全部重试」会把同样的文件再投一遍
+    const after = await failedNow()
+    if ((after.files?.length ?? 0) >= before)
+      throw new Error(`重投之后 .failed/ 没清理（原 ${before} 个，现 ${after.files?.length} 个），下次会重复入队`)
+    console.log('F6 失败件批量重投 ✓', JSON.stringify({ 原有: before, 剩余: after.files?.length ?? 0, toast: toastText.trim() }))
+    await waitInboxIdle(win)
+  }
+
   // ==== PLAN-v2 批 2：静默消灭 + 透明度 ====
 
   // ---- Q8 引用存疑角标：本轮没读过的 [[引用]] 要在气泡下面标出来，**且不掺进正文** ----
@@ -5721,6 +5794,92 @@ try {
     await win.waitForTimeout(400)
     if ((await ingestToggle.isChecked()) !== ingestBefore)
       throw new Error('Q14 断言把「产物自动入库」开关留在了反向值上')
+
+    /**
+     * F7 不可逆操作：**分流规则删除要确认，还要能撤销**。
+     *
+     * 它长得像一颗无关紧要的 ✕，实际后果是"往这个文件夹丢的资料以后不再落到那个目录了"，
+     * 而用户下次发现时东西已经堆在别处好几天了。删笔记/删对话早就有确认，
+     * 这里是同一套标准里唯一漏掉的一个。
+     */
+    {
+      // 先造一条自己的规则，别动内置那条
+      await win.fill('input[placeholder="文件夹名，如：竞品"]', 'e2e竞品')
+      await win.click('button:has-text("添加")')
+      await win.locator('text=分流规则已保存').waitFor({ timeout: 8000 })
+      await win.waitForTimeout(400)
+      const rules = () => win.locator('text=投递箱/e2e竞品').count()
+      if (!(await rules())) throw new Error('规则没添加上，后面的删除断言无从谈起')
+
+      // ① 点 ✕ 必须先问一句
+      await win.click('[data-testid="route-delete-e2e竞品"]')
+      await win.locator('text=删除这条分流规则？').waitFor({ timeout: 5000 })
+      await snap('69-分流规则删除-二次确认', 200)
+      // 取消 = 规则还在
+      await win.click('[data-testid="modal"] button:has-text("取消")')
+      await win.waitForTimeout(400)
+      if (!(await rules())) throw new Error('取消了却把规则删掉了')
+
+      // ② 确认删除 → 给撤销出口 → 点撤销规则回来
+      await win.click('[data-testid="route-delete-e2e竞品"]')
+      await win.click('[data-testid="modal"] button:has-text("删除")')
+      await win.locator('text=已删除「e2e竞品」的分流规则').waitFor({ timeout: 8000 })
+      await win.waitForTimeout(300)
+      if (await rules()) throw new Error('确认删除之后规则还在')
+      const undo = win.locator('[data-testid="toast-action"]', { hasText: '撤销' })
+      if (!(await undo.count())) throw new Error('删除分流规则之后没有「撤销」出口（确认挡不住"点完才想起来它有用"）')
+      await snap('69b-分流规则删除-撤销出口', 150)
+      await undo.click()
+      await win.locator('text=已恢复「e2e竞品」的分流规则').waitFor({ timeout: 8000 })
+      await win.waitForTimeout(400)
+      if (!(await rules())) throw new Error('点了撤销规则没回来')
+      // 收尾：把这条测试规则删掉，别留在库配置里
+      await win.click('[data-testid="route-delete-e2e竞品"]')
+      await win.click('[data-testid="modal"] button:has-text("删除")')
+      await win.waitForTimeout(600)
+      console.log('F7 分流规则删除确认 + 撤销 ✓')
+    }
+
+    /**
+     * F7 敏感档升「上云」要二次确认。
+     * 这一档的真实后果是人事档案、财务表、达人信息表（含身份证号与手机号）**同步到云端**，
+     * 而 2026-08-19 那次的教训正是"敏感文件被传上云"，代价是人工去云端删切片。
+     */
+    {
+      await win.click('[data-testid="sensitive-mode-all"]')
+      await win.locator('text=确认让敏感资料也上云？').waitFor({ timeout: 5000 })
+      const msg = await win.locator('[data-testid="modal"] .whitespace-pre-line').innerText()
+      if (!/同步到云端/.test(msg)) throw new Error(`确认弹窗没说清后果：「${msg}」`)
+      await snap('70-敏感档升云-二次确认', 200)
+      // 取消 = 档位不许变（这是这条断言的全部意义）
+      await win.click('[data-testid="modal"] button:has-text("取消")')
+      await win.waitForTimeout(500)
+      const mode = await win.evaluate(async () => {
+        const s = await window.api.settings.get()
+        return { ai: s.sensitiveAllowAi, cloud: s.sensitiveAllowCloud }
+      })
+      if (mode.cloud) throw new Error('确认弹窗点了取消，档位却已经改成上云了')
+      const checked = await win.locator('[data-testid="sensitive-mode-local"]').isChecked()
+      if (!checked) throw new Error('取消之后单选按钮没留在原来那一档')
+      console.log('F7 敏感档升云确认 ✓', JSON.stringify(mode))
+    }
+
+    /**
+     * F7 昵称：**改完即存**（防抖）+ 一句轻 toast。
+     * 原来只挂 `onBlur`——填完直接关窗口/切页面那次输入是静默丢掉的，
+     * 而"填了没生效"和"我没填"在用户那里长得一模一样。
+     */
+    {
+      await win.fill('[data-testid="nickname-input"]', 'e2e昵称')
+      // **不失焦**，纯等防抖：这一条就是为了验"不 blur 也能存上"
+      await win.locator('[data-testid="toast"]', { hasText: '昵称已保存' }).waitFor({ timeout: 8000 })
+      await snap('71-昵称-改完即存', 150)
+      const kept = await win.evaluate(() => localStorage.getItem('profile.nickname'))
+      if (kept !== 'e2e昵称') throw new Error(`昵称没落盘：「${kept}」`)
+      await win.fill('[data-testid="nickname-input"]', '')
+      await win.waitForTimeout(900)
+      console.log('F7 昵称改完即存 ✓')
+    }
 
     // Q13：导出诊断报告。原来无 try/catch 且**无条件报成功**——
     // 满盘/无权限时把失败说成"已导出"，而这是客服排查的最后一个抓手

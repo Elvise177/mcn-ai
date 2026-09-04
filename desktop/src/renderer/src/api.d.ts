@@ -451,6 +451,15 @@ interface Window {
       >
       /** 在访达里打开最近一次的 `.failed/`（盘上那份「失败原因.txt」才是持久记录） */
       openFailed: () => Promise<{ ok: boolean; error?: string }>
+      /** F6：盘上 `.failed/` 里的失败件清单（常驻入口用它，不依赖那一轮的事件） */
+      failedList: () => Promise<{
+        ok: boolean
+        dir?: string
+        files?: Array<{ name: string; reason?: string }>
+        error?: string
+      }>
+      /** F6：失败件整批重投（走与拖入完全同一条链路，含格式护栏与计数） */
+      retryFailed: () => Promise<{ ok: boolean; requeued?: number; skipped?: number; error?: string }>
       /** 停止本轮：杀整个 pipeline 进程组，已落位的文件不回滚 */
       cancel: () => Promise<boolean>
     }
@@ -477,7 +486,8 @@ interface Window {
       onConfirmWrite: (
         cb: (r: { id: string; sessionId: string; rel: string; tool: string; summary: string }) => void
       ) => () => void
-      confirmWrite: (id: string, allow: boolean) => Promise<{ ok: boolean }>
+      /** scope='session' = F24「本会话此目录不再问」；不传 = 只批准这一次 */
+      confirmWrite: (id: string, allow: boolean, scope?: 'once' | 'session') => Promise<{ ok: boolean }>
       /** 撤销一次 AI 写入（原文写回；本来是新建的则移入废纸篓） */
       undoWrite: (id: string) => Promise<{ ok: boolean; error?: string }>
       /** 诊断口：当前库的对话 system prompt（只读） */

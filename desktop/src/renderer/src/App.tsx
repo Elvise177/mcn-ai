@@ -861,7 +861,26 @@ function SensitiveSection() {
       setMode(s.sensitiveAllowCloud ? 'all' : s.sensitiveAllowAi ? 'ai' : 'local')
     })
   }, [])
-  const pick = (k: 'local' | 'ai' | 'all'): void => {
+  /**
+   * F7：**升到「与普通文件相同」要二次确认**。
+   *
+   * 这一档的真实后果是：人事档案、财务表、达人信息表（含身份证号与手机号）
+   * 会**同步到云端**。它在界面上只是三个单选里的最后一个，点一下就生效，
+   * 而 2026-08-19 那次的教训正是"敏感文件被传上云"——代价是要人工去云端删切片。
+   * 降档（回到 local/ai）不拦：把边界收紧永远不需要请示。
+   */
+  const pick = async (k: 'local' | 'ai' | 'all'): Promise<void> => {
+    if (k === 'all' && mode !== 'all') {
+      const okd = await ui.confirm({
+        title: '确认让敏感资料也上云？',
+        message:
+          '人事档案、财务表、达人信息表这类被判为敏感的文件，将和普通文件一样**同步到云端知识库**。\n\n' +
+          '已经上过云的内容需要联系管理员才能清除。只影响之后入库的文件。',
+        danger: true,
+        okText: '我确认，允许上云',
+      })
+      if (!okd) return
+    }
     setMode(k)
     void saveWithToast('敏感资料处置', () => window.api.settings.setSensitiveMode(k === 'ai', k === 'all'))
   }
@@ -876,7 +895,7 @@ function SensitiveSection() {
               name="sensitive-mode"
               data-testid={`sensitive-mode-${m.key}`}
               checked={mode === m.key}
-              onChange={() => pick(m.key)}
+              onChange={() => void pick(m.key)}
               className="mt-1 accent-accent"
             />
             <span>
@@ -906,14 +925,43 @@ function RoutesSection() {
   }
   useEffect(load, [])
 
-  const save = async (next: Array<{ name: string; dest: string; builtin?: boolean }>): Promise<void> => {
+  const save = async (
+    next: Array<{ name: string; dest: string; builtin?: boolean }>,
+    okText = '分流规则已保存，投递文件夹已就绪',
+    action?: { label: string; onClick: () => void }
+  ): Promise<boolean> => {
     const r = await window.api.routes.set(next.filter((x) => !x.builtin))
     if (r.ok) {
       setRoutesState(next)
-      ui.toast('分流规则已保存，投递文件夹已就绪')
-    } else {
-      ui.toast(r.error ?? '保存失败', 'error')
+      ui.toast(okText, 'ok', action)
+      return true
     }
+    ui.toast(r.error ?? '保存失败', 'error')
+    return false
+  }
+
+  /**
+   * F7 删除分流规则：**二次确认 + 撤销**。
+   *
+   * 它长得像一颗无关紧要的 ✕，实际后果是"往这个文件夹丢的资料以后不再落到那个目录了"——
+   * 而用户下次发现时，东西已经堆在别处好几天了（同类的删笔记/删对话早就有确认，
+   * 这里是同一套标准里唯一漏掉的一个）。
+   *
+   * 确认之外**还要给撤销**：确认能挡住误点，挡不住"点完才想起来它有用"。
+   */
+  const removeRoute = async (r: { name: string; dest: string; builtin?: boolean }): Promise<void> => {
+    const okd = await ui.confirm({
+      title: '删除这条分流规则？',
+      message: `「投递箱/${r.name} → ${r.dest}/」\n\n删除后，往这个文件夹里丢的资料会按默认规则处理。`,
+      danger: true,
+      okText: '删除',
+    })
+    if (!okd) return
+    const before = routes
+    await save(routes.filter((x) => x.name !== r.name), `已删除「${r.name}」的分流规则`, {
+      label: '撤销',
+      onClick: () => void save(before, `已恢复「${r.name}」的分流规则`),
+    })
   }
 
   return (
@@ -932,7 +980,8 @@ function RoutesSection() {
               <span className="text-xs text-muted">内置</span>
             ) : (
               <button
-                onClick={() => void save(routes.filter((x) => x.name !== r.name))}
+                data-testid={`route-delete-${r.name}`}
+                onClick={() => void removeRoute(r)}
                 className="rounded px-1 text-sm text-muted hover:text-accent"
                 title="删除规则"
               >
@@ -1436,6 +1485,32 @@ function SettingsPage({
   onUnlockAdmin: () => void
 }) {
   const [nick, setNickDraft] = useState(nickname ?? '')
+  /**
+   * F7 昵称：改完即存（防抖 600ms）+ 一句轻 toast。
+   * 只挂 `onBlur` 的话，填完直接关窗口/切页面那次输入是**静默丢掉**的——
+   * 而"填了没生效"和"我没填"在用户那里长得一模一样。
+   * 失焦时再存一次（`saveNickNow`）把防抖窗口内的最后一次补上。
+   */
+  const nickTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSavedNick = useRef(nickname ?? '')
+  const saveNickNow = useCallback(
+    (v: string) => {
+      if (nickTimer.current) clearTimeout(nickTimer.current)
+      if (v === lastSavedNick.current) return // 没变过就别刷 toast（切个焦点冒一条"已保存"是噪音）
+      lastSavedNick.current = v
+      onNickname(v)
+      ui.toast('昵称已保存', 'ok')
+    },
+    [onNickname]
+  )
+  const saveNickLater = useCallback(
+    (v: string) => {
+      if (nickTimer.current) clearTimeout(nickTimer.current)
+      nickTimer.current = setTimeout(() => saveNickNow(v), 600)
+    },
+    [saveNickNow]
+  )
+  useEffect(() => () => void (nickTimer.current && clearTimeout(nickTimer.current)), [])
   const [aiReady, setAiReady] = useState(true)
   const [tiers, setTiers] = useState<AiTier[]>([])
   const [taps, setTaps] = useState(0)
@@ -1487,9 +1562,18 @@ function SettingsPage({
         <div className="flex items-center gap-2 text-md">
           <span className="shrink-0 text-muted">昵称</span>
           <input
+            data-testid="nickname-input"
             value={nick}
-            onChange={(e) => setNickDraft(e.target.value)}
-            onBlur={() => onNickname(nick)}
+            /**
+             * F7：**改完即存**（防抖 600ms）+ 一句轻 toast。
+             * 原来只挂 `onBlur`——填完直接关窗口/切页面的话，那次输入是**静默丢掉**的，
+             * 而"填了没生效"和"我没填"在用户那里长得一模一样。
+             */
+            onChange={(e) => {
+              setNickDraft(e.target.value)
+              saveNickLater(e.target.value)
+            }}
+            onBlur={() => saveNickNow(nick)}
             placeholder="留空则首页只显示问候语"
             className="flex-1 rounded-md border border-line bg-bg px-3 py-1.5 text-base outline-none focus:border-accent"
           />

@@ -97,6 +97,25 @@ export function judgeWrite(
   return { kind: 'ask', rel: v.rel }
 }
 
+/**
+ * 「本会话此目录不再问」的批准键（F24，借 Codex `with_cached_approval` 的形状）。
+ *
+ * 键 = **动作类 + 目录前缀**，不是具体文件：用户点头的心理契约是
+ * 「这个目录里的东西你可以改」，不是「这一个文件你可以改一次」——
+ * 按文件记的话，AI 改同一个目录里第二个文件时又要问一遍，那这一档等于没有。
+ *
+ * **粒度不能再粗**：不做"整个库不再问"。库根一放开，AI 就可以改任何一篇笔记，
+ * 而这道确认存在的全部理由就是"别让它乱改知识库"（HANDOFF 里「故意不做」的那条，
+ * 当时的理由是没有安全的记忆位置；现在有了做法，但边界要收在目录这一级）。
+ *
+ * `Write` 与 `Edit` 归同一类：对用户来说都是"改这个目录里的文件"，
+ * 分开记只会让他为同一件事点两次头。
+ */
+export function approvalKey(tool: string, rel: string): string {
+  const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+  return `write:${dir}`
+}
+
 /** 走查/冒烟要拿这张表做断言，所以导出 */
 export const FORBIDDEN = { segments: PROTECTED_SEGMENTS, files: PROTECTED_FILES }
 export const PROTECTED = FORBIDDEN

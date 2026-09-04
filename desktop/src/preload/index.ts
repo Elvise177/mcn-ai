@@ -96,6 +96,10 @@ const inbox = {
   /** B3b：显式发起一次全库标签升级（独立任务，可停止） */
   tagBackfill: () => ipcRenderer.invoke('inbox:tagBackfill'),
   openFailed: () => ipcRenderer.invoke('inbox:openFailed'),
+  /** F6：盘上 `.failed/` 里的失败件清单（常驻入口用它，不依赖那一轮的事件） */
+  failedList: () => ipcRenderer.invoke('inbox:failedList'),
+  /** F6：把失败件整批重投进投递箱（走与拖入完全同一条链路） */
+  retryFailed: () => ipcRenderer.invoke('inbox:retryFailed'),
   cancel: () => ipcRenderer.invoke('inbox:cancel'),
 }
 const auth = {
@@ -127,7 +131,9 @@ const chat = {
     ipcRenderer.on('agent:confirm-write', listener)
     return () => ipcRenderer.removeListener('agent:confirm-write', listener)
   },
-  confirmWrite: (id: string, allow: boolean) => ipcRenderer.invoke('agent:confirmWrite', id, allow),
+  /** scope='session' = F24「本会话此目录不再问」；不传就是只批准这一次 */
+  confirmWrite: (id: string, allow: boolean, scope?: 'once' | 'session') =>
+    ipcRenderer.invoke('agent:confirmWrite', id, allow, scope),
   undoWrite: (id: string) => ipcRenderer.invoke('agent:undoWrite', id),
   /** 诊断口：当前库的对话 system prompt（只读；走查用它扫"通用库不许有 MCN 字眼"） */
   systemPrompt: () => ipcRenderer.invoke('agent:systemPrompt'),

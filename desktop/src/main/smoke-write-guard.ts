@@ -1,4 +1,4 @@
-import { judgeWrite, isPathWritable, FORBIDDEN } from './agent/write-guard'
+import { approvalKey, judgeWrite, isPathWritable, FORBIDDEN } from './agent/write-guard'
 import { join } from 'path'
 
 /**
@@ -17,6 +17,10 @@ const ok = (m: string): void => console.log(`  ✓ ${m}`)
 const fail = (m: string, got: unknown = ''): void => {
   bad++
   console.log(`  ✗ ${m} —— 实得 ${JSON.stringify(got)}`)
+}
+/** 布尔断言（本文件原来只有 ok/fail 两个打印器，没有"判一下"的入口） */
+const check = (label: string, cond: boolean, got: unknown = ''): void => {
+  cond ? ok(label) : fail(label, got)
 }
 const expect = (label: string, p: string, want: 'allow-artifact' | 'ask' | 'deny', root = ROOT): void => {
   const v = judgeWrite(p, root, ART)
@@ -180,6 +184,29 @@ async function undoTests(): Promise<void> {
   }
 
   await fs.rm(root, { recursive: true, force: true })
+}
+
+console.log('\n【7b】approvalKey：「本会话此目录不再问」的批准粒度（F24）')
+{
+  // 键 = 动作类 + **目录前缀**，不是具体文件：用户点头的心理契约是
+  // 「这个目录里的东西你可以改」；按文件记的话，改同目录第二个文件又要问一遍 = 这一档等于没有
+  check(
+    '同目录不同文件是同一个键',
+    approvalKey('Write', '80_资料库/工作/a.md') === approvalKey('Edit', '80_资料库/工作/b.md')
+  )
+  check(
+    '不同目录必须是不同的键（不许一次点头放开整个库）',
+    approvalKey('Write', '80_资料库/工作/a.md') !== approvalKey('Write', '20_公司管理/a.md')
+  )
+  check(
+    '父子目录也不是同一个键（点头的是这一层，不是它下面所有层）',
+    approvalKey('Write', '80_资料库/a.md') !== approvalKey('Write', '80_资料库/工作/a.md')
+  )
+  check(
+    'Write 与 Edit 归同一类（对用户是同一件事，不该点两次头）',
+    approvalKey('Write', 'x/a.md') === approvalKey('Edit', 'x/a.md')
+  )
+  check('库根下的文件有自己的键', approvalKey('Write', '欢迎.md') === 'write:')
 }
 
 // 打包目标是 CJS，不支持顶层 await——包一层

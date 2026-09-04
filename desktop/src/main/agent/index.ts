@@ -20,7 +20,7 @@ import { attachmentNote, stageAttachments } from './attachments'
 import type { AgentTask } from '../tasks/types'
 import { conversationMessages, type ChatMessage } from './conversations'
 import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
-import { judgeWrite } from './write-guard'
+import { approvalKey, judgeWrite } from './write-guard'
 import { buildSystemPrompt } from './system-prompt'
 import { judgeTimeout, resolveTimeoutMs } from './timeout'
 import { readVaultConfig } from '../vault/taxonomy'
@@ -208,16 +208,39 @@ export class AgentManager {
    */
   private writeWaiters = new Map<string, (d: { allow: boolean; reason?: string }) => void>()
 
+  /**
+   * F24「本会话此目录不再问」的批准缓存（借 Codex `with_cached_approval` 的形状）。
+   *
+   * `sessionId → Set<批准键>`，键 = 动作类 + 目录前缀（见 `write-guard.approvalKey`）。
+   * **只在内存里**：重启即失效——把"我允许过"落盘等于把一道安全边界永久打开，
+   * 而用户当时点头的语境（这一轮在做什么）早就没了。
+   *
+   * HANDOFF 里「本会话全部允许」原来记的是**故意不做**，理由是"没有安全的记忆位置"。
+   * 现在位置有了（主进程内存 + 按会话 + 按目录），所以做，但边界收在目录这一级。
+   */
+  private approvals = new Map<string, Set<string>>()
+
+  /**
+   * 换库 / 删对话时清掉。**换库必须清**：批准键是"目录前缀"，
+   * 换个库之后同名目录是完全不同的一批文件，留着等于凭空给新库开了口子。
+   */
+  clearApprovals(sessionId?: string): void {
+    if (sessionId) this.approvals.delete(sessionId)
+    else this.approvals.clear()
+  }
+
   private askWrite(
     sessionId: string,
     info: { rel: string; tool: string; summary: string }
   ): Promise<{ allow: boolean; reason?: string }> {
     if (!hasWindow()) return Promise.resolve({ allow: false, reason: 'no-window' })
     const id = `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+    this.pendingWrites.set(id, { sessionId, key: approvalKey(info.tool, info.rel) })
     return new Promise((resolve) => {
       const done = (d: { allow: boolean; reason?: string }): void => {
         if (!this.writeWaiters.has(id)) return
         this.writeWaiters.delete(id)
+        this.pendingWrites.delete(id)
         clearTimeout(timer)
         // **角标在这儿减**：超时那条不走 resolveWriteConfirm，只在那边减的话
         // 一次没人理的确认会把角标永远挂在 Dock 上
@@ -238,9 +261,20 @@ export class AgentManager {
   }
 
   /** 渲染层点了允许/拒绝之后回到这里 */
-  resolveWriteConfirm(id: string, allow: boolean): void {
+  /** 渲染层点了允许/拒绝之后回到这里。`scope='session'` = F24 的「本会话此目录不再问」 */
+  resolveWriteConfirm(id: string, allow: boolean, scope?: 'once' | 'session'): void {
+    const pending = this.pendingWrites.get(id)
+    if (allow && scope === 'session' && pending) {
+      const set = this.approvals.get(pending.sessionId) ?? new Set<string>()
+      set.add(pending.key)
+      this.approvals.set(pending.sessionId, set)
+      log('info', 'agent', `本会话已批准目录：${pending.key}`)
+    }
     this.writeWaiters.get(id)?.({ allow, reason: allow ? undefined : 'denied' })
   }
+
+  /** 每张待答确认卡对应的会话与批准键（答「本会话不再问」时要用） */
+  private pendingWrites = new Map<string, { sessionId: string; key: string }>()
 
   /**
    * 停止生成（H-09）：已经流出来的半截回答**落成一条 assistant 消息**再 abort。
@@ -685,11 +719,18 @@ export class AgentManager {
               }
               // ask：问用户。**60 秒不理默认拒**——一轮对话不能无限期挂在一个弹窗上
               const root = vaultManager.currentRoot!
-              const decision = await this.askWrite(sessionId, {
-                rel: verdict.rel,
-                tool: toolName,
-                summary: summarizeWrite(toolName, input),
-              })
+              /**
+               * F24：这个会话里他已经对**这个目录**点过「不再问」了就直接放行。
+               * 仍然照常备份 + 发撤销 toast——"不再问"放开的是**打断**，不是**可追溯**。
+               */
+              const approved = this.approvals.get(sessionId)?.has(approvalKey(toolName, verdict.rel))
+              const decision = approved
+                ? { allow: true }
+                : await this.askWrite(sessionId, {
+                    rel: verdict.rel,
+                    tool: toolName,
+                    summary: summarizeWrite(toolName, input),
+                  })
               if (!decision.allow) {
                 return {
                   behavior: 'deny' as const,

@@ -41,11 +41,14 @@ export function WriteConfirm() {
     return () => window.removeEventListener('keydown', onKey)
   }, [req])
 
-  const answer = (allow: boolean): void => {
+  const answer = (allow: boolean, scope?: 'once' | 'session'): void => {
     if (!req) return
-    void window.api.chat.confirmWrite(req.id, allow)
+    void window.api.chat.confirmWrite(req.id, allow, scope)
     setReq(null)
   }
+
+  /** 这次要改的是哪个目录（F24 的「本会话此目录不再问」放开的就是它） */
+  const dir = req?.rel.includes('/') ? req.rel.slice(0, req.rel.lastIndexOf('/')) : '知识库根目录'
 
   if (!req) return null
   return (
@@ -65,7 +68,14 @@ export function WriteConfirm() {
           <ShieldAlert size={13} className="mt-0.5 shrink-0" />
           <span>允许后会先备份原文，改完可以一键撤销。{left} 秒内不选择将自动取消。</span>
         </div>
-        <div className="mt-4 flex justify-end gap-2">
+        {/*
+          F24 三档。中间那颗是这一版新加的：**它放开的是"打断"，不是"可追溯"**——
+          点了之后同一个目录不再弹卡，但备份与撤销 toast 照旧。
+          范围**收在目录这一级**，不给"整个库不再问"：库根一放开，这道确认就等于没有。
+          HANDOFF 里这条原来记的是「故意不做」，理由是没有安全的记忆位置；
+          现在位置有了（主进程内存 + 按会话 + 按目录），重启即失效。
+        */}
+        <div className="mt-4 flex flex-wrap justify-end gap-2">
           <button
             data-testid="write-deny"
             autoFocus
@@ -75,8 +85,16 @@ export function WriteConfirm() {
             不允许
           </button>
           <button
+            data-testid="write-allow-session"
+            title={`之后 AI 再改「${dir}」里的文件就不再弹这张卡（本次运行有效，重启即失效）`}
+            onClick={() => answer(true, 'session')}
+            className="rounded-full border border-line px-4 py-1.5 text-sm hover:bg-hover"
+          >
+            允许，且此目录不再问
+          </button>
+          <button
             data-testid="write-allow"
-            onClick={() => answer(true)}
+            onClick={() => answer(true, 'once')}
             className="rounded-full bg-accent px-4 py-1.5 text-sm text-white hover:opacity-90"
           >
             允许修改

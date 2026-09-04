@@ -266,6 +266,79 @@ export class InboxOrchestrator {
     return { ok: true }
   }
 
+  /** 最近一天的 `.failed/` 目录（目录名是 YYYYMMDD）；没有就是 null */
+  private async latestFailedDir(): Promise<string | null> {
+    if (!this.inboxDir) return null
+    const root = join(this.inboxDir, '.failed')
+    if (!existsSync(root)) return null
+    const days = (await fs.readdir(root)).filter((d) => /^\d{8}$/.test(d)).sort()
+    return days.length ? join(root, days[days.length - 1]) : null
+  }
+
+  /**
+   * 失败件清单（F6）——**从盘上读，不是从事件里读**。
+   *
+   * 界面上那份清单来自 `convert_failures` 事件，只在那一轮的面板里活着：
+   * 面板会自动收起、应用会重启，而"哪些文件没进来"是用户过几天还要回头查的东西。
+   * 盘上的 `.failed/<日期>/` 才是持久记录，这里把它读成清单。
+   */
+  async failedList(): Promise<{ ok: boolean; dir?: string; files?: Array<{ name: string; reason?: string }>; error?: string }> {
+    if (!this.inboxDir) return { ok: false, error: '还没有打开知识库' }
+    const dir = await this.latestFailedDir()
+    if (!dir) return { ok: true, files: [] }
+    let reasons: Record<string, string> = {}
+    try {
+      // `失败原因.txt` 是 pipeline 写的，一行一个「文件名 —— 原因」
+      const raw = await fs.readFile(join(dir, '失败原因.txt'), 'utf-8')
+      reasons = Object.fromEntries(
+        raw
+          .split('\n')
+          .map((l) => l.split(/\s+—+\s+|\s+--\s+/))
+          .filter((p) => p.length >= 2)
+          .map((p) => [p[0].trim(), p.slice(1).join(' ').trim()])
+      )
+    } catch {
+      /* 没有原因文件也照常列文件名：知道是哪几个已经比什么都没有强 */
+    }
+    const entries = await fs.readdir(dir, { withFileTypes: true })
+    const files = entries
+      .filter((e) => e.isFile() && e.name !== '失败原因.txt' && !e.name.startsWith('.'))
+      .map((e) => ({ name: e.name, reason: reasons[e.name] }))
+    return { ok: true, dir, files }
+  }
+
+  /**
+   * 把失败件**整批重投**（F6）。
+   *
+   * 为什么值得做：`.failed/` 里躺的是原件，用户唯一的补救办法原来是
+   * 「在访达里打开 → 手动拖回投递箱」——十几个文件就是十几次拖拽，
+   * 而失败往往是一次性的（转换器缺依赖、文件当时被占用），修好之后本该一键重来。
+   *
+   * **重投等于 enqueue**：走的是与拖入完全同一条链路（含格式护栏与计数），
+   * 不另起一套。成功进队之后把 `.failed/` 里那几份删掉——留着的话下次重投会重复入队。
+   */
+  async retryFailed(): Promise<{ ok: boolean; requeued?: number; skipped?: number; error?: string }> {
+    if (!this.inboxDir) return { ok: false, error: '还没有打开知识库' }
+    const dir = await this.latestFailedDir()
+    if (!dir) return { ok: false, error: '没有失败记录可以重试' }
+    const list = await this.failedList()
+    const paths = (list.files ?? []).map((f) => join(dir, f.name))
+    if (!paths.length) return { ok: false, error: '没有失败记录可以重试' }
+    const r = await this.enqueue(paths)
+    if (r.added > 0) {
+      // 进了队就把这一份挪走：不删的话下一次「全部重试」会把同样的文件再投一遍
+      for (const p of paths) {
+        try {
+          await fs.rm(p, { force: true })
+        } catch (e) {
+          log('warn', 'inbox', `重投后清理失败件出错：${p} ${e}`)
+        }
+      }
+    }
+    log('info', 'inbox', `失败件重投：进队 ${r.added} 个，跳过 ${r.skippedUnsupported + r.skippedJunk} 个`)
+    return { ok: true, requeued: r.added, skipped: r.skippedUnsupported + r.skippedJunk }
+  }
+
   /** 重启后把上一轮结果塞回 recent —— 面板上仍能看到「上次 6/6 完成」 */
   private seedFromDisk(): void {
     const r = getLastInboxRun()
