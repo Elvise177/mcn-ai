@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check, RotateCcw, AlertTriangle, Search } from 'lucide-react'
+import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check, RotateCcw, AlertTriangle, Search, Pencil, RefreshCw } from 'lucide-react'
 import { FastMarkdown } from '../components/Markdown'
 import { FileIcon } from '../components/FileIcon'
 import { ui } from '../components/ui'
@@ -37,6 +37,8 @@ export default function Workbench({
   conv,
   onSend,
   onRetry,
+  onEditResend,
+  onRegenerate,
   onOpenNote,
   nickname,
   recentConvs,
@@ -49,6 +51,10 @@ export default function Workbench({
   /** M-11：重发错误气泡前面那条 user 消息，并把错误气泡就地撤掉。
       tier 传值 = 换档重试（增强档线路失败时的出口） */
   onRetry: (index: number, tier?: TierId) => Promise<boolean>
+  /** F9 编辑重发：改掉第 index 条提问，撤掉它之后的内容，按新文本重发 */
+  onEditResend: (index: number, text: string) => Promise<boolean>
+  /** F9 重新生成：**不撤旧回答**，用上一条提问再跑一轮，答案追加在后面 */
+  onRegenerate: (index: number) => Promise<boolean>
   onOpenNote: (wikiTarget: string) => void
   nickname?: string
   recentConvs: Conversation[]
@@ -195,6 +201,10 @@ export default function Workbench({
     },
     [streaming, onRetry]
   )
+
+  /** F9：正在编辑的那条提问（下标）与编辑中的文本；null = 没在编辑 */
+  const [editing, setEditing] = useState<{ index: number; text: string } | null>(null)
+  useEffect(() => setEditing(null), [conv.id])
 
   const tier: TierId = conv.tier ?? 'standard'
 
@@ -384,7 +394,47 @@ export default function Workbench({
               <div className="mx-auto max-w-3xl space-y-5">
                 {messages.map((m, i) =>
                   m.role === 'user' ? (
-                    <div key={i} data-msg-index={i} className="flex justify-end">
+                    <div key={i} data-msg-index={i} data-role="user" className="group flex flex-col items-end">
+                      {editing?.index === i ? (
+                        /**
+                         * F9 编辑态：Enter 保存重发、Esc 取消（同 WorkBuddy）。
+                         * **原文预填**——让用户在原话上改，而不是重新打一遍，这正是这个功能的目的。
+                         */
+                        <div data-testid="edit-box" className="w-[80%] rounded-xl border border-accent bg-card p-2">
+                          <textarea
+                            autoFocus
+                            value={editing.text}
+                            onChange={(e) => setEditing({ index: i, text: e.target.value })}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape') return setEditing(null)
+                              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                                e.preventDefault()
+                                const text = editing.text
+                                setEditing(null)
+                                void onEditResend(i, text)
+                              }
+                            }}
+                            rows={2}
+                            className="w-full resize-none bg-transparent text-md leading-6 outline-none"
+                          />
+                          <div className="mt-1 flex justify-end gap-2 text-xs text-muted">
+                            <button data-testid="edit-cancel" onClick={() => setEditing(null)} className="rounded-full border border-line px-2.5 py-0.5 hover:bg-hover">
+                              取消（Esc）
+                            </button>
+                            <button
+                              data-testid="edit-send"
+                              onClick={() => {
+                                const text = editing.text
+                                setEditing(null)
+                                void onEditResend(i, text)
+                              }}
+                              className="rounded-full bg-accent px-2.5 py-0.5 text-on-solid hover:opacity-90"
+                            >
+                              重新发送（Enter）
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
                       <div
                         className={`max-w-[80%] rounded-xl bg-surface px-4 py-2.5 text-md ${
                           findHit === i ? 'ring-2 ring-accent' : ''
@@ -417,11 +467,36 @@ export default function Workbench({
                         )}
                         {m.text}
                       </div>
+                      )}
+                      {/* F9 提问气泡的两个动作：hover 才出，静态时历史保持干净 */}
+                      {editing?.index !== i && (
+                        <div className="mt-1 hidden gap-2 group-hover:flex">
+                          <button
+                            data-testid="user-copy"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(m.text)
+                              ui.toast('已复制')
+                            }}
+                            className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-muted hover:text-accent"
+                          >
+                            <Copy size={11} /> 复制
+                          </button>
+                          <button
+                            data-testid="user-edit"
+                            disabled={streaming}
+                            onClick={() => setEditing({ index: i, text: m.text })}
+                            className="inline-flex items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-muted hover:text-accent disabled:opacity-50"
+                          >
+                            <Pencil size={11} /> 编辑重发
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div
                       key={i}
                       data-msg-index={i}
+                      data-role="assistant"
                       className={`group flex gap-3 ${findHit === i ? 'rounded-md ring-2 ring-accent' : ''}`}
                     >
                       {/* 出错那条的圆点走红：语义色留给"持续存在的状态"，一条错误回答
@@ -483,6 +558,7 @@ export default function Workbench({
                             </>
                           )}
                           <button
+                            data-testid="assistant-copy"
                             onClick={() => {
                               navigator.clipboard.writeText(m.text)
                               ui.toast('已复制')
@@ -491,6 +567,18 @@ export default function Workbench({
                           >
                             <Copy size={11} /> 复制
                           </button>
+                          {/* F9 重新生成：**不撤旧回答**，答案追加在后面，两个并排让用户自己挑。
+                              出错那条已经有「重试」了（那是"当没发生过"），别在同一条上摆两颗意思相反的按钮 */}
+                          {!m.error && messages.slice(0, i).some((x) => x.role === 'user') && (
+                            <button
+                              data-testid="regenerate"
+                              disabled={streaming}
+                              onClick={() => void onRegenerate(i)}
+                              className="hidden items-center gap-1 rounded-full border border-line px-2.5 py-0.5 text-xs text-muted hover:text-accent disabled:opacity-50 group-hover:inline-flex"
+                            >
+                              <RefreshCw size={11} /> 重新生成
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>

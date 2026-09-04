@@ -437,6 +437,54 @@ export default function App() {
     []
   )
 
+  /**
+   * F9 编辑重发：改掉某条提问 → **把它之后的内容整段撤掉**，按新文本重发。
+   *
+   * 为什么要撤后面的：改了问题却把旧回答留着，历史读起来就是自相矛盾的
+   * （问的是 A，下面挂着 B 的答案）。这与 M-11 重试撤掉失败那一轮是同一条原则。
+   *
+   * **`sdkSessionId` 保留不动**：SDK 那边的会话里确实还留着原来那句问法，
+   * 但断掉它意味着这一轮完全没有上文——两害相权，保留上文更接近用户要的东西
+   * （最新一轮说的才是他现在想问的）。同 `handleRetry` 的取向。
+   */
+  const handleEditResend = useCallback(
+    async (index: number, text: string): Promise<boolean> => {
+      const base = activeRef.current
+      if (!text.trim()) return false
+      trimStepGroups(base.id, index)
+      upsert({ ...base, messages: base.messages.slice(0, index), updatedAt: Date.now() })
+      return handleSend(text)
+    },
+    [upsert, handleSend]
+  )
+
+  /**
+   * F9 重新生成：**不撤旧回答，追加一轮新的**。
+   *
+   * 与「重试」刻意不同：重试是"那一轮失败了，当没发生过"；重新生成是"这个答案我不满意，
+   * 再来一个"——两个答案并排摆着，用户自己挑。撤掉旧的等于替他做了决定，
+   * 而旧答案里往往有他想留的一段。
+   */
+  const handleRegenerate = useCallback(async (index: number): Promise<boolean> => {
+    const base = activeRef.current
+    const lastUserIdx = base.messages.slice(0, index).map((m) => m.role).lastIndexOf('user')
+    if (lastUserIdx < 0) return false
+    const r = await window.api.chat.send(
+      base.id,
+      base.messages[lastUserIdx].text,
+      base.sdkSessionId,
+      base.tier ?? 'standard'
+    )
+    if (r && r.ok === false) {
+      ui.toast(r.error ?? '这个对话还在生成中', 'error', {
+        label: '停止当前生成',
+        onClick: () => void window.api.chat.stop(base.id),
+      })
+      return false
+    }
+    return true
+  }, [])
+
   const openNoteFromChat = useCallback(async (wikiTarget: string) => {
     const resolved = await window.api.vault.resolveLink(wikiTarget)
     if (resolved) {
@@ -595,6 +643,8 @@ export default function App() {
               conv={active}
               onSend={handleSend}
               onRetry={handleRetry}
+              onEditResend={handleEditResend}
+              onRegenerate={handleRegenerate}
               onOpenNote={openNoteFromChat}
               nickname={nickname}
               recentConvs={sortedConvs}

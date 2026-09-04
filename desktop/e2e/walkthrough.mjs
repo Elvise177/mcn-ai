@@ -2622,7 +2622,7 @@ try {
       // 预检失败的错误是**同步**发回来的，抢在 React 提交用户那条消息之前——
       // 旧代码那一下会把刚发出去的提问整条盖掉（历史里只剩一条 ⚠️，重试也就无从谈起）
       const userBubbles = await win.evaluate(
-        () => [...document.querySelectorAll('.max-w-3xl > div')].filter((b) => b.className.includes('justify-end')).length
+        () => document.querySelectorAll('[data-role="user"]').length
       )
       if (userBubbles !== 1) throw new Error(`发出去的提问没留在历史里：user 气泡 ${userBubbles} 个`)
       /**
@@ -2674,7 +2674,7 @@ try {
       const counts = await win.evaluate(() => {
         const bubbles = [...document.querySelectorAll('.max-w-3xl > div')]
         return {
-          user: bubbles.filter((b) => b.className.includes('justify-end')).length,
+          user: document.querySelectorAll('[data-role="user"]').length,
           err: document.querySelectorAll('[data-testid="retry-answer"]').length,
         }
       })
@@ -2778,7 +2778,7 @@ try {
         await win.locator('button[title="停止生成"]').waitFor({ timeout: 20000 }).catch(() => {})
         await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 180000 })
         const async1 = await win.evaluate(() => ({
-          user: [...document.querySelectorAll('.max-w-3xl > div')].filter((b) => b.className.includes('justify-end')).length,
+          user: document.querySelectorAll('[data-role="user"]').length,
           err: document.querySelectorAll('[data-testid="retry-answer"]').length,
         }))
         if (async1.user !== 1)
@@ -2796,7 +2796,7 @@ try {
         await win.locator('[data-testid="retry-answer"]').waitFor({ timeout: 180000 })
         const async2 = await win.evaluate(() => ({
           gone: window.__m11bGone,
-          user: [...document.querySelectorAll('.max-w-3xl > div')].filter((b) => b.className.includes('justify-end')).length,
+          user: document.querySelectorAll('[data-role="user"]').length,
           err: document.querySelectorAll('[data-testid="retry-answer"]').length,
         }))
         if (!async2.gone) throw new Error('异步出错时点重试，错误气泡从没被撤掉过（重发没发生）')
@@ -5589,6 +5589,76 @@ try {
     await win.waitForTimeout(300)
     if (await win.locator('[data-testid="chat-find"]').count()) throw new Error('Esc 之后查找条没关掉')
     console.log('会话内查找 ✓', JSON.stringify({ 首次: count.trim(), 下一处: count2.trim() }))
+  }
+
+  // ---- F9 消息操作：复制 / 编辑重发 / 重新生成 / 代码块复制 ----
+  {
+    await win.evaluate(async () => {
+      await window.api.chat.save({
+        id: 'e2e-msgops',
+        title: 'e2e 消息操作样例',
+        messages: [
+          { role: 'user', text: '把这段脚本给我' },
+          { role: 'assistant', text: '好的：\n\n```bash\necho "hello samepage"\n```\n\n拿去用。' },
+        ],
+        updatedAt: Date.now(),
+      })
+    })
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(1500)
+    await win.click('[data-testid="conv-row"]:has-text("e2e 消息操作样例")')
+    await win.waitForTimeout(500)
+
+    // ① 提问气泡：hover 才出「复制 / 编辑重发」，静态时历史保持干净
+    const userBubble = win.locator('[data-msg-index="0"]')
+    if (await userBubble.locator('[data-testid="user-edit"]').isVisible())
+      throw new Error('提问气泡的操作按钮静态就露出来了（应该 hover 才出）')
+    await userBubble.hover()
+    await win.locator('[data-testid="user-edit"]').waitFor({ timeout: 5000 })
+    await snapHover('66-提问气泡-复制与编辑重发')
+
+    // ② 编辑态：**原文预填**（让人在原话上改，而不是重新打一遍，这正是这功能的目的）
+    await win.click('[data-testid="user-edit"]')
+    await win.locator('[data-testid="edit-box"]').waitFor({ timeout: 5000 })
+    const prefill = await win.locator('[data-testid="edit-box"] textarea').inputValue()
+    if (prefill !== '把这段脚本给我') throw new Error(`编辑态没有预填原文：「${prefill}」`)
+    await snap('66b-编辑重发-原文预填', 200)
+    // Esc 取消：**不许把消息改掉**
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(300)
+    if (await win.locator('[data-testid="edit-box"]').count()) throw new Error('Esc 之后没退出编辑态')
+    const afterCancel = await win.evaluate(async () => {
+      const list = await window.api.chat.list()
+      return list.find((c) => c.id === 'e2e-msgops')?.messages[0]?.text
+    })
+    if (afterCancel !== '把这段脚本给我') throw new Error(`取消编辑却把消息改了：「${afterCancel}」`)
+
+    // ③ 代码块复制：hover 出按钮，点了之后剪贴板里必须是**代码本身**（不含围栏与正文）
+    const codeBlock = win.locator('.code-block').first()
+    await codeBlock.waitFor({ timeout: 5000 })
+    if (await codeBlock.locator('[data-code-copy]').evaluate((el) => getComputedStyle(el).opacity !== '0'))
+      throw new Error('代码块的复制按钮静态就露出来了（应该 hover 才出）')
+    await codeBlock.hover()
+    await win.waitForTimeout(300)
+    await snapHover('66c-代码块-复制按钮')
+    await codeBlock.locator('[data-code-copy]').click()
+    await win.waitForTimeout(300)
+    const copied = await win.evaluate(() => navigator.clipboard.readText())
+    if (copied.trim() !== 'echo "hello samepage"')
+      throw new Error(`代码块复制到的不是代码本身：「${copied}」`)
+    // 点完给回执：没有回执的话用户不知道到底复制上没有
+    if (!/已复制/.test(await codeBlock.locator('[data-code-copy]').innerText()))
+      throw new Error('代码块复制之后按钮没有给回执')
+    console.log('F9 消息操作 ✓', JSON.stringify({ 预填: prefill, 代码块: copied.trim() }))
+
+    // ④ 回答气泡上有「重新生成」，且**出错那条不给**（那条上是「重试」，两者语义相反）
+    const answer = win.locator('[data-msg-index="1"]')
+    await answer.hover()
+    await win.waitForTimeout(300)
+    if (!(await win.locator('[data-testid="regenerate"]').count()))
+      throw new Error('回答气泡上没有「重新生成」')
+    console.log('F9 重新生成入口 ✓')
   }
 
   // ==== PLAN-v2 批 2：静默消灭 + 透明度 ====

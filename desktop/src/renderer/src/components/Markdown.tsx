@@ -62,6 +62,21 @@ export function assetUrl(src: string, baseDir?: string): string | null {
   return `mcnai-asset://v/${enc}`
 }
 
+/**
+ * 给每个代码块套一层带「复制」的壳（F9）。
+ *
+ * **必须放在 sanitize 之后**：加进去的是我们自己的标签，不该再过一遍消毒
+ * （DOMPurify 默认会把 `data-*` 之类留着，但顺序反了就等于让用户内容有机会伪造这颗按钮）。
+ *
+ * 为什么值得做：AI 给的脚本/表格/JSON 是要**拿去用**的，而在气泡里手动框选一段代码
+ * 极容易连行号、连前后文一起选中。整段复制这件事本身就是这个功能的目的。
+ */
+function wrapCodeBlocks(html: string): string {
+  return html
+    .replace(/<pre>/g, '<div class="code-block"><button type="button" data-code-copy title="复制代码">复制</button><pre>')
+    .replace(/<\/pre>/g, '</pre></div>')
+}
+
 /** 改写 HTML 里所有 `<img src>`。**放在 sanitize 之后**：改完就是我们自己的协议，不再经用户内容 */
 function rewriteImages(html: string, baseDir?: string): string {
   return html.replace(/(<img\b[^>]*?\bsrc=")([^"]*)(")/gi, (m, pre, src, post) => {
@@ -85,9 +100,11 @@ export function FastMarkdown({
     const pre = body.replace(WIKI_RE, (_m, target: string, alias?: string) =>
       `[${alias || target}](wiki:${encodeURIComponent(target.trim())})`
     )
-    return rewriteImages(
-      DOMPurify.sanitize(marked.parse(pre, { gfm: true, breaks: false, async: false }), PURIFY_CFG),
-      baseDir
+    return wrapCodeBlocks(
+      rewriteImages(
+        DOMPurify.sanitize(marked.parse(pre, { gfm: true, breaks: false, async: false }), PURIFY_CFG),
+        baseDir
+      )
     )
   }, [body, baseDir])
 
@@ -95,7 +112,22 @@ export function FastMarkdown({
     <div
       className="md-article"
       onClick={(e) => {
-        const a = (e.target as HTMLElement).closest('a')
+        const el = e.target as HTMLElement
+        // F9 代码块复制：事件委托，不给每个块挂一个 React 组件（正文可能有几十个块）
+        const copy = el.closest('[data-code-copy]')
+        if (copy) {
+          e.preventDefault()
+          const code = copy.parentElement?.querySelector('pre')?.innerText ?? ''
+          if (code) {
+            void navigator.clipboard.writeText(code)
+            copy.textContent = '已复制'
+            setTimeout(() => {
+              copy.textContent = '复制'
+            }, 1500)
+          }
+          return
+        }
+        const a = el.closest('a')
         if (a) {
           e.preventDefault()
           const href = a.getAttribute('href')

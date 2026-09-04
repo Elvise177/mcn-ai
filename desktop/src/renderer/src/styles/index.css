@@ -160,6 +160,20 @@ button { transition: background-color var(--dur-fast) ease, color var(--dur-fast
   padding: 0.9em 1.1em; overflow-x: auto; margin: 0.8em 0;
 }
 .md-article pre code { background: none; padding: 0; font-size: var(--text-base); line-height: 1.6; }
+/**
+ * 代码块的「复制」按钮（F9）。**hover 才出**：一直挂着的话，正文里每个代码块右上角
+ * 都钉着一颗按钮，读代码时反而碍事。位置压在右上角内侧，不占代码的横向空间。
+ */
+.code-block { position: relative; }
+.code-block > [data-code-copy] {
+  position: absolute; top: 0.9em; right: 0.6em; z-index: 1;
+  opacity: 0; transition: opacity var(--dur-fast) var(--ease-out);
+  border: 1px solid var(--color-border); border-radius: var(--radius-full);
+  background: var(--color-card); color: var(--color-muted);
+  padding: 0.1em 0.6em; font-size: var(--text-xs); line-height: 1.6;
+}
+.code-block:hover > [data-code-copy] { opacity: 1; }
+.code-block > [data-code-copy]:hover { color: var(--color-accent-ink); }
 .md-article hr { border: none; border-top: 1px solid var(--color-border); margin: 1.5em 0; }
 .md-article img { max-width: 100%; border-radius: var(--radius-md); }
 
