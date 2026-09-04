@@ -54,7 +54,7 @@ await win.waitForTimeout(2500)
 await win.click('text=暂不登录').catch(() => {})
 await win.waitForTimeout(800)
 await win.click('aside button:has-text("知识库")').catch(() => {})
-await win.locator('input[placeholder="搜索库…"]').waitFor({ timeout: 20000 })
+await win.locator('[data-testid="vault-search"]').waitFor({ timeout: 20000 })
 // 目录默认折叠：逐级展开再点笔记（笔记是嵌在 80_资料库/工作-管理类/ 里的，
 // 正文里的引用正是 02_convert 真实产出的那种 ../../ 相对路径）
 for (const dir of ['80_资料库', '工作-管理类']) {
