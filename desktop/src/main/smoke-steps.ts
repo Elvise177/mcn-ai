@@ -1,4 +1,5 @@
 import { countToolResults, isStepWorthy, pickStepArgs, shortToolName, toolResultText } from './agent/steps'
+import { judgeResult } from './agent/result'
 import { computeInboxProgress, judgeBackfill } from './tasks/types'
 import { describeStep, durationHint, scanTarget } from '../renderer/src/config/steps'
 import { failedCount, producedArtifact, summaryText, tierNote, type SummaryStep } from '../renderer/src/lib/turn-summary'
@@ -597,6 +598,71 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   check('大小写不敏感', JSON.stringify(findInMessages([{ text: 'GMV 数据' }], 'gmv')) === '[0]')
   check('空关键词不命中任何一条（不是全部）', findInMessages(msgs, '   ').length === 0)
   check('没命中回空数组', findInMessages(msgs, '霍格沃茨').length === 0)
+}
+
+console.log('\n【R9】judgeResult：显示 / 降级 / 记账 / 会话续接，四条判据方向各不相同')
+{
+  const PRO = 'deepseek-v4-pro'
+  const usage = { input_tokens: 900, output_tokens: 120 }
+  /**
+   * **`modelUsage` 里必须真带 token**（写这几条 fixture 时自己先栽了一次）：
+   * `tokensOf` 在 `usage` 与 `modelUsage` 并存时**优先取 modelUsage**——两边说的是
+   * 同一批 token，递归求和会翻倍。所以 modelUsage 给成 `{[PRO]: {}}` 的话，
+   * 算出来的 output 是 0，`billable` 当场变 false。真实回包里两边都是齐的。
+   */
+  const mu = { [PRO]: { inputTokens: 900, outputTokens: 120 } }
+  const ok = judgeResult({ subtype: 'success', result: '答案', usage, modelUsage: mu, session_id: 's1' }, PRO)
+  check('正常一轮：ok / 可记账 / session 可续', ok.kind === 'ok' && ok.billable && ok.sessionUsable)
+  check('正常一轮不算降级', !ok.degraded && ok.resolvedModel === PRO)
+
+  // subtype 非 success：错误文本取 errors，取不到才用 subtype 兜底
+  const e1 = judgeResult({ subtype: 'error_during_execution', errors: [' 连接断了 ', ''] }, PRO)
+  check('subtype 非 success → error，文案取 errors', e1.kind === 'error' && e1.error === '连接断了', JSON.stringify(e1))
+  const e2 = judgeResult({ subtype: 'error_max_turns' }, PRO)
+  check('没有 errors 时用 subtype 兜底', e2.kind === 'error' && e2.error === '出错：error_max_turns', JSON.stringify(e2))
+
+  /**
+   * T-02：**`subtype:'success'` 但 `is_error:true`**。上游 401/403/额度不足长的就是这样，
+   * `result` 里是英文原文。旧代码把它当正常回答画进对话，紧接着又落一条 ⚠️：
+   * 同一次失败说两遍、第一条还是纯英文（截图 41c/41d/45d）。
+   */
+  const t02 = judgeResult(
+    { subtype: 'success', is_error: true, result: 'Failed to authenticate. API Error: 401', usage: { output_tokens: 0 }, session_id: 's2' },
+    PRO
+  )
+  check('T-02：success+is_error 也判成 error', t02.kind === 'error' && /401/.test(t02.error ?? ''))
+  check('T-02：不许记账', !t02.billable)
+  check('T-02：session 不许留（留了整个对话此后每次都报 No conversation found）', !t02.sessionUsable)
+
+  /**
+   * **三条判据不许合并**：`api_error_status` 在记账那边是"存疑就别计费"，
+   * 搬到显示上会把一条**真回答**判成错误、连正文一起丢掉——容错方向正好相反。
+   */
+  const amb = judgeResult({ subtype: 'success', result: '这是一段真回答', api_error_status: 500, usage, modelUsage: mu }, PRO)
+  check('api_error_status 不影响显示（正文照发）', amb.kind === 'ok', JSON.stringify(amb))
+  check('api_error_status 挡住记账（存疑就别计费）', !amb.billable)
+  check('api_error_status 也挡住 session 续接', !amb.sessionUsable)
+
+  // B-2：余额耗尽那轮 8 个失败请求全是 success + token 全 0，被记进了 jsonl
+  const zero = judgeResult({ subtype: 'success', result: '', usage: { output_tokens: 0 }, modelUsage: {} }, PRO)
+  check('零 token 的一轮不记账（B-2 实测的 8 连记）', zero.kind === 'ok' && !zero.billable)
+
+  /**
+   * 降级：`modelUsage` 里没有我们点名的模型。
+   * **不能取 `models[0]`**——一轮里主模型与轻量模型（起标题/压上下文）同时出现，
+   * key 的顺序由服务端给。标准档那轮排在前面的正是 flash，取 [0] 就等于报告
+   * "要 pro 实际 flash"，看着像降级，其实 pro 就在同一个 modelUsage 里（2026-08-17 抓到）。
+   */
+  const mixed = judgeResult({ subtype: 'success', result: 'x', usage, modelUsage: { 'deepseek-v4-flash': { outputTokens: 8 }, ...mu } }, PRO)
+  check('主模型在里面就不算降级（哪怕它排在后面）', !mixed.degraded, JSON.stringify(mixed.models))
+  check('resolvedModel 记主模型，不记排第一的那个', mixed.resolvedModel === PRO, String(mixed.resolvedModel))
+  const down = judgeResult({ subtype: 'success', result: 'x', usage, modelUsage: { 'deepseek-v4-flash': { outputTokens: 120 } } }, PRO)
+  check('主模型不在里面 = 真降级', down.degraded && down.resolvedModel === 'deepseek-v4-flash')
+  const none = judgeResult({ subtype: 'success', result: 'x', usage }, PRO)
+  check('压根没报 modelUsage 时不算降级（不知道 ≠ 被换了）', !none.degraded && none.resolvedModel === null)
+  // 这条把上面那个坑钉住：并存时只认 modelUsage，别让谁哪天"顺手"改成两边相加
+  const onlyMu = judgeResult({ subtype: 'success', result: 'x', usage: { output_tokens: 999 }, modelUsage: { [PRO]: { outputTokens: 0 } } }, PRO)
+  check('usage 与 modelUsage 并存时只认 modelUsage（不相加）', !onlyMu.billable, JSON.stringify(onlyMu))
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

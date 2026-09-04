@@ -1,6 +1,6 @@
 # SamePage 补课方案 v2（PLAN-v2）
 
-> 2026-09-02 ｜ 状态：**已批准。批 0 + 批 1 已执行（2026-09-02，见 HANDOFF §0-新d）；批 2 + 批 3 已执行（2026-09-03/04，见 HANDOFF §0-新g），随 0.1.3 发；批 5 的 R8 + S2「账本修复」已执行（2026-09-04，见 HANDOFF §0-新h，未发版）；批 4 与批 5 剩余项（R9 / F11 / R16）待做**
+> 2026-09-02 ｜ 状态：**已批准。批 0 + 批 1 已执行（2026-09-02，见 HANDOFF §0-新d）；批 2 + 批 3 已执行（2026-09-03/04，见 HANDOFF §0-新g），随 0.1.3 发；批 5 整批完成（2026-09-04，见 HANDOFF §0-新h，未发版）。下一步：批 4 刻度表，之后批 6/7**
 > 输入：`PRODUCT-AUDIT.md`（阶段一）→ v1；`REFERENCE-codex.md` / `REFERENCE-products.md` / `DESIGN-scale.md`（阶段二）→ 反向修订 → v2。
 > 排序原则（任务书原话）：架构债里「挡团队版/模板系统路的」最先；功能卷按价值高 × 成本小；UI 卷刻度表第一批（地基），其余在模板系统形态定型后。
 > 档位记法：**A** = 成本小/中 × 感知或演进价值高（先做）；**B** = 成本中 × 价值中，或成本大 × 价值高（排期做）；**C** = 价值低或团队版才有意义（挂账）。
@@ -181,22 +181,27 @@
 - 走查影响：全部 142 张基线重拍；新增 spacing 白名单断言。
 - 排在批 3 之后的原因：批 3 会新增控件，先做地基再加控件会返工两次。
 
-### 批 5 · 可测性与账本（3 天，跨 pkb-pipeline）　—— **R8 已完成 2026-09-04**（见 HANDOFF §0-新h，未发版）
+### 批 5 · 可测性与账本（3 天，跨 pkb-pipeline）　—— ✅ **整批完成 2026-09-04**（见 HANDOFF §0-新h，未发版）
 
 | 项 | 做法 |
 |---|---|
 | R8 ✅ | `03_tag_llm` 累加 usage 并打一行 `{stage:'tag_llm', status:'usage', usage, calls, model}`；orchestrator 单独接走 → `usage/ingest.ts` 落账；用量页脚注改按 `summary.ingest.unmetered` 说话；三方对账一次（实花 ¥0.23）。**与原计划两处不同**：① 用独立的 `status:'usage'` 行而不是挂在 `tag_llm` ok 事件上——挂上去的话撞熔断线/抛异常那两条路径的花费会丢，而且会出现"阶段事件"与"账本"两份真相；② `cli.py` 侧不再返回聚合（返回值会被 `run_stage` 并进 ok 事件 = 同一笔记两遍），只补了分流轻管线 `route_*` 的主题打标用量——那笔以前完全没人记 |
 | S2 ✅ | 用量记录加 `attribution{template,taskId,vault,stage}`（模板系统落地前 `template` 恒 null）；对账脚本加「按归因」表 |
-| R9 | `agent/result.ts` 抽 `judgeResult(result, expectedModel)` → `{kind:'ok'|'error', degraded, models, billable}`；`smoke:steps` 同款喂 fixture |
-| F11 | orchestrator 记每文件失败计数（`.failed/attempts.json`），≥3 次移入 `.failed/` 并写原因 |
-| R16 | search-worker `error` 重建；vault watcher `error` + root `unlinkDir` → Condition `vault-lost` 顶条「知识库目录不可访问」 |
+| R9 ✅ | `agent/result.ts` 的 `judgeResult(msg, expectedModel)` → `{kind, error, models, degraded, resolvedModel, billable, sessionUsable}`；`smoke:steps` +17 条 fixture。**四条判据方向各不相同，刻意不合并**：显示只认 `is_error`，记账还要求真产生过 token，会话续接认 `is_error \|\| api_error_status` |
+| F11 ✅ | `inbox/attempts.ts` 的 `judgeAttempts`：连着 3 轮仍留在投递箱的文件移入 `.failed/` 并写原因；`smoke:guards` +13 条。**顺带补了一个从没成立过的解析**——读 `失败原因.txt` 原来按 `名字 —— 原因` split，而盘上是 pipeline 写的「· 名字 / 缩进 原因：…」，reason 恒为 undefined |
+| R16 ✅ | search-worker `error`/`exit` 就地重建（带 `lastDocs` 重灌 + 重建封顶）；库根可访问性做成 **Condition `vault-lost`** + 顶条。**判据以磁盘探测为准、以心跳为主力**：macOS 上外接盘被拔时 fsevents 往往直接不吭声，只等 watcher 事件的话那台机器上永远不会报 |
+
+原表里 R9/F11/R16 的做法与落地的差别，都写在上面这三行里。
 
 验收：R8 真跑一轮打标对账 ≈ ¥1；其余零花费。走查影响：2 张截图（vault-lost 条、失败件移入）。
 
-**R8/S2 收尾（2026-09-04）**：新增 `smoke:usage`（L1，40+ 条零花费，含"应用侧 vs 对账脚本"跨实现比对）、
-`smoke:pipeline` 第 7 节（本机 http 桩验冻结产物真回传）、`e2e/usage-reconcile.mjs`（真实入库三方对账）。
-走查用量页断言从「打标不该有 token」翻转成「打标的 token 必须进账 + 缓存拆分不许算胀」。
-**R9 / F11 / R16 未做**，仍挂在本批。
+**收尾（2026-09-04，整批关账）**：
+- R8/S2：新增 `smoke:usage`（L1，40+ 条零花费，含"应用侧 vs 对账脚本"跨实现比对）、
+  `smoke:pipeline` 第 7 节（本机 http 桩验冻结产物真回传）、`e2e/usage-reconcile.mjs`（真实入库三方对账，实花 ¥0.23）。
+  走查用量页断言从「打标不该有 token」翻转成「打标的 token 必须进账 + 缓存拆分不许算胀」
+- R9/F11/R16：`smoke:steps` +17、`smoke:guards` +30，全部零花费；走查 +2 张截图
+  （`73-失败件-清单带原因`、`74-知识库目录不可访问-顶条`），与本批预估的 2 张一致
+- `npm run verify` 15/15 全绿。**真实调用合计 ¥0.23**，原估 ≈¥1
 
 ### 批 6 · 团队版前置三件套（大单，各自立项；顺序固定）
 

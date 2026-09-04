@@ -5,6 +5,8 @@ import { TailBuffer } from './lib/tail-buffer'
 import { pipelineArgs, pipelineEnv } from './lib/pipeline'
 import { isSafeVaultRoot } from './vault/wizard'
 import { judgeNotify, NOTIFY_MIN_MS } from './lib/notify'
+import { giveUpReason, judgeAttempts, parseAttempts, parseFailReasons, MAX_ATTEMPTS } from './inbox/attempts'
+import { judgeVaultBack, judgeVaultLost, resolveProbeMs, DEFAULT_PROBE_MS } from './vault/lost'
 
 /**
  * 批 1「架构止血」里那些**只在真实调用 / 真实故障下才走到**的判据，抽成纯函数后在这儿零花费验
@@ -137,6 +139,112 @@ console.log('\n【6】judgeNotify：完成才通知 · 失败才响铃 · 眼前
   const ask = j({ focused: false, kind: 'confirm' })
   check('需要确认必通知且响铃', ask.notify && !ask.silent)
   check('产物完成：给足耗时就通知、且静音', j({ focused: false, kind: 'artifact', elapsedMs: 60_000 }).notify)
+}
+
+console.log('\n【7】judgeAttempts：连着几轮进不去的文件停掉自动重跑（F11 / 审计 Q10）')
+{
+  const T = 1_700_000_000_000
+  // 循环形态：某阶段崩 → 原件不归档 → 重启 watcher 重拾 → 整条链再跑一遍 → 再崩。**打标是花钱的**
+  let a = judgeAttempts({}, ['坏文件.docx'], '转换崩了', T)
+  check('第 1 轮：记一笔，不搬走', a.next['坏文件.docx']?.count === 1 && a.giveUp.length === 0)
+  a = judgeAttempts(a.next, ['坏文件.docx'], '转换崩了', T + 1)
+  check('第 2 轮：累计到 2，还给它机会', a.next['坏文件.docx']?.count === 2 && a.giveUp.length === 0)
+  a = judgeAttempts(a.next, ['坏文件.docx'], '转换崩了', T + 2)
+  check(`第 ${MAX_ATTEMPTS} 轮：搬进 .failed`, a.giveUp.length === 1 && a.giveUp[0] === '坏文件.docx')
+  check('搬走之后不再留账（别让它在 attempts.json 里长住）', !a.next['坏文件.docx'])
+
+  /**
+   * **「连续」这个词得当真**：中间成功过一次就清零。
+   * 不清的话，一个文件今天失败两次、下个月又失败一次，会被判成"连续三次"停掉自动重试，
+   * 而它中间明明进去过——用户看到的是一个好文件莫名其妙不再被处理。
+   */
+  let b = judgeAttempts({}, ['时好时坏.xlsx'], '当时被占用', T)
+  b = judgeAttempts(b.next, ['时好时坏.xlsx'], '当时被占用', T + 1)
+  check('失败两轮：账上是 2', b.next['时好时坏.xlsx']?.count === 2)
+  b = judgeAttempts(b.next, [], undefined, T + 2) // 这一轮它进去了 → 不在投递箱里
+  check('成功一次账就清零', !b.next['时好时坏.xlsx'] && b.giveUp.length === 0, JSON.stringify(b.next))
+  b = judgeAttempts(b.next, ['时好时坏.xlsx'], '又崩了', T + 3)
+  check('清零后重新从 1 数起（不是接着 3）', b.next['时好时坏.xlsx']?.count === 1)
+
+  // 跑成功的那一轮投递箱是空的：既不记账也不搬东西
+  const clean = judgeAttempts({ 'x.md': { count: 2, lastAt: T } }, [], undefined, T)
+  check('投递箱清空 → 旧账全清、无人被搬走', Object.keys(clean.next).length === 0 && clean.giveUp.length === 0)
+
+  // 多个文件各记各的
+  const multi = judgeAttempts({ 'a.docx': { count: 2, lastAt: T }, 'b.pdf': { count: 1, lastAt: T } }, ['a.docx', 'b.pdf'], '崩了', T)
+  check('多文件各算各的：a 到上限被搬走、b 继续记', multi.giveUp.join() === 'a.docx' && multi.next['b.pdf']?.count === 2)
+
+  // 原因要说清"为什么不再自动重试"，否则用户看着像被吞了
+  const why = giveUpReason({ count: 3, lastAt: T, lastReason: '转换崩了' })
+  check('给用户的原因写明了上限与出口', /连续 3 轮/.test(why) && /停止自动重试/.test(why) && /全部重试/.test(why), why.replace(/\n/g, ' '))
+
+  // 坏账本不该让整条链停摆
+  check('attempts.json 坏了 → 当没有账，从头数', Object.keys(parseAttempts('{不是 json')).length === 0)
+  check('数组 / null 也当没有账', Object.keys(parseAttempts('[1,2]')).length === 0 && Object.keys(parseAttempts('null')).length === 0)
+  check('脏字段被剔掉（count 不是正数的不算）', Object.keys(parseAttempts('{"a":{"count":"3"},"b":{"count":0},"c":{"count":2}}')).join() === 'c')
+
+  /**
+   * `失败原因.txt` 的解析。**这是补一个从没成立过的判据**：盘上的格式是
+   * pipeline 写的「· 名字 / 缩进 原因：…」，而读的那一半按 `名字 —— 原因` split，
+   * 两种破折号一个都不在文件里 → reason 恒为 undefined，界面上的失败清单
+   * 只有一串光秃秃的文件名。0.1.2 修过"把原因扔掉"的写那一半，读这一半没跟上。
+   * 下面这段是**从真实产物里抄回来的原样文本**，别改格式。
+   */
+  const real = [
+    '这些文件没能进知识库，原件原样保留在这个文件夹里。',
+    '',
+    '· 工作-执行类/直播脚本/直播脚本1.md',
+    '    原因：暂不支持 .md 格式',
+    '· 扫描件.pdf',
+    '    原因：扫描件/纯图 PDF（12 页整本零文字），需 OCR 才能入库',
+    '',
+    '能支持的格式：.docx .doc .pdf .xlsx .pptx .md .txt',
+  ].join('\n')
+  const parsed = parseFailReasons(real)
+  check('按 basename 索引（盘上只有文件名，清单里写的是相对路径）', parsed['直播脚本1.md'] === '暂不支持 .md 格式', JSON.stringify(parsed))
+  check('第二条也解析到，且原因没被截断', /需 OCR/.test(parsed['扫描件.pdf'] ?? ''), JSON.stringify(parsed))
+  check('末尾那句「能支持的格式」不会被当成一条记录', !Object.keys(parsed).some((k) => k.includes('能支持的格式')), Object.keys(parsed).join('|'))
+
+  // F11 写的原因是**多行**的，续行不许被吞掉——「下一步怎么办」就在续行里
+  const multiLine = parseFailReasons(['· 坏文件.docx', `    原因：${giveUpReason({ count: 3, lastAt: 0, lastReason: '转换崩了' })}`].join('\n'))
+  check('多行原因的续行接上了（"全部重试"那句在第三行）', /全部重试/.test(multiLine['坏文件.docx'] ?? ''), multiLine['坏文件.docx'] ?? '')
+  check('空文件 / 垃圾内容不炸', Object.keys(parseFailReasons('')).length === 0 && Object.keys(parseFailReasons('随便一句话')).length === 0)
+}
+
+console.log('\n【8】judgeVaultLost：库目录被拔掉/移走要顶一条，别静默失效（R16）')
+{
+  const OK = { exists: true, readable: true }
+  /**
+   * 要接住的静默失效：库在外接盘/网盘上，盘被拔了之后 chokidar 从此不报事件，
+   * 而应用一点反应都没有——文件树还画着旧快照、检索还在旧索引上命中，
+   * 点开笔记才报「找不到文件」。用户以为库好好的，实际每次写入都写去了不存在的路径。
+   */
+  const gone = judgeVaultLost({ kind: 'unlinkDir', rel: '' }, { exists: false, readable: false })
+  check('根目录没了 → lost', gone.lost && /移动|磁盘|网盘/.test(gone.reason ?? ''), JSON.stringify(gone))
+  const noPerm = judgeVaultLost({ kind: 'error', message: 'EACCES' }, { exists: true, readable: false })
+  check('目录还在但打不开 → lost，且理由是权限那一种', noPerm.lost && /权限|网盘/.test(noPerm.reason ?? ''), JSON.stringify(noPerm))
+  check('两种理由不是同一句（下一步动作不一样）', gone.reason !== noPerm.reason)
+
+  /**
+   * **光有 error 事件不算丢**：chokidar 的 error 大多是单个文件的瞬时问题
+   * （正在被写、被别的程序锁着）。见 error 就顶一条吓人的横幅比不报还坏，
+   * 所以一律以磁盘探测为准。
+   */
+  check('error 但磁盘好好的 → 不算丢', !judgeVaultLost({ kind: 'error', message: 'EBUSY 某个文件' }, OK).lost)
+  // 有些同步盘会"删了又立刻建回来"，事件是真的、状态却已经恢复
+  check('unlinkDir 但磁盘好好的 → 不算丢（删了又建回来）', !judgeVaultLost({ kind: 'unlinkDir', rel: '' }, OK).lost)
+  // 子目录被删是正常操作，压根不该走到这条判据（orchestrator 只在 rel 为空串时才问）
+  check('子目录的 unlinkDir 也以磁盘为准', !judgeVaultLost({ kind: 'unlinkDir', rel: '80_资料库/旧' }, OK).lost)
+
+  // 盘插回来要能自己撤掉顶条，不能逼用户重启（同 Q11 离线重探的教训）
+  check('judgeVaultBack：两项都好才算回来', judgeVaultBack(OK))
+  check('judgeVaultBack：只在但读不了不算回来', !judgeVaultBack({ exists: true, readable: false }))
+  check('judgeVaultBack：不在就不算回来', !judgeVaultBack({ exists: false, readable: true }))
+
+  // 心跳间隔：走查调快，生产不读；垃圾值一律回出厂
+  check(`出厂 ${DEFAULT_PROBE_MS / 1000} 秒`, resolveProbeMs(undefined) === DEFAULT_PROBE_MS)
+  check('MCNAI_E2E_VAULT_PROBE=800 覆盖为 0.8 秒', resolveProbeMs('800') === 800)
+  check('垃圾值 / 负数 / 过小值一律回出厂', resolveProbeMs('x') === DEFAULT_PROBE_MS && resolveProbeMs('-5') === DEFAULT_PROBE_MS && resolveProbeMs('10') === DEFAULT_PROBE_MS)
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

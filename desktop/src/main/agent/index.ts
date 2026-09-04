@@ -6,7 +6,8 @@ import { app } from 'electron'
 import { z } from 'zod'
 import { agentEnv } from '../ai/provider'
 import { resolveTierForRequest, normalizeTier, unconfiguredReason, DEFAULT_TIER, type TierId } from '../ai/tiers'
-import { appendUsage, tokensOf, type UsageTaskType } from '../usage'
+import { appendUsage, type UsageTaskType } from '../usage'
+import { judgeResult, type SdkResultLike } from './result'
 import { routeOf } from '../usage/pricing'
 import { vaultManager } from '../vault'
 import { searchCloud } from '../knowledge/client'
@@ -856,49 +857,33 @@ export class AgentManager {
           continue
         }
         if (message.type === 'result') {
-          // 错误型 result（`error_during_execution` 等）**先扣住不发**。
-          // 它有可能是「这个 session 已经不存在了」的讣告，那样的话这一轮马上会重开、
-          // 这条讣告不该落进对话。旧代码把它当正常回答画成「出错：error_during_execution」，
-          // 于是一次会话恢复失败在界面上留下两条报错——第一条就是它。
-          // 真的要展示时走 `kind:'error'`（过 zhError + 气泡里有「重试」），不再当成 AI 说的话。
-          if (message.subtype !== 'success') {
-            const errs = ((message as { errors?: string[] }).errors ?? []).map((e) => e.trim()).filter(Boolean)
-            errorResult = errs.join('; ') || `出错：${message.subtype}`
+          /**
+           * 显示 / 降级 / 记账 / 会话续接**四件事的判据全在 `judgeResult` 里**（R9）。
+           * 它们只有真实调用才走得到（要上游真的 401、真的换模型），留在这儿就是没人测；
+           * 抽出去之后 `smoke:steps` 喂合成 fixture 几毫秒验完，零花费。
+           * 这里只剩"拿判据做事"：打日志、发事件、落账。
+           */
+          const v = judgeResult(message as SdkResultLike, provider.model)
+          /**
+           * 错误型 result **先扣住不发**。它有可能是「这个 session 已经不存在了」的讣告，
+           * 那样的话这一轮马上会重开、这条讣告不该落进对话。旧代码把它当正常回答画成
+           * 「出错：error_during_execution」，于是一次会话恢复失败在界面上留下两条报错。
+           * 真要展示时走 `kind:'error'`（过 zhError + 气泡里有「重试」），不当成 AI 说的话。
+           */
+          if (v.kind === 'error') {
+            // T-02：`is_error` 那条的原文是英文（`Failed to authenticate. API Error: 401 …`），
+            // **只进日志**；界面拿到的是同一句，但会过 zhError 出中文
+            if (message.subtype === 'success') {
+              log('error', 'agent', `上游返回错误结果（原文只进日志，界面走中文映射）：${v.error.slice(0, 500)}`)
+            }
+            errorResult = v.error
             continue
           }
-          const res = message as { is_error?: boolean; api_error_status?: number | null }
-          /**
-           * T-02：**`subtype:'success'` 但 `is_error:true`** —— 上游 401 / 403 / 额度不足
-           * 这类失败长的就是这个样子，`result` 字段里装的是**英文原文**
-           * （`Failed to authenticate. API Error: 401 …`）。旧代码把它当正常回答画进对话，
-           * 紧接着 for-await 又抛出、再落一条 ⚠️：同一次失败说两遍，第一条还是纯英文
-           * （截图 41c/41d/45d 里看得很清楚）。现在与 `subtype !== 'success'` 同等对待——
-           * 扣住不发，最终走 `kind:'error'`（过 zhError 出中文 + 气泡里有「重试」），
-           * **英文原文只进日志**。
-           *
-           * 判据**只认 `is_error`，不认 `api_error_status`**：后者在记账那边的语义是
-           * "存疑就别计费"（宁可少记一条，代价为零），搬到显示上却会把一条**真回答**
-           * 判成错误、连正文一起丢掉——两边的容错方向正好相反，不能图省事合成一个条件。
-           */
-          if (res.is_error) {
-            const raw = (message.result ?? '').trim()
-            log('error', 'agent', `上游返回错误结果（原文只进日志，界面走中文映射）：${raw.slice(0, 500)}`)
-            errorResult = raw || '出错：上游返回了一个错误结果'
-            continue
-          }
-          const text = message.result
-          // 服务端实际用的模型：对不上就是被端点静默换掉了（诊断日志留一行 + 记进用量）
-          const modelUsage = (message as { modelUsage?: Record<string, unknown> }).modelUsage ?? {}
-          const models = Object.keys(modelUsage)
-          const degraded = models.length > 0 && !models.includes(provider.model)
-          /**
-           * 「这一轮实际是谁服务的」= 主模型在不在里面。
-           * 不能直接取 `models[0]`：一轮里往往同时出现主模型与轻量模型（起标题、压上下文），
-           * key 的顺序是服务端给的，实测标准档那一轮排在前面的是 flash——记成 flash 就等于
-           * 报告"我要 pro，实际用了 flash"，看着像被降级了，其实 pro 就在同一个 modelUsage 里
-           * （2026-08-17 真实调用对账时抓到）。被真降级时 models 里没有主模型，这里自然落到实际那个。
-           */
-          const resolved = models.includes(provider.model) ? provider.model : (models[0] ?? null)
+          // 走到这儿 `judgeResult` 已经判成 ok（即 subtype==='success' 且非 is_error），
+          // 但那层收窄 TS 跟不过来，正文按其它字段的同款写法取
+          const text = (message as { result?: string }).result ?? ''
+          const { models, degraded } = v
+          const resolved = v.resolvedModel
           if (degraded) {
             log('warn', 'agent', `模型被服务端替换：要的是 ${provider.model}，实际 ${models.join('/')}`)
           }
@@ -906,15 +891,8 @@ export class AgentManager {
           // 用量记账：**只记跑成功的那一轮**。失败的轮次（鉴权失败、线路挂了）token 通常是 0，
           // 记进去只会让「本月对话 N 次」把失败也算成用量——用户看这个数是为了估消耗，不是查故障。
           // 失败在 Dock 与诊断日志里各有出口，不靠这里。**不挑字段、原样存**，归一化留给汇总侧。
-          //
-          // **`subtype === 'success'` 一条守不住**（B-2 补丁，2026-08-18）：SDK 的
-          // `SDKResultSuccess` 自带 `is_error` 与 `api_error_status` 字段——上游报 403 时它照样
-          // 发 `subtype: 'success'`，只是 `is_error: true`、token 全 0。实测中转站余额耗尽那轮，
-          // 8 个失败请求全被记进了 jsonl。所以还要看 `is_error`，并且要求这一轮真的产生过 token。
-          // （T-02 之后 `is_error` 在这里恒为 false——上面已经把它挡掉了。条件保留不删：
-          //  这是记账自己的判据，不该依赖上游某个分支的存在顺序。）
-          const hasTokens = tokensOf({ usage: (message as { usage?: unknown }).usage, modelUsage }).output > 0
-          if (message.subtype === 'success' && !res.is_error && !res.api_error_status && hasTokens) {
+          // 判据（含"要真产生过 token"那一条，B-2 实测的余额耗尽 8 连记）在 `judgeResult.billable`
+          if (v.billable) {
             appendUsage({
               ts: Date.now(),
               sessionId,
@@ -928,7 +906,7 @@ export class AgentManager {
               durationMs: Date.now() - startedAt,
               usage: {
                 usage: (message as { usage?: unknown }).usage ?? null,
-                modelUsage: models.length ? modelUsage : null,
+                modelUsage: models.length ? ((message as { modelUsage?: Record<string, unknown> }).modelUsage ?? null) : null,
               },
               costUsd: costUsd ?? null,
               // 归因（S2 预留）：模板系统落地前 template 恒 null，先把库与会话记下来——
@@ -960,7 +938,7 @@ export class AgentManager {
            * 发消息都必然报「No conversation found」——一个失败的轮次把整个对话废掉了。
            * 上面的降级重开能兜住表现，但病根在这里：只认跑成功那一轮给出的 id。
            */
-          const usable = !res.is_error && !res.api_error_status ? message.session_id : undefined
+          const usable = v.sessionUsable ? message.session_id : undefined
           // 正文已经作为一条完整消息落进对话，草稿使命结束
           tasks.patch(taskId, { draft: '', toolLine: undefined, sdkSessionId: usable } as Partial<AgentTask>)
           this.emit({

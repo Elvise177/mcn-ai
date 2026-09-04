@@ -20,10 +20,11 @@ const EMPTY_CLOUD: CloudState = {
 }
 
 /** 整块替换而不是就地改：useSyncExternalStore 靠引用相等判断要不要重渲染 */
-let snap: { tasks: Task[]; cloud: CloudState } = { tasks: [], cloud: EMPTY_CLOUD }
+const EMPTY_VAULT: VaultState = { lost: false, root: null, checkedAt: 0 }
+let snap: { tasks: Task[]; cloud: CloudState; vault: VaultState } = { tasks: [], cloud: EMPTY_CLOUD, vault: EMPTY_VAULT }
 const listeners = new Set<() => void>()
 
-const publish = (next: { tasks: Task[]; cloud: CloudState }): void => {
+const publish = (next: { tasks: Task[]; cloud: CloudState; vault: VaultState }): void => {
   snap = next
   listeners.forEach((l) => l())
 }
@@ -40,27 +41,31 @@ export function startTaskSync(): () => void {
   if (started) return () => void 0
   started = true
 
-  void window.api.tasks.list().then((s) => publish({ tasks: s.tasks, cloud: s.cloud }))
+  void window.api.tasks.list().then((s) => publish({ tasks: s.tasks, cloud: s.cloud, vault: s.vault ?? EMPTY_VAULT }))
 
   const off = window.api.tasks.onEvent((p) => {
     if (p.type === 'snapshot') {
-      publish({ tasks: p.tasks, cloud: p.cloud })
+      publish({ tasks: p.tasks, cloud: p.cloud, vault: p.vault ?? EMPTY_VAULT })
+      return
+    }
+    if (p.type === 'vault') {
+      publish({ ...snap, vault: p.vault })
       return
     }
     if (p.type === 'cloud') {
-      publish({ tasks: snap.tasks, cloud: p.cloud })
+      publish({ ...snap, cloud: p.cloud })
       return
     }
     if (p.type === 'remove') {
-      publish({ tasks: snap.tasks.filter((t) => t.id !== p.id), cloud: snap.cloud })
+      publish({ ...snap, tasks: snap.tasks.filter((t) => t.id !== p.id) })
       return
     }
     // upsert：seq 用来丢弃迟到/乱序的事件（reload 后尤其会撞上）
     const known = snap.tasks.find((t) => t.id === p.task.id)
     if (known && known.seq >= p.task.seq) return
     publish({
+      ...snap,
       tasks: known ? snap.tasks.map((t) => (t.id === p.task.id ? p.task : t)) : [...snap.tasks, p.task],
-      cloud: snap.cloud,
     })
   })
 
@@ -73,10 +78,15 @@ export function startTaskSync(): () => void {
 const ACTIVE: TaskStatus[] = ['queued', 'running']
 export const isActive = (t: Task): boolean => ACTIVE.includes(t.status)
 
-const getSnapshot = (): { tasks: Task[]; cloud: CloudState } => snap
+const getSnapshot = (): { tasks: Task[]; cloud: CloudState; vault: VaultState } => snap
 
 export function useAllTasks(): Task[] {
   return useSyncExternalStore(subscribe, () => getSnapshot().tasks)
+}
+
+/** R16：知识库目录还在不在。顶条（VaultLostBar）唯一的数据来源 */
+export function useVault(): VaultState {
+  return useSyncExternalStore(subscribe, () => getSnapshot().vault)
 }
 
 export function useCloud(): CloudState {

@@ -117,11 +117,28 @@ export interface CloudState {
   retrying?: string
 }
 
+/**
+ * Condition：**知识库目录还在不在**（R16）。同样不是任务，没有终态。
+ *
+ * 为什么值得单开一条：库放在外接盘/网盘上被拔掉时，chokidar 从此不再报事件，
+ * 而应用一点反应都没有——文件树还画着内存里的旧快照、检索还在旧索引上命中，
+ * 点开笔记才报「找不到文件」。用户以为库好好的，实际每一次写入都写去了不存在的路径。
+ */
+export interface VaultState {
+  lost: boolean
+  /** 出事的那个库根（顶条上不显示路径，只用于日志与重探） */
+  root: string | null
+  /** 顶条副标题：**要说清是哪一种**——"被移走"和"没权限"的下一步动作完全不同 */
+  reason?: string
+  checkedAt: number
+}
+
 export type TaskEventPayload =
-  | { type: 'snapshot'; tasks: Task[]; cloud: CloudState }
+  | { type: 'snapshot'; tasks: Task[]; cloud: CloudState; vault: VaultState }
   | { type: 'upsert'; task: Task }
   | { type: 'remove'; id: string }
   | { type: 'cloud'; cloud: CloudState }
+  | { type: 'vault'; vault: VaultState }
 
 /**
  * 投递箱主流程的阶段顺序。进度分母在主进程算，渲染层不再自己拼。

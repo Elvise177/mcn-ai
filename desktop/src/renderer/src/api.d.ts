@@ -133,11 +133,25 @@ interface CloudState {
   retrying?: string
 }
 
+/**
+ * Condition：知识库目录还在不在（R16）。库放在外接盘/网盘上被拔掉时，
+ * watcher 从此不再报事件，而应用一点反应都没有——文件树还画着旧快照、
+ * 检索还在旧索引上命中，点开笔记才报「找不到文件」。
+ */
+interface VaultState {
+  lost: boolean
+  root: string | null
+  /** 顶条副标题：说清是"被移走"还是"没权限"，两者下一步动作不同 */
+  reason?: string
+  checkedAt: number
+}
+
 type TaskEventPayload =
-  | { type: 'snapshot'; tasks: Task[]; cloud: CloudState }
+  | { type: 'snapshot'; tasks: Task[]; cloud: CloudState; vault: VaultState }
   | { type: 'upsert'; task: Task }
   | { type: 'remove'; id: string }
   | { type: 'cloud'; cloud: CloudState }
+  | { type: 'vault'; vault: VaultState }
 
 interface InboxEvent {
   type: 'file-added' | 'run-start' | 'stage' | 'run-end'
@@ -513,7 +527,7 @@ interface Window {
       onProvisionFailed: (cb: (msg: string) => void) => () => void
     }
     tasks: {
-      list: () => Promise<{ tasks: Task[]; cloud: CloudState }>
+      list: () => Promise<{ tasks: Task[]; cloud: CloudState; vault: VaultState }>
       /** 待同步队列转手动之后唯一的出口：tries 归零 + 立刻跑一轮（设计 §3.5） */
       retrySync: () => Promise<{ pending: number; synced: number }>
       onEvent: (cb: (p: TaskEventPayload) => void) => () => void

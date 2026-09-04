@@ -4,7 +4,7 @@
  * 每个里程碑交付前必须跑一遍并人工/AI 检视截图——「构建通过」不等于「功能可用」。
  */
 import { _electron as electron } from 'playwright-core'
-import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync, writeFileSync, readdirSync, readFileSync, chmodSync } from 'fs'
+import { mkdirSync, copyFileSync, existsSync, rmSync, cpSync, writeFileSync, readdirSync, readFileSync, chmodSync, appendFileSync } from 'fs'
 import { execSync } from 'child_process'
 import { createServer } from 'net'
 import { join, dirname } from 'path'
@@ -855,6 +855,9 @@ const app = await launch({
   // 注意 key 仍然是没有的 —— 增强档发出去照样会被主进程预检拦下，M-11 那段正好用它造确定失败。
   // 开关优先于"配没配齐"（health.ts 里 forced 判在 configured 之前）；"没配齐 → 置灰 + 明示"由 45e 独立实例验
   MCNAI_E2E_TIER_HEALTH: 'up',
+  // R16：库可访问性心跳压到 0.8 秒，走查才造得出「库目录被拔掉」（出厂 30 秒，等不起）。
+  // 真造它要在跑的时候拔外接盘/网盘，判据同 MCNAI_E2E_AGENT_TIMEOUT：生产不读这个变量
+  MCNAI_E2E_VAULT_PROBE: '800',
   // R3 墙钟超时：把上限压到 3 秒，走查里才造得出「一轮跑太久被中断」（真造要等 15 分钟）。
   // **只在本地模式给**：CHAT 模式一轮真实回答要几十秒，3 秒上限会把每一轮都掐断。
   // 接线是同一条代码路径，本地模式验过即可；CHAT 模式跳过 41f（见那一步的 `if (CHAT)`）
@@ -5802,6 +5805,99 @@ try {
       throw new Error(`重投之后 .failed/ 没清理（原 ${before} 个，现 ${after.files?.length} 个），下次会重复入队`)
     console.log('F6 失败件批量重投 ✓', JSON.stringify({ 原有: before, 剩余: after.files?.length ?? 0, toast: toastText.trim() }))
     await waitInboxIdle(win)
+  }
+
+  /**
+   * ---- F11 失败件的**原因**要能看见（批 5）----
+   *
+   * 连着 3 轮进不去的文件会被搬进 `.failed/` 并写一句"为什么不再自动重试"。
+   * 搬的那半边由 `smoke:guards` 的 judgeAttempts 守着（真造要弄坏一个阶段再重启三次）；
+   * 这里验的是**另一半：那句话到底有没有到用户眼前**。
+   *
+   * 值得单独验的原因：读 `失败原因.txt` 的解析原来按 `名字 —— 原因` split，
+   * 而盘上是 pipeline 写的「· 名字 / 缩进 原因：…」——判据从没成立过，
+   * reason 恒为 undefined，清单里只有一串光秃秃的文件名。写的那一半 0.1.2 修过，读的这一半没跟上。
+   */
+  {
+    const inbox = join(vaultCopy, '00_投递箱')
+    const day = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    const dir = join(inbox, '.failed', day)
+    mkdirSync(dir, { recursive: true })
+    const name = `e2e连续失败件_${Date.now()}.docx`
+    writeFileSync(join(dir, name), 'x'.repeat(2000))
+    // 与 orchestrator 落盘时**同一个格式**（· 名字 / 缩进原因，原因本身是多行的）
+    appendFileSync(
+      join(dir, '失败原因.txt'),
+      `\n· ${name}\n    原因：连续 3 轮都没能入库，已经停止自动重试（避免每次启动都重跑一遍）。\n    最近一次的情况：转换没有产出内容\n    修好之后可以在投递箱的失败清单里点「全部重试」。\n`,
+      'utf-8'
+    )
+    const listed = await win.evaluate(() => window.api.inbox.failedList())
+    const row = (listed.files ?? []).find((f) => f.name === name)
+    if (!row) throw new Error(`失败清单里没有刚放进去的那个：${JSON.stringify(listed.files?.map((f) => f.name))}`)
+    // **这条就是那个从没成立过的判据**：原因必须真的解析出来，不能是 undefined
+    if (!row.reason) throw new Error(`失败件的原因没被解析出来（盘上明明写了）：${JSON.stringify(row)}`)
+    if (!/停止自动重试/.test(row.reason)) throw new Error(`原因文案不对：「${row.reason}」`)
+    if (!/全部重试/.test(row.reason)) throw new Error(`多行原因的续行被吞了（"下一步怎么办"那句在续行里）：「${row.reason}」`)
+
+    /**
+     * 界面这一半只断言得到「原因**渲染得出来**」，断言不到"我刚写的那个文件在列表里"：
+     * 面板的清单是 `failures.length ? failures : diskFailures`，
+     * 而 `failures`（来自 `convert_failures` 事件）会随任务对象一起熬过 reload，
+     * 有它在就轮不到读盘那份。**这是设计如此**（事件里那份是"这一轮最新的"），
+     * 所以这里不去跟它较劲——盘上那条链由上面的 IPC 断言守着，
+     * 界面这条只验"原因这一列真的会画出来"，两边合起来才是完整的 F11。
+     */
+    if (!(await win.locator('[data-testid="inbox-panel"]').count()))
+      await win.click('[data-testid="inbox-toggle"]')
+    await win.locator('[data-testid="inbox-failures"]').waitFor({ timeout: 10000 })
+    await win.waitForTimeout(600)
+    const failText = (await win.locator('[data-testid="inbox-failures"]').innerText()).replace(/\s+/g, ' ')
+    if (!/—|原因|没能进知识库/.test(failText)) throw new Error(`失败清单没画出原因这一列：「${failText.slice(0, 200)}」`)
+    // 原因**不许被截断**：F11 写的那句「为什么不再自动重试 + 下一步怎么办」有三行，
+    // 一截就等于没写。判据是"渲染出来的原因至少和盘上那条一样长"（截断会短一大截）
+    const shown = (listed.files ?? []).find((f) => f.reason)
+    if (shown?.reason) {
+      const box = await win.locator('[data-testid="inbox-failures"] li').first().innerText()
+      if (box.includes('…') || box.includes('...'))
+        throw new Error(`失败原因被截断了（F11 那句三行的话会整段看不见）：「${box}」`)
+    }
+    await snap('73-失败件-清单带原因', 250)
+    console.log('F11 失败件原因可解析可见 ✓', JSON.stringify({ 盘上解析出的原因: row.reason.slice(0, 40), 界面: failText.slice(0, 60) }))
+    rmSync(join(dir, name), { force: true })
+  }
+
+  /**
+   * ---- R16 知识库目录不可访问：顶一条，别静默失效（批 5）----
+   *
+   * 要接住的形态：库放在外接盘 / 网盘上，盘被拔了或目录被移走之后，
+   * watcher 从此再也不报事件，而应用**一点反应都没有**——文件树还画着内存里那份旧快照、
+   * 检索还在旧索引上命中，只有点开某一篇才报「找不到文件」。
+   *
+   * 造法用 **chmod 000**（同 42 步造笔记读失败那次）：目录还在、但读不动，
+   * 正是"网盘没挂上/权限没了"那一种。心跳被压到 0.8 秒（MCNAI_E2E_VAULT_PROBE），
+   * 所以两三秒内就该顶上来；**改回权限之后还得自己撤掉**——不能逼用户重启（同 Q11 的教训）。
+   */
+  {
+    const bar = () => win.locator('[data-testid="vault-lost-bar"]')
+    if (await bar().count()) throw new Error('还没造故障，「库不可访问」条就已经在了')
+    chmodSync(vaultCopy, 0o000)
+    try {
+      await bar().waitFor({ timeout: 15000 })
+      const text = (await bar().innerText()).replace(/\s+/g, ' ')
+      if (!/不可访问/.test(text)) throw new Error(`顶条没说清是什么事：「${text}」`)
+      // 说清是哪一种：权限/网盘那一支，不是"被移走"那一支
+      if (!/权限|网盘/.test(text)) throw new Error(`顶条没说清是哪一种不可访问：「${text}」`)
+      // U3 #5：路径不许泄漏到界面上
+      if (text.includes(vaultCopy)) throw new Error(`顶条把库路径漏出来了：「${text}」`)
+      if (/\*\*/.test(text)) throw new Error(`顶条里有没渲染的 Markdown 星号：「${text}」`)
+      await snap('74-知识库目录不可访问-顶条', 250)
+      console.log('R16 库不可访问顶条 ✓', JSON.stringify({ 文案: text.slice(0, 60) }))
+    } finally {
+      chmodSync(vaultCopy, 0o755)
+    }
+    // 恢复之后自己撤掉（不用重启）
+    await bar().waitFor({ state: 'detached', timeout: 15000 })
+    console.log('R16 恢复后顶条自动撤掉 ✓')
   }
 
   // ==== PLAN-v2 批 2：静默消灭 + 透明度 ====

@@ -1,4 +1,4 @@
-import { promises as fs, existsSync } from 'fs'
+import { promises as fs, existsSync, constants as fsConstants } from 'fs'
 import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
@@ -8,6 +8,9 @@ import { broadcast } from '../lib/windows'
 import { buildGraph, makeResolver } from './graph'
 import { VaultSearcher } from './searcher'
 import type { VaultNote, VaultTreeNode, GraphData, SearchResult } from './types'
+import { judgeVaultBack, judgeVaultLost, resolveProbeMs, type RootProbe, type WatcherSignal } from './lost'
+import { tasks } from '../tasks/registry'
+import { log } from '../lib/logger'
 
 /** 编辑冲突检测（M-27）用的内容指纹。用内容 hash 而不是 mtime——见 startWatcher 的注释 */
 const hashOf = (raw: string): string => createHash('sha256').update(raw, 'utf-8').digest('hex')
@@ -47,6 +50,9 @@ export class VaultManager {
     // 检索索引后台构建，不阻塞界面打开
     this.searcher.rebuild(notes, bodies)
     this.startWatcher()
+    // 换库/重开：把上一个库遗留的「不可访问」顶条撤掉，并给新库挂上心跳（R16）
+    this.clearLost()
+    this.startProbe()
     return { noteCount: this.notes.size }
   }
 
@@ -91,8 +97,80 @@ export class VaultManager {
       if (rel) {
         this.dirs.delete(rel)
         this.notify(rel)
+        return
       }
+      // rel 为空串 = **库根自己没了**。原来这里被 `if (rel)` 整个吞掉，
+      // 于是"库被移走"是完全静默的（R16）
+      void this.checkLost({ kind: 'unlinkDir', rel })
     })
+    /**
+     * chokidar 的 `error`。**不要见 error 就报"库不可访问"**——它大多数时候是
+     * 单个文件的瞬时问题（正在被写、被别的程序锁着），照着它顶一条吓人的横幅
+     * 比不报还坏。一律去磁盘上探一眼，以探测结果为准（判据见 vault/lost.ts）。
+     */
+    this.watcher.on('error', (err: unknown) => {
+      void this.checkLost({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
+    })
+  }
+
+  /**
+   * 库根还在不在（R16）。
+   *
+   * **心跳是主力，事件只是提前触发。** macOS 上外接盘被拔掉时 fsevents 往往
+   * 直接不吭声——既不报 error 也不报 unlinkDir，只等事件的话这条顶条在那台机器上
+   * 永远不会出现，而那正是最该被接住的场景。所以开库就挂一个周期探测，
+   * 两个方向都由它负责：丢了顶上去、回来了撤下来（回来能自己撤，同 Q11 的教训——
+   * 不能逼用户重启）。
+   */
+  private probeTimer: ReturnType<typeof setInterval> | null = null
+
+  private async probeRoot(root: string): Promise<RootProbe> {
+    try {
+      await fs.access(root, fsConstants.R_OK)
+      const st = await fs.stat(root)
+      return { exists: st.isDirectory(), readable: true }
+    } catch {
+      return { exists: existsSync(root), readable: false }
+    }
+  }
+
+  /** 探一次并把结论落到 Condition 上。`sig` 只影响日志措辞，结论一律以磁盘为准 */
+  private async checkLost(sig: WatcherSignal): Promise<void> {
+    const root = this.root
+    if (!root) return
+    const probe = await this.probeRoot(root)
+    const wasLost = tasks.getVault().lost
+    const v = judgeVaultLost(sig, probe)
+    if (v.lost) {
+      if (!wasLost) log('error', 'vault', `知识库目录不可访问：${root} —— ${v.reason}`)
+      tasks.setVault({ lost: true, root, reason: v.reason })
+      return
+    }
+    if (wasLost && judgeVaultBack(probe)) {
+      log('info', 'vault', `知识库目录又能访问了：${root}`)
+      this.clearLost()
+    }
+  }
+
+  private startProbe(): void {
+    this.stopProbe()
+    const ms = resolveProbeMs(process.env.MCNAI_E2E_VAULT_PROBE)
+    this.probeTimer = setInterval(() => {
+      void this.checkLost({ kind: 'error', message: 'heartbeat' })
+    }, ms)
+    // 定时器不该拦着应用退出（before-quit 里 close() 也会清，这里是双保险）
+    this.probeTimer.unref?.()
+  }
+
+  private stopProbe(): void {
+    if (this.probeTimer) {
+      clearInterval(this.probeTimer)
+      this.probeTimer = null
+    }
+  }
+
+  private clearLost(): void {
+    tasks.setVault({ lost: false, root: this.root, reason: undefined })
   }
 
   /** self=true 表示这次变更是应用自己写出去的，冲突检测要跳过它 */
@@ -101,6 +179,7 @@ export class VaultManager {
   }
 
   async close(): Promise<void> {
+    this.stopProbe()
     await this.watcher?.close()
     this.watcher = null
     this.notes.clear()

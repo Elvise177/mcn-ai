@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
-import { join, basename, extname, dirname } from 'path'
+import { join, basename, extname, dirname, relative } from 'path'
 import { shell } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
@@ -16,6 +16,7 @@ import { notify } from '../lib/notify'
 import { tasks } from '../tasks/registry'
 import { appendUsage } from '../usage'
 import { buildIngestUsageRecords, type PipelineUsageEvent } from '../usage/ingest'
+import { giveUpReason, judgeAttempts, parseAttempts, parseFailReasons, MAX_ATTEMPTS, type Attempts } from './attempts'
 import {
   INBOX_FLOW,
   computeInboxProgress,
@@ -298,15 +299,10 @@ export class InboxOrchestrator {
     if (!dir) return { ok: true, files: [] }
     let reasons: Record<string, string> = {}
     try {
-      // `失败原因.txt` 是 pipeline 写的，一行一个「文件名 —— 原因」
-      const raw = await fs.readFile(join(dir, '失败原因.txt'), 'utf-8')
-      reasons = Object.fromEntries(
-        raw
-          .split('\n')
-          .map((l) => l.split(/\s+—+\s+|\s+--\s+/))
-          .filter((p) => p.length >= 2)
-          .map((p) => [p[0].trim(), p.slice(1).join(' ').trim()])
-      )
+      // `失败原因.txt` 是 pipeline（与 F11）写的，格式是「· 名字 / 缩进的 原因：…」。
+      // 解析在 `attempts.ts` 的纯函数里——原来内联的那版按 `名字 —— 原因` split，
+      // 而那两种破折号盘上一个都没有，**判据从来没成立过**，reason 恒为 undefined
+      reasons = parseFailReasons(await fs.readFile(join(dir, '失败原因.txt'), 'utf-8'))
     } catch {
       /* 没有原因文件也照常列文件名：知道是哪几个已经比什么都没有强 */
     }
@@ -473,8 +469,17 @@ export class InboxOrchestrator {
    * 用户完全看不出其实没有新东西。客户 2026-08-19 实测提的就是这个。
    */
   async pendingCount(): Promise<number> {
-    if (!this.inboxDir) return 0
-    let n = 0
+    return (await this.pendingFiles()).length
+  }
+
+  /**
+   * 投递箱里还没处理掉的文件，**相对投递箱的路径**（`.done`/`.failed`/隐藏文件不算）。
+   * F11 的失败计数要按文件记，所以这里给的是清单不是个数；`pendingCount` 是它的薄封装。
+   */
+  private async pendingFiles(): Promise<string[]> {
+    if (!this.inboxDir) return []
+    const root = this.inboxDir
+    const out: string[] = []
     const walk = async (d: string, depth: number): Promise<void> => {
       if (depth > MAX_DEPTH) return
       let entries: import('fs').Dirent[]
@@ -486,11 +491,73 @@ export class InboxOrchestrator {
       for (const e of entries) {
         if (e.name.startsWith('.')) continue // .done / .failed / .DS_Store 都在这儿被排除
         if (e.isDirectory()) await walk(join(d, e.name), depth + 1)
-        else n++
+        else out.push(relative(root, join(d, e.name)))
       }
     }
-    await walk(this.inboxDir, 0)
-    return n
+    await walk(root, 0)
+    return out
+  }
+
+  /**
+   * F11 / 审计 Q10：**连着几轮进不去的文件搬进 `.failed/`，别让它每次启动都重跑一遍。**
+   *
+   * 循环长这样：某阶段抛异常 → 后续 skip、原件不归档（还在投递箱）→ 重启后 watcher
+   * 以 `ignoreInitial:false` 重新拾起 → 整条链再跑一遍 → 再崩。**而打标是花钱的。**
+   *
+   * 判据在 `attempts.ts` 的纯函数里（真造这个循环得先弄坏一个阶段再反复重启，
+   * 属于"花钱/等几十分钟才触发"那一类）。这里只做三件事：读盘、搬文件、写盘。
+   */
+  private async trackAttempts(reason: string | undefined): Promise<void> {
+    if (!this.inboxDir) return
+    const failedRoot = join(this.inboxDir, '.failed')
+    const file = join(failedRoot, 'attempts.json')
+    let prev: Attempts = {}
+    try {
+      prev = parseAttempts(await fs.readFile(file, 'utf-8'))
+    } catch {
+      /* 没有账本 = 从头数 */
+    }
+    const stillThere = await this.pendingFiles()
+    const { next, giveUp } = judgeAttempts(prev, stillThere, reason, Date.now())
+
+    if (giveUp.length) {
+      /**
+       * **本地日期，不是 UTC**。pipeline 那边用的是 `datetime.now()`（本地），
+       * 用 `toISOString()` 的话，UTC+8 的用户在凌晨 0~8 点会落进**前一天**的目录，
+       * 于是同一批失败件被劈成两个日期夹、`latestFailedDir()` 只认最新的那个 ——
+       * 用户在失败清单里看不到刚失败的那些。
+       */
+      const d = new Date()
+      const day = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+      const dir = join(failedRoot, day)
+      const lines: string[] = []
+      for (const rel of giveUp) {
+        try {
+          await fs.mkdir(dir, { recursive: true })
+          await fs.rename(join(this.inboxDir, rel), join(dir, basename(rel)))
+          lines.push(`· ${rel}\n    原因：${giveUpReason(prev[rel], reason)}`)
+          log('warn', 'inbox', `连续 ${MAX_ATTEMPTS} 轮未入库，移入 .failed：${rel}`)
+        } catch (e) {
+          // 搬不动就把账留着，下一轮再试——**不能当成已处理**，否则它继续参与重跑循环
+          next[rel] = { count: MAX_ATTEMPTS - 1, lastAt: Date.now(), lastReason: reason }
+          log('warn', 'inbox', `移入 .failed 失败（下一轮再试）：${rel} ${e}`)
+        }
+      }
+      if (lines.length) {
+        // 追加而不是覆盖：同一天里 pipeline 自己也会往这个文件写转换失败的那批
+        await fs
+          .appendFile(join(dir, '失败原因.txt'), `\n${lines.join('\n')}\n`, 'utf-8')
+          .catch(() => {})
+      }
+    }
+
+    try {
+      await fs.mkdir(failedRoot, { recursive: true })
+      if (Object.keys(next).length) await fs.writeFile(file, JSON.stringify(next, null, 2), 'utf-8')
+      else await fs.rm(file, { force: true }) // 账清空了就把文件删掉，别留个空壳
+    } catch (e) {
+      log('warn', 'inbox', `失败次数账写入失败（不影响主流程）：${e}`)
+    }
   }
 
   /**
@@ -1130,6 +1197,15 @@ export class InboxOrchestrator {
         tagStages: this.stages.filter((s) => s.stage === 'tag_llm').map((s) => String(s.status ?? '')),
       })
       for (const r of records) appendUsage(r)
+    }
+
+    /**
+     * F11：这一轮跑完，把"还留在投递箱里"的文件记一笔（取消的那轮不算——
+     * 文件还在是因为用户自己喊停的，不是它进不去）。达到上限的会被搬进 `.failed/`。
+     */
+    if (!canceled) {
+      const why = this.stages.find((st) => st.status === 'error')?.message
+      await this.trackAttempts(ok ? undefined : (why ?? '这一轮没有跑完'))
     }
 
     this.send({ type: 'run-end', ok }, taskId)

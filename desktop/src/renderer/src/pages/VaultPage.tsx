@@ -385,11 +385,17 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
               查看原件与原因
             </button>
           </div>
+          {/*
+            **文件名截断、原因换行**（批 5 F11）。原来整条 `truncate`，原因被切在
+            「转换没有产…」上——而 F11 写进去的那句正是"为什么不再自动重试、下一步怎么办"，
+            三行都在后面，一截就等于没写。文件名很长且不换行是对的（一行一个才数得清），
+            原因换行是对的（它是要读的一句话）。
+          */}
           <ul className="ml-4 list-disc text-muted">
             {shownFailures.map((f) => (
-              <li key={f.rel} className="truncate" title={`${f.rel}${f.reason ? ` —— ${f.reason}` : ''}`}>
-                {f.rel}
-                {f.reason && <span className="text-2xs"> —— {f.reason}</span>}
+              <li key={f.rel} title={`${f.rel}${f.reason ? ` —— ${f.reason}` : ''}`}>
+                <div className="truncate">{f.rel}</div>
+                {f.reason && <div className="whitespace-pre-line text-2xs leading-4">{f.reason}</div>}
               </li>
             ))}
           </ul>

@@ -1,4 +1,4 @@
-import type { CloudState, Task, TaskEventPayload, TaskStatus } from './types'
+import type { CloudState, Task, TaskEventPayload, TaskStatus, VaultState } from './types'
 import { pendingSyncTotal } from './persist'
 import { broadcast } from '../lib/windows'
 import { setAttentionBadge } from '../lib/notify'
@@ -35,6 +35,8 @@ class TaskRegistry {
     checkedAt: 0,
     pendingSync: 0,
   }
+  /** R16：知识库目录可访问性。`lost:false` 是常态，出事才顶条 */
+  private vault: VaultState = { lost: false, root: null, checkedAt: 0 }
   private seq = 0
   private throttled = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -159,10 +161,10 @@ class TaskRegistry {
   }
 
   /** active 全部 + 未过期的 recent（全局条只看 active，面板要看 recent） */
-  snapshot(): { tasks: Task[]; cloud: CloudState } {
+  snapshot(): { tasks: Task[]; cloud: CloudState; vault: VaultState } {
     const cutoff = Date.now() - RECENT_TTL_MS
     this.recent = this.recent.filter((t) => (t.endedAt ?? 0) > cutoff)
-    return { tasks: [...this.active.values(), ...this.recent], cloud: this.cloud }
+    return { tasks: [...this.active.values(), ...this.recent], cloud: this.cloud, vault: this.vault }
   }
 
   /** 重启后把上一轮的终态结果塞进 recent（面板仍能看到「上次 6/6 完成」） */
@@ -186,6 +188,22 @@ class TaskRegistry {
       next.pendingSync === this.cloud.pendingSync
     this.cloud = next
     if (!same) this.emit({ type: 'cloud', cloud: next })
+  }
+
+  getVault(): VaultState {
+    return this.vault
+  }
+
+  /**
+   * R16：置库可访问性。**同 setCloud，没有实质变化就不推**——
+   * watcher 的 error 可能连着冒好几条，每条都推一次会把渲染层刷疯，
+   * 而顶条的内容一模一样。
+   */
+  setVault(p: Partial<VaultState>): void {
+    const next = { ...this.vault, ...p, checkedAt: Date.now() }
+    const same = next.lost === this.vault.lost && next.reason === this.vault.reason && next.root === this.vault.root
+    this.vault = next
+    if (!same) this.emit({ type: 'vault', vault: next })
   }
 }
 
