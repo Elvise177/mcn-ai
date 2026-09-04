@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { tokensOf, type UsageRecord } from './usage'
-import { buildIngestUsageRecords } from './usage/ingest'
+import { buildIngestUsageRecords, judgeTagRan } from './usage/ingest'
 import { costCny, routeOf, DEFAULT_PRICING, PRICING_REV } from './usage/pricing'
 
 /**
@@ -91,9 +91,10 @@ console.log('\n【2】buildIngestUsageRecords：三条分支（R8 —— 账本 
     expectedModel: 'deepseek-v4-flash',
   }
   const tagUsage = { prompt_tokens: 2000, completion_tokens: 400, prompt_cache_hit_tokens: 800 }
+  const RAN = ['ok']
 
   // 分支 1：pipeline 报了用量 —— 它说了算
-  const r1 = buildIngestUsageRecords({ ...base, tagRan: true, events: [{ stage: 'tag_llm', usage: tagUsage, calls: 2, model: 'deepseek-v4-flash' }] })
+  const r1 = buildIngestUsageRecords({ ...base, tagStages: RAN, events: [{ stage: 'tag_llm', usage: tagUsage, calls: 2, model: 'deepseek-v4-flash' }] })
   check('报了用量 → 一条记录', r1.length === 1, String(r1.length))
   check('token 真的进了账（不再是 usage:null）', tokensOf(r1[0].usage).input === 1200 && tokensOf(r1[0].usage).cacheRead === 800)
   check('calls = pipeline 报的篇数，不是恒 1', r1[0].calls === 2, String(r1[0].calls))
@@ -105,7 +106,7 @@ console.log('\n【2】buildIngestUsageRecords：三条分支（R8 —— 账本 
 
   // 分流轻管线的主题打标是另一笔钱，要单独一条（归因才分得开）
   const r2 = buildIngestUsageRecords({
-    ...base, tagRan: true,
+    ...base, tagStages: RAN,
     events: [
       { stage: 'tag_llm', usage: tagUsage, calls: 2, model: 'deepseek-v4-flash' },
       { stage: 'route_参考资料', usage: { prompt_tokens: 500, completion_tokens: 50 }, calls: 1, model: 'deepseek-v4-flash' },
@@ -114,19 +115,30 @@ console.log('\n【2】buildIngestUsageRecords：三条分支（R8 —— 账本 
   check('两个阶段各记一条', r2.length === 2 && r2[1].attribution?.stage === 'route_参考资料', String(r2.length))
 
   // **最容易记成假账的一轮**：新产物报了 calls:0（这一轮真的一次没调）
-  const r3 = buildIngestUsageRecords({ ...base, tagRan: true, events: [{ stage: 'tag_llm', usage: {}, calls: 0, model: 'deepseek-v4-flash' }] })
+  const r3 = buildIngestUsageRecords({ ...base, tagStages: RAN, events: [{ stage: 'tag_llm', usage: {}, calls: 0, model: 'deepseek-v4-flash' }] })
   check('报了 calls:0 → 一条都不记（不许凭空记一笔没花的钱）', r3.length === 0, JSON.stringify(r3))
 
   // 分支 2：老冻结产物一条都不报 —— 退回「只记次数」，不能变成完全不记（那是倒退）
-  const r4 = buildIngestUsageRecords({ ...base, tagRan: true, events: [] })
+  const r4 = buildIngestUsageRecords({ ...base, tagStages: RAN, events: [] })
   check('老产物不报用量 → 兜底记一条次数', r4.length === 1 && r4[0].calls === 1 && r4[0].usage === null)
   check('兜底记录的 resolved_model 是 null（没人报过，不许抄 expected）', r4[0].resolved_model === null)
 
   // 分支 3：打标压根没跑
-  check('打标跳过 → 一条都不记', buildIngestUsageRecords({ ...base, tagRan: false, events: [] }).length === 0)
+  check('打标跳过 → 一条都不记', buildIngestUsageRecords({ ...base, tagStages: ['skipped'], events: [] }).length === 0)
+  check('压根没有 tag_llm 阶段 → 一条都不记', buildIngestUsageRecords({ ...base, tagStages: [], events: [] }).length === 0)
+
+  /**
+   * **老冻结产物的假 ok**（2026-09-04）：本批为空时它会先 emit `tag_llm skipped(empty_batch)`，
+   * 紧接着 `run_stage` 又补一条 `tag_llm ok`——一轮**一次 LLM 都没调**，stages 里却有个 ok。
+   * 判据要是"有没有非 skipped 的 tag_llm"，账本上就会凭空多一条「入库打标 1 次」。
+   * pipeline 侧已经修了，但客户机上的老产物还活着，所以这条判据得自己站得住。
+   */
+  check('skipped 后面跟着假 ok → 仍然算没跑，不记账', buildIngestUsageRecords({ ...base, tagStages: ['skipped', 'ok'], events: [] }).length === 0)
+  check('judgeTagRan：只要出现过 skipped 就是没跑', !judgeTagRan(['skipped', 'ok']) && !judgeTagRan(['skipped']) && !judgeTagRan([]))
+  check('judgeTagRan：只有 ok 才算跑过', judgeTagRan(['ok']) && judgeTagRan(['ok', 'ok']))
 
   // 模型被换掉要看得见（env 没传进去就是这个形状）
-  const r5 = buildIngestUsageRecords({ ...base, tagRan: true, events: [{ stage: 'tag_llm', usage: tagUsage, calls: 1, model: 'deepseek-v4-pro' }] })
+  const r5 = buildIngestUsageRecords({ ...base, tagStages: RAN, events: [{ stage: 'tag_llm', usage: tagUsage, calls: 1, model: 'deepseek-v4-pro' }] })
   check('pipeline 报的模型 ≠ 要的模型 → degraded', r5[0].degraded === true && r5[0].resolved_model === 'deepseek-v4-pro')
   check('模型一致时不报 degraded', r1[0].degraded === false)
 }
@@ -160,7 +172,7 @@ console.log('\n【4】跨实现对账：应用侧 vs scripts/usage-report.mjs（
       // 入库打标：OpenAI 兼容口径（缓存含在 prompt 里）—— R8 之后的形状
       ...buildIngestUsageRecords({
         ts, taskId: 'inbox:/tmp/v', vault: '/tmp/v', startedAt: 0, endedAt: 90_000,
-        baseUrl: 'https://api.deepseek.com', expectedModel: 'deepseek-v4-flash', tagRan: true,
+        baseUrl: 'https://api.deepseek.com', expectedModel: 'deepseek-v4-flash', tagStages: ['ok'],
         events: [{ stage: 'tag_llm', usage: { prompt_tokens: 500_000, completion_tokens: 80_000, prompt_cache_hit_tokens: 300_000, total_tokens: 580_000 }, calls: 37, model: 'deepseek-v4-flash' }],
       }),
       // 入库打标：R8 之前的老记录（只有次数）—— 两边都该把它算成 0 token

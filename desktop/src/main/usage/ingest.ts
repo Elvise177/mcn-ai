@@ -49,8 +49,23 @@ export interface IngestUsageInput {
   expectedModel: string | null
   /** 本轮收到的 usage 事件，按到达顺序 */
   events: PipelineUsageEvent[]
-  /** 打标阶段是否真跑过（`stages` 里有非 skipped 的 tag_llm）——只用于第 2 条兜底分支 */
-  tagRan: boolean
+  /**
+   * 本轮 `tag_llm` 阶段事件的 status，按到达顺序（`['skipped']` / `['ok']` / `['skipped','ok']`…）。
+   * **传的是原始状态而不是一个算好的布尔**：这个判断本身踩过坑，得能在 smoke 里喂各种组合。
+   */
+  tagStages: string[]
+}
+
+/**
+ * 打标到底跑没跑过。**只要出现过 skipped 就是没跑**——哪怕后面还跟着一条 ok。
+ *
+ * 老冻结产物在"本批为空"时会**同时**打出 `tag_llm skipped(empty_batch)` 与 `tag_llm ok`
+ * （`run_stage` 不看内层已经 emit 过 skipped，照样补一条 ok；pipeline 侧 2026-09-04 已修，
+ * 但客户机上的老产物还活着）。只看"有没有非 skipped 的 tag_llm"会被那条假 ok 骗过，
+ * 于是一轮**一次 LLM 都没调**的入库，会在账本上凭空多一条"入库打标 1 次"。
+ */
+export function judgeTagRan(tagStages: string[]): boolean {
+  return tagStages.length > 0 && !tagStages.includes('skipped')
 }
 
 export function buildIngestUsageRecords(i: IngestUsageInput): UsageRecord[] {
@@ -88,7 +103,7 @@ export function buildIngestUsageRecords(i: IngestUsageInput): UsageRecord[] {
   }
 
   // 分支 2：老冻结产物不报用量 —— 退回「只记次数」，比"因为没有 usage 就不记"诚实
-  if (i.tagRan) {
+  if (judgeTagRan(i.tagStages)) {
     return [
       {
         ts: i.ts,

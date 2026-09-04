@@ -1125,7 +1125,9 @@ export class InboxOrchestrator {
         baseUrl: store.get('llmBaseUrl'),
         expectedModel: store.get('llmModel'),
         events: usageEvents,
-        tagRan: this.stages.some((s) => s.stage === 'tag_llm' && s.status !== 'skipped'),
+        // 原始状态原样递进去，"跑没跑过"的判据在 judgeTagRan 里（老产物会同时打
+        // skipped 和 ok，只看"有没有非 skipped"会被那条假 ok 骗出一条空账）
+        tagStages: this.stages.filter((s) => s.stage === 'tag_llm').map((s) => String(s.status ?? '')),
       })
       for (const r of records) appendUsage(r)
     }

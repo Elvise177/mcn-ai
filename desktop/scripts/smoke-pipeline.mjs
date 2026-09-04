@@ -24,7 +24,7 @@
  * 打标只打本批（`--files`，方案 C）／`convert-one` 三条路径／`--count-stale`。
  */
 import { execFileSync, spawn } from 'child_process'
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, copyFileSync } from 'fs'
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, copyFileSync, utimesSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -65,6 +65,14 @@ const parse = (out) =>
         return []
       }
     })
+
+/** 递归列出目录下的 md（第 7 节验"这批文件到底有没有被 LLM 打过标"要用） */
+const allMd = (d) =>
+  !existsSync(d)
+    ? []
+    : readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? allMd(join(d, e.name)) : e.name.endsWith('.md') ? [join(d, e.name)] : []
+      )
 
 const V = join(tmpdir(), `mcnai-pipe-smoke-${Date.now()}`)
 
@@ -246,6 +254,17 @@ setTimeout(() => process.exit(0), 120000)
       mkdirSync(join(V2, '80_Library'), { recursive: true })
       writeFileSync(join(V2, '00_投递箱/业务笔记.md'), '这是一篇用于冒烟的业务笔记，正文要够长才会被送去打标。'.repeat(3))
       writeFileSync(join(V2, '00_投递箱/参考资料/外部书.md'), '这是一份外部资料，走分流轻管线的主题打标。'.repeat(3))
+      /**
+       * **把 mtime 拨老**（2026-09-04）。样本是 `.md`，走的是 `shutil.copy2` 直拷、
+       * **保留原 mtime**——真实用户从 Finder 拖进来的 md 本来就带着几天前的时间戳。
+       * 而这个脚本是现写现跑，文件天生"很新"，于是 `_tag()` 那条 mtime 判据**碰巧**成立，
+       * 把「本批文件靠集合差认出来」这件事整个掩盖过去了（第一版就是这么绿的）。
+       * 拨老之后，只有集合差认得出它们——这才是真正在验的那条路。
+       */
+      const old = new Date(Date.now() - 3600_000)
+      for (const f of ['00_投递箱/业务笔记.md', '00_投递箱/参考资料/外部书.md']) {
+        utimesSync(join(V2, f), old, old)
+      }
 
       let r
       try {
@@ -280,6 +299,64 @@ setTimeout(() => process.exit(0), 120000)
         ? ok('打标仍然只有一条 ok 阶段事件（usage 行不算阶段）')
         : fail('阶段事件数量不对', JSON.stringify(r.events.filter((e) => e.stage === 'tag_llm')))
       !r.raw.includes('sk-smoke-stub') ? ok('key 没有被回显') : fail('key 泄漏到输出')
+
+      /**
+       * **`.md` 原件不许被判成"不支持的格式"**（2026-09-04 修的缺陷 1）。
+       * 现场是：9 篇笔记正常入了库，原件却全被搬进 `.failed/`，
+       * 旁边的「失败原因.txt」写着「这些文件没能进知识库 …… 暂不支持 .md 格式」——整句话是假的。
+       * 根因：`cli.py` 拿 `CONVERTERS` 当"支持格式"，而 `.md`/`.txt` 走的是直拷、不在里面。
+       */
+      const doneDir = join(V2, '00_投递箱/.done')
+      const failedDir = join(V2, '00_投递箱/.failed')
+      const inDone = existsSync(doneDir) ? readdirSync(doneDir).flatMap((d) => readdirSync(join(doneDir, d))) : []
+      const inFailed = existsSync(failedDir) ? readdirSync(failedDir).flatMap((d) => readdirSync(join(failedDir, d))) : []
+      inDone.includes('业务笔记.md')
+        ? ok('.md 原件进 .done（它本来就是支持的格式）')
+        : fail('.md 原件没进 .done', `done=${JSON.stringify(inDone)} failed=${JSON.stringify(inFailed)}`)
+      inFailed.length === 0
+        ? ok('没有任何文件被误判进 .failed')
+        : fail('有文件被误判成失败件', JSON.stringify(inFailed))
+      const convFail = r.events.find((e) => e.stage === 'convert_failures')
+      !convFail
+        ? ok('没有报「转换失败/格式不支持」（这一轮本来就全都支持）')
+        : fail('误报了转换失败/不支持', JSON.stringify(convFail))
+      // 笔记真的被 LLM 打过标：规则打标只会给 doc_type「其他」+ 文件名当摘要
+      const libMd = allMd(join(V2, '80_Library'))
+      const tagged = libMd.filter((f) => /^ai_tagged:\s*true\s*$/m.test(readFileSync(f, 'utf8').slice(0, 800)))
+      tagged.length >= 1
+        ? ok(`.md 真的走到了 LLM 打标（${tagged.length} 篇带 ai_tagged）`)
+        : fail('.md 只拿到规则打标，LLM 被整批跳过了', libMd.map((f) => f.split('/').pop()).join(','))
+
+      /**
+       * **本批为空时不许出现假 ok**（2026-09-04 修的缺陷 3）。
+       * 原来 `_tag()` 内层 emit 完 `skipped(empty_batch)` 就 return，而 `run_stage`
+       * 不看这个、照样补一条 `tag_llm ok`——一轮一次 LLM 都没调，stages 里却有个 ok，
+       * 桌面端据此在账本上凭空多记一条「入库打标 1 次」（usage/ingest.ts 分支 2）。
+       *
+       * 造法：投递箱已空（原件都归档了），再把库里全部 md 的 mtime 拨老 ——
+       * 集合差为空、mtime 也不新，本批必然为空，这条分支**确定**会走到。
+       */
+      for (const f of allMd(join(V2, '80_Library'))) utimesSync(f, old, old)
+      let r2
+      try {
+        const out2 = execFileSync(BIN, ['--vault', V2, '--llm-base-url', `http://127.0.0.1:${port}/v1`], {
+          encoding: 'utf8', timeout: 120_000, env: { ...process.env, LLM_API_KEY: 'sk-smoke-stub' },
+        })
+        r2 = { code: 0, raw: out2, events: parse(out2) }
+      } catch (e) {
+        r2 = { code: e.status ?? 1, raw: String(e.stdout ?? '') + String(e.stderr ?? ''), events: parse(String(e.stdout ?? '')) }
+      }
+      const tag2 = r2.events.filter((e) => e.stage === 'tag_llm')
+      const skipped2 = tag2.find((e) => e.status === 'skipped')
+      skipped2?.reason === 'empty_batch'
+        ? ok('空批次报 skipped(empty_batch)')
+        : fail('空批次没报 empty_batch', JSON.stringify(tag2))
+      !tag2.some((e) => e.status === 'ok')
+        ? ok('空批次**不再**跟一条假 ok（桌面端不会凭空记一笔账）')
+        : fail('空批次仍然补了一条假 ok', JSON.stringify(tag2))
+      !r2.events.some((e) => e.status === 'usage' && e.stage === 'tag_llm')
+        ? ok('空批次一条 usage 都不报')
+        : fail('空批次报了 usage', JSON.stringify(r2.events.filter((e) => e.status === 'usage')))
     }
   } finally {
     stub.kill()

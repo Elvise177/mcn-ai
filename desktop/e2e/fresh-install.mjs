@@ -118,9 +118,18 @@ try {
   step('【3】建库向导：新建模板库（A-3 那个 bug 就长在这条路上）')
   await win.waitForTimeout(1200)
   await snap('61-新装-建库向导两分支')
-  // 走 UI 上那颗「新建库」卡片；落点由 MCNAI_E2E_NEW_VAULT 决定
-  // （系统保存框 Playwright 驱动不了，见 ipc.ts 里那条注释）
+  /**
+   * 走 UI 上那颗「新建库」卡片；落点由 MCNAI_E2E_NEW_VAULT 决定
+   * （系统保存框 Playwright 驱动不了，见 ipc.ts 里那条注释）。
+   *
+   * **建库是两步**：先选「新建」，再选模板（0.2.0 分类体系配置化之后加的这一步）。
+   * 这里原来只点了第一颗，`vaultPath` 永远是 null，而报出来的错是下一步的
+   * 「投递箱未就绪」——方向指到投递箱，其实是库压根没建（2026-09-04 逮到；
+   * L4 平时不跑，所以这个洞在这儿躺了一段时间）。写法对齐 walkthrough 里已验证的那段。
+   */
   await win.click('[data-testid="wizard-create"]')
+  await win.locator('[data-testid="wizard-templates"]').waitFor({ timeout: 10000 })
+  await win.click('[data-testid="wizard-template-mcn"]')
   for (let i = 0; i < 60; i++) {
     if ((await win.evaluate(() => window.api.settings.get())).vaultPath) break
     await win.waitForTimeout(1000)
