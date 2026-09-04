@@ -3566,9 +3566,18 @@ try {
            * 本地模式没登录，cloud_sync 是 `skipped` 带 message「未登录」，正好验同一条链路。
            */
           if (!logRows.length) throw new Error('整轮跑下来投递箱面板一行阶段日志都没渲染过')
-          // 期望值从**任务层**取（系统侧），不在断言里再抄一份阶段名/文案常量
+          /**
+           * 期望值从**任务层**取（系统侧），不在断言里再抄一份阶段名/文案常量。
+           *
+           * **必须先等这一轮真的跑完**（2026-09-04 E2E_CHAT 轮红在这儿）：
+           * 第一版在这里自己轮询 2 分钟就判死，而本地模式下 `cloud_sync` 是 `skipped`（未登录）
+           * 几秒就到，**登录态下它是真的在上传**——上百篇笔记分批推，加上真实打标与实体建卡，
+           * 一轮好几分钟（本文件 `waitInboxIdle` 的注释里早写着这件事，我没照做）。
+           * 判死的门槛必须跟着"这一轮要跑多久"走，而不是跟着本地模式的手感走。
+           */
+          await waitInboxIdle(win)
           let cloudEv = null
-          for (let i = 0; i < 240 && !cloudEv?.message; i++) {
+          for (let i = 0; i < 60 && !cloudEv?.message; i++) {
             cloudEv = await win.evaluate(async () => {
               const snap = await window.api.tasks.list()
               const t = snap.tasks.find((x) => x.kind === 'inbox')
@@ -3576,7 +3585,8 @@ try {
             })
             if (!cloudEv?.message) await win.waitForTimeout(500)
           }
-          if (!cloudEv?.message) throw new Error('等了 2 分钟任务层里都没有带 message 的 cloud_sync 事件')
+          if (!cloudEv?.message)
+            throw new Error('这一轮跑完了，任务层里却没有带 message 的 cloud_sync 事件')
           const wantMsg = cloudEv.message.replace(/\s+/g, '')
           const readRows = () =>
             win.evaluate(() =>
