@@ -37,6 +37,32 @@ npm run build && node e2e/walkthrough.mjs   # 截图在 e2e/shots/，AI 必须 R
   | 附件/资产素材 | 某次会话的 scratchpad 目录还在 | `ENOENT`，像环境坏了 |
   | 取消后进度条中性灰 | 取消时恰好已完成 ≥1 个阶段 | `locator timeout`，像元素丢了 |
   | reload 后任务还在 | 一个文件的入库活得比 reload 久 | 「任务层没扛住刷新」，像产品坏了 |
+  | Dock 唤回浮窗 | Dock 亮着 = 有在跑的投递任务（其实亮的是另一条 failed 的对话） | 等 8 秒超时，像"唤回坏了" |
+
+- **「看得见」不等于「点得到」**（2026-09-03 逮到一个从上线起就存在的缺陷）：
+
+  Dock 的多任务列表是 `absolute bottom-full`，而 `.task-dock` 为了 max-height 过渡挂着
+  `overflow: hidden` —— 列表画在 Dock **上方**，像素被整片裁掉。
+  DOM 在、Playwright 报 `visible`、截图里也看不出异常（它压根没画出来），
+  点下去命中的却是它底下的「最近对话」列表。**多任务时那个入口从写出来那天起就是摆设。**
+
+  判据：**凡是断言"某个控件可用"，就要么真点一次并验结果状态，要么做一次命中测试**——
+  ```js
+  const r = el.getBoundingClientRect()
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+  if (!el.contains(top)) throw new Error(`被挡住/被裁掉了，命中的是 ${top?.className}`)
+  ```
+  `isVisible()` 只回答"有没有布局盒子"，回答不了"用户点得到吗"。
+  同一类的还有：被 toast 压住的按钮（2026-08-18 踩过）、被遮罩挡住的模态。
+
+- **断言认语义，不认布局类名/文案**（2026-09-04 一次改动带红六条）：
+
+  提问气泡从 `flex justify-end` 改成纵向布局（要放 hover 操作条），四条按
+  `className.includes('justify-end')` 数气泡的断言立刻红在与它们无关的地方；
+  同一批里把搜索框占位从「搜索库…」改成「搜索知识库…」，三个脚本的
+  `input[placeholder="搜索库…"]` 一起等到超时。
+  改法：`[data-role="user"]` / `[data-testid="vault-search"]`。
+  文案与布局是**会变的**，语义属性是我们自己定的契约。
 
 - **只在真实调用下才走到的分支，必须抽成纯函数**，否则它就是没人测
   （2026-08-21，花 ¥0.88 真跑才发现的教训）：
