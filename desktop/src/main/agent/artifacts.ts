@@ -4,6 +4,7 @@ import { join, relative, basename } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
 import { shell } from 'electron'
 import { notifyDingtalk } from '../lib/dingtalk'
+import { notify } from '../lib/notify'
 import { broadcast } from '../lib/windows'
 import { store } from '../store'
 import { inboxOrchestrator } from '../inbox/orchestrator'
@@ -83,6 +84,12 @@ export class ArtifactsWatcher {
     this.watcher.on('add', (p: string) => {
       const rel = relative(this.dir!, p)
       broadcast('artifact:created', { path: rel, name: basename(p) })
+      /**
+       * F10：产物做完了发一条。**耗时给足**（产物本来就要几十秒，这里给
+       * `NOTIFY_MIN_MS` 之上的值直接放行）——它不像入库那样会因为"拖一个文件"被频繁触发，
+       * 而是用户明确要了一件东西、等着拿。
+       */
+      notify('artifact', '产物已生成', `${basename(p)} 做好了，可以打开或入库`, Number.MAX_SAFE_INTEGER)
       if (store.get('artifactAutoIngest')) void this.ingest(rel)
       notifyDingtalk('artifact', 'mcn-ai 产物', `### 新产物生成 📄\n\n**${basename(p)}**\n\n> ${new Date().toLocaleString('zh-CN')} · mcn-ai 自动化`)
     })

@@ -1,6 +1,7 @@
 import type { CloudState, Task, TaskEventPayload, TaskStatus } from './types'
 import { pendingSyncTotal } from './persist'
 import { broadcast } from '../lib/windows'
+import { setAttentionBadge } from '../lib/notify'
 
 /**
  * 全局任务注册表（设计见 docs/DESIGN-task-state.md §1.5 / §2）。
@@ -48,6 +49,29 @@ class TaskRegistry {
   private emit(payload: TaskEventPayload): void {
     this.tap?.(payload)
     broadcast('task:event', payload)
+    this.refreshBadge()
+  }
+
+  /** 等人处理的确认卡数（AgentManager 报进来）。它不是 Task，但确确实实在等人 */
+  private waiting = 0
+  setWaiting(n: number): void {
+    if (n === this.waiting) return
+    this.waiting = n
+    this.refreshBadge()
+  }
+
+  /**
+   * Dock 角标 = **有几件事在等你**（F10）。
+   *
+   * 只算"需要人做点什么"的三类：等确认的写入、失败的任务、没同步上去的条数。
+   * 把"进行中"也算进去的话，角标会在整个入库过程里一直挂着数字——
+   * 那不是提醒，是噪音（而噪音的下场是没人再看它）。
+   */
+  private refreshBadge(): void {
+    const failed = [...this.active.values(), ...this.recent].filter(
+      (t) => t.status === 'failed' && t.kind !== 'sync'
+    ).length
+    setAttentionBadge(this.waiting + failed + this.cloud.pendingSync)
   }
 
   private find(id: string): Task | undefined {

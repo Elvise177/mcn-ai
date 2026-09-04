@@ -14,6 +14,7 @@ import { store } from '../store'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { broadcast, hasWindow } from '../lib/windows'
+import { notify } from '../lib/notify'
 import { tasks } from '../tasks/registry'
 import { attachmentNote, stageAttachments } from './attachments'
 import type { AgentTask } from '../tasks/types'
@@ -218,11 +219,21 @@ export class AgentManager {
         if (!this.writeWaiters.has(id)) return
         this.writeWaiters.delete(id)
         clearTimeout(timer)
+        // **角标在这儿减**：超时那条不走 resolveWriteConfirm，只在那边减的话
+        // 一次没人理的确认会把角标永远挂在 Dock 上
+        tasks.setWaiting(this.writeWaiters.size)
         resolve(d)
       }
       const timer = setTimeout(() => done({ allow: false, reason: 'timeout' }), WRITE_CONFIRM_TIMEOUT_MS)
       this.writeWaiters.set(id, done)
       broadcast('agent:confirm-write', { id, sessionId, ...info })
+      /**
+       * F10：**这一条必须响**。确认卡 60 秒不理就默认拒——用户切走了根本不知道
+       * 有件事在等他，回来只看到 AI 说"用户没有在 60 秒内确认"。
+       * 同时挂 Dock 角标：它不是"通知一下就完了"，是"有件事在等你"。
+       */
+      notify('confirm', 'AI 想修改你的知识库', `${info.rel}　60 秒内不选择将自动取消`)
+      tasks.setWaiting(this.writeWaiters.size)
     })
   }
 

@@ -4,6 +4,7 @@ import { judgeTimeout, resolveTimeoutMs, humanDuration, DEFAULT_AGENT_TIMEOUT_MI
 import { TailBuffer } from './lib/tail-buffer'
 import { pipelineArgs, pipelineEnv } from './lib/pipeline'
 import { isSafeVaultRoot } from './vault/wizard'
+import { judgeNotify, NOTIFY_MIN_MS } from './lib/notify'
 
 /**
  * 批 1「架构止血」里那些**只在真实调用 / 真实故障下才走到**的判据，抽成纯函数后在这儿零花费验
@@ -116,6 +117,26 @@ console.log('\n【5】isSafeVaultRoot：家目录 / 磁盘根 / 外接卷根 / i
   ok('/tmp/mcnai-e2e-vault')
   const r = isSafeVaultRoot(home)
   check('拒绝理由是人话（含「家目录」与下一步建议）', !r.ok && /家目录/.test(r.reason) && /文件夹/.test(r.reason), r.ok ? '' : r.reason)
+}
+
+console.log('\n【6】judgeNotify：完成才通知 · 失败才响铃 · 眼前不打扰（F10）')
+{
+  const j = (p: Parameters<typeof judgeNotify>[0]) => judgeNotify(p)
+  // 界面就在眼前：一条都不发（他正看着呢，再弹一条只是打扰）
+  check('聚焦时不发', !j({ focused: true, kind: 'inbox-done', elapsedMs: 999_999 }).notify)
+  check('聚焦时连"需要确认"也不发（弹窗就在他面前）', !j({ focused: true, kind: 'confirm' }).notify)
+  // 完成类：跑得够久才值得打断
+  check('两秒就完的入库不通知', !j({ focused: false, kind: 'inbox-done', elapsedMs: 2000 }).notify)
+  check(`超过 ${NOTIFY_MIN_MS / 1000} 秒才通知`, j({ focused: false, kind: 'inbox-done', elapsedMs: NOTIFY_MIN_MS }).notify)
+  check('完成是静音的（"你可以回来看了"不必占用听觉）', j({ focused: false, kind: 'inbox-done', elapsedMs: 60_000 }).silent)
+  check('没给耗时就当很短，不通知', !j({ focused: false, kind: 'inbox-done' }).notify)
+  // 失败才响铃
+  const bad = j({ focused: false, kind: 'inbox-failed', elapsedMs: 1000 })
+  check('失败必通知且响铃（哪怕只跑了一秒）', bad.notify && !bad.silent)
+  // 需要确认：60 秒不理默认拒，切走了根本不知道有件事在等他
+  const ask = j({ focused: false, kind: 'confirm' })
+  check('需要确认必通知且响铃', ask.notify && !ask.silent)
+  check('产物完成：给足耗时就通知、且静音', j({ focused: false, kind: 'artifact', elapsedMs: 60_000 }).notify)
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

@@ -246,8 +246,17 @@ app.whenReady().then(() => {
   })
 })
 
+/**
+ * **关窗不退**（F10，macOS 惯例）。
+ *
+ * 这不只是"守个平台规矩"：投递箱一批资料要跑几分钟，用户关掉窗口去干别的，
+ * 应用一起退了的话那一轮就断在半路（而他以为只是把窗口收起来了）。
+ * 后台照常跑，做完发系统通知，Dock 上点一下窗口就回来（见下面的 activate）。
+ * 真要退有菜单里那颗「退出 SamePage」，走的是完整的 before-quit 清理链。
+ */
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+  else log('info', 'main', '窗口已全部关闭；后台任务继续，Dock 上点一下即可回来')
 })
 
 /**

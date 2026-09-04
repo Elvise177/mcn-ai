@@ -12,6 +12,7 @@ import { pipelineBin, pipelineArgs, pipelineEnv } from '../lib/pipeline'
 import { log } from '../lib/logger'
 import { hasSensitiveMark } from '../lib/sensitive'
 import { notifyDingtalk } from '../lib/dingtalk'
+import { notify } from '../lib/notify'
 import { tasks } from '../tasks/registry'
 import { appendUsage } from '../usage'
 import {
@@ -1035,6 +1036,19 @@ export class InboxOrchestrator {
     // 用户自己停的不推钉钉——那是他刚做的动作，不是需要被通知的事件
     if (!canceled) {
       const files = this.runFiles.splice(0)
+      /**
+       * F10 系统通知：入库要跑几分钟，用户**不会盯着看**。
+       * 界面在眼前时一条都不发、几秒就完的也不发（判据见 lib/notify.ts）——
+       * 拖一个文件进去两秒转完还弹一条系统通知，比不弹更烦。
+       */
+      notify(
+        ok ? 'inbox-done' : 'inbox-failed',
+        ok ? '资料已入库' : '入库没有完成',
+        ok
+          ? `${files.length || this.stages.length ? `${files.length} 个文件` : '这一批'}处理完了，可以直接问它们了`
+          : '有阶段失败了，打开投递箱面板看看是哪一步',
+        Date.now() - runStart
+      )
       const fileLine = files.length ? `\n\n处理文件：${files.slice(0, 8).join('、')}${files.length > 8 ? ` 等${files.length}个` : ''}` : ''
       notifyDingtalk(
         'inbox',

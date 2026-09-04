@@ -5777,6 +5777,22 @@ try {
       throw new Error('开了第二扇窗之后，第一扇窗收不到任务事件了（管理器的 win 被覆盖 = 广播没生效）')
     await snap('65-多窗口-第一扇窗仍在收事件', 250)
     console.log('Cmd+N 多窗口 ✓ 第一扇窗仍在收事件')
+
+    /**
+     * F10 Dock 角标 = **有几件事在等你**（不是"有几件事在跑"）。
+     * 这一轮走查里 R3 超时留下了一条 failed 的对话任务，角标就该有数。
+     * **从主进程读真值**（`app.dock.getBadge()`），不是从界面上认——
+     * 角标压根不在我们的 DOM 里，界面断言看不见它。
+     */
+    const badge = await app.evaluate(({ app: a }) => a.dock?.getBadge?.() ?? '')
+    const failedNow = await win.evaluate(async () => {
+      const snap = await window.api.tasks.list()
+      return snap.tasks.filter((t) => t.status === 'failed' && t.kind !== 'sync').length + snap.cloud.pendingSync
+    })
+    if (String(failedNow) !== badge)
+      throw new Error(`Dock 角标(${badge}) 与"在等你的事情"件数(${failedNow}) 对不上`)
+    if (failedNow > 0 && !badge) throw new Error('有失败任务却没有 Dock 角标')
+    console.log('F10 Dock 角标 ✓', JSON.stringify({ 角标: badge, 在等你的事: failedNow }))
     // 关掉第二扇：后面的 before-quit 断言假定只有一扇窗
     await second.close().catch(() => {})
     await win.waitForTimeout(500)
@@ -5929,6 +5945,51 @@ try {
     console.log('Q9 更新安装失败 ✓', JSON.stringify(failText.trim()))
   } finally {
     await Promise.race([aU.close(), new Promise((r) => setTimeout(r, 20000))])
+  }
+}
+
+/**
+ * ==== 独立实例 · F10 关窗不退 ====
+ *
+ * macOS 惯例，但这里不只是"守个平台规矩"：投递箱一批资料要跑几分钟，
+ * 用户关掉窗口去干别的，应用一起退了的话那一轮就**断在半路**——
+ * 而他以为自己只是把窗口收起来了。
+ *
+ * 单开一个实例验：**关掉最后一扇窗之后进程还活着**，Dock 上点一下（activate）窗口回来。
+ * 放在独立实例里是因为主走查后面还要用那扇窗，关掉就没法继续了。
+ */
+{
+  const keepUser = '/tmp/mcnai-e2e-keepalive'
+  rmSync(keepUser, { recursive: true, force: true })
+  seedProvision(keepUser)
+  const aK = await launch({ ...process.env, MCNAI_USER_DATA: keepUser, MCNAI_VAULT: vaultCopy })
+  try {
+    const wK = await aK.firstWindow()
+    await prepWindow(aK, wK)
+    const skip = wK.locator('text=暂不登录')
+    await skip.waitFor({ timeout: 20000 })
+    await skip.click()
+    await wK.waitForTimeout(800)
+
+    // 关掉唯一那扇窗
+    await aK.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().forEach((w) => w.close()))
+    await new Promise((r) => setTimeout(r, 2500))
+    // **进程还活着**：能继续 evaluate 就是最直接的证据
+    const alive = await aK.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)
+    if (alive !== 0) throw new Error(`窗口没关掉，还剩 ${alive} 扇`)
+    // Dock 上点一下 = activate：窗口必须回来
+    await aK.evaluate(({ app: a }) => a.emit('activate'))
+    await new Promise((r) => setTimeout(r, 2500))
+    const back = await aK.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)
+    if (back !== 1) throw new Error(`Dock 点一下窗口没回来（现在有 ${back} 扇）`)
+    const w2 = await aK.firstWindow()
+    await w2.waitForTimeout(1500)
+    await w2.setViewportSize({ width: 1440, height: 920 })
+    await w2.screenshot({ path: join(shots, '67-关窗不退-点Dock回来.png') })
+    record('67-关窗不退-点Dock回来')
+    console.log('F10 关窗不退 ✓（关掉最后一扇窗进程仍在，activate 后窗口回来）')
+  } finally {
+    await Promise.race([aK.close(), new Promise((r) => setTimeout(r, 20000))])
   }
 }
 
