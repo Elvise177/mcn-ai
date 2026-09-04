@@ -1465,7 +1465,7 @@ desktop/
 | `~/Documents/AI/maggie-personal-data` | Maggie 的**源文档**（98 个 docx/xlsx/pdf/pptx，558 MB），回归重跑的输入 |
 | `~/Documents/AI/maggie-vault` | Maggie 的旧版产出 vault（372 篇 md，git 仓库，9 个阶段叠出来的），**回归对比基准** |
 | `~/Documents/MyBrain` | 开发者本人的 Obsidian vault（求职/刷题），**与 Maggie 无关**——旧版文档误标成「0 号用户 vault」，2026-08-17 更正 |
-| `~/Documents/AI/pkb-pipeline` | Python 入库 pipeline 源仓库（02_convert.py 是冻结风险核心） |
+| `~/Documents/AI/pkb-pipeline` | Python 入库 pipeline 源仓库（02_convert.py 是冻结风险核心）。**2026-09-04 起有远程**：`github.com/Elvise177/pkb-pipeline`（私有，分支 `main`），每笔提交都要 push——此前它没有 remote，而冻结产物是 gitignored 的，源码曾是整条链上唯一没有异地副本的一环 |
 | `~/Documents/AI/omg-dingtalk-automation` | 钉钉定制项目（独立业务线，勿混入产品仓库） |
 | `~/Desktop/mcn-ai产品文档-v2.docx`、`mcn-ai开发计划-v1.docx` | 产品定稿与实施计划 |
 | `/Applications/mcn-ai.app` | 已安装的 0.1.0；用户数据在 `~/Library/Application Support/mcn-ai-desktop` |
