@@ -5870,7 +5870,11 @@ try {
       await win.click('[data-testid="sensitive-mode-all"]')
       await win.locator('text=确认让敏感资料也上云？').waitFor({ timeout: 5000 })
       const msg = await win.locator('[data-testid="modal"] .whitespace-pre-line').innerText()
-      if (!/同步到云端/.test(msg)) throw new Error(`确认弹窗没说清后果：「${msg}」`)
+      // 断言的是**说没说清后果**（会上云、清不掉），不是某一种措辞
+      if (!/云端/.test(msg)) throw new Error(`确认弹窗没说清后果（会上云）：「${msg}」`)
+      if (!/清除|删除/.test(msg)) throw new Error(`确认弹窗没说清"上去了就不好撤"：「${msg}」`)
+      // 弹窗正文是纯文本，不过 markdown：写 `**…**` 出来就是两个星号摆在用户脸上
+      if (/\*\*/.test(msg)) throw new Error(`确认弹窗正文里漏出了字面 markdown 星号：「${msg}」`)
       await snap('70-敏感档升云-二次确认', 200)
       // 取消 = 档位不许变（这是这条断言的全部意义）
       await win.click('[data-testid="modal"] button:has-text("取消")')
