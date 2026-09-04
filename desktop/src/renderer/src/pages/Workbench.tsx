@@ -12,6 +12,7 @@ import { useTask } from '../hooks/useTasks'
 import { TierSelector } from '../components/TierSelector'
 import { StepStream, useArtifactMedians } from '../components/StepStream'
 import { anchorStepGroup, tierNote, useSessionSteps } from '../lib/step-stream'
+import { clearDraft, readDraft, writeDraft } from '../lib/draft'
 
 /**
  * 打开产物（M-05）。`shell.openPath` 失败（没装 Keynote/Office、产物已被删）以前是静默的，
@@ -63,7 +64,19 @@ export default function Workbench({
   useEffect(() => {
     void window.api.settings.get().then((x) => setChips(chipsFor(x.personaId)))
   }, [])
-  const [input, setInput] = useState('')
+  /**
+   * F2：输入框内容**按会话持久**。以前它只活在这个 `useState` 里，
+   * 切一下对话 / 点一下知识库 / Cmd+R 重载，打了一半的长提示词就没了。
+   * 初值直接从 localStorage 取，切会话时由下面那个 effect 换过来。
+   */
+  const [input, setInputRaw] = useState(() => readDraft(conv.id))
+  const setInput = useCallback(
+    (v: string) => {
+      setInputRaw(v)
+      writeDraft(convRef.current.id, v)
+    },
+    []
+  )
   /**
    * 本轮附件（A-3 B'）。**放在这一层而不是 InputBox 里**：发送成功要清空、被主进程拒了
    * 要原样留着，这两件事都归 send 管。thumb 是 dataURL，只在内存里活着（不落库）
@@ -91,7 +104,9 @@ export default function Workbench({
   const medians = useArtifactMedians(groups.length)
 
   useEffect(() => {
-    setInput('')
+    // 切会话：把那个会话自己的草稿摆回来（F2）。**不能走 setInput**——
+    // 那会把刚读出来的草稿又写一遍，白写一次盘
+    setInputRaw(readDraft(conv.id))
     setDraft('')
     setSending(false)
   }, [conv.id])
@@ -157,6 +172,7 @@ export default function Workbench({
       // 被拒：输入与附件都原样留着，用户点了 toast 上的「停止当前生成」就能接着发
       if (ok) {
         setInput('')
+        clearDraft(convRef.current.id) // 发出去了，草稿的使命结束（F2）
         setAttachments([])
       } else if (!busy) setSending(false)
     },

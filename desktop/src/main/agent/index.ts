@@ -2,7 +2,7 @@ import { spawn } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { app, type BrowserWindow } from 'electron'
+import { app } from 'electron'
 import { z } from 'zod'
 import { agentEnv } from '../ai/provider'
 import { resolveTierForRequest, normalizeTier, unconfiguredReason, DEFAULT_TIER, type TierId } from '../ai/tiers'
@@ -13,6 +13,7 @@ import { searchCloud } from '../knowledge/client'
 import { store } from '../store'
 import { pipelineBin } from '../lib/pipeline'
 import { log } from '../lib/logger'
+import { broadcast, hasWindow } from '../lib/windows'
 import { tasks } from '../tasks/registry'
 import { attachmentNote, stageAttachments } from './attachments'
 import type { AgentTask } from '../tasks/types'
@@ -167,20 +168,18 @@ function withVault(specJson: string, root: string): string {
 }
 
 export class AgentManager {
-  private win: BrowserWindow | null = null
   private live = new Map<string, LiveSession>()
   /** 已被用户停掉、但 abort 还没传播到位的会话（见 stop 与消息循环开头的注释） */
   private stopped = new Set<string>()
   /** 测试观察口：无头冒烟不经 IPC 直接收事件 */
   tap: ((p: AgentStreamPayload) => void) | null = null
 
-  attachWindow(win: BrowserWindow): void {
-    this.win = win
-  }
+  /** 保留签名给调用方；下行事件走 broadcast（见 lib/windows.ts） */
+  attachWindow(): void {}
 
   private emit(payload: AgentStreamPayload): void {
     this.tap?.(payload)
-    this.win?.webContents.send('agent:stream', payload)
+    broadcast('agent:stream', payload)
   }
 
   /** AbortController 不能序列化，所以留在 live 里；任务对象只承载可观测状态 */
@@ -212,7 +211,7 @@ export class AgentManager {
     sessionId: string,
     info: { rel: string; tool: string; summary: string }
   ): Promise<{ allow: boolean; reason?: string }> {
-    if (!this.win) return Promise.resolve({ allow: false, reason: 'no-window' })
+    if (!hasWindow()) return Promise.resolve({ allow: false, reason: 'no-window' })
     const id = `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
     return new Promise((resolve) => {
       const done = (d: { allow: boolean; reason?: string }): void => {
@@ -223,7 +222,7 @@ export class AgentManager {
       }
       const timer = setTimeout(() => done({ allow: false, reason: 'timeout' }), WRITE_CONFIRM_TIMEOUT_MS)
       this.writeWaiters.set(id, done)
-      this.win?.webContents.send('agent:confirm-write', { id, sessionId, ...info })
+      broadcast('agent:confirm-write', { id, sessionId, ...info })
     })
   }
 

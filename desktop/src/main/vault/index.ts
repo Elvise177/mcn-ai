@@ -2,8 +2,9 @@ import { promises as fs, existsSync } from 'fs'
 import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
-import { shell, type BrowserWindow } from 'electron'
+import { shell } from 'electron'
 import { scanVault, parseNote, readNoteBody, buildTree, IGNORE } from './reader'
+import { broadcast } from '../lib/windows'
 import { buildGraph, makeResolver } from './graph'
 import { VaultSearcher } from './searcher'
 import type { VaultNote, VaultTreeNode, GraphData, SearchResult } from './types'
@@ -18,7 +19,6 @@ export class VaultManager {
   private dirs = new Set<string>()
   private searcher = new VaultSearcher()
   private watcher: FSWatcher | null = null
-  private win: BrowserWindow | null = null
   /**
    * 自触发抑制表（M-27）：应用自己 write 出去的内容指纹。
    * 我们自己写的那一下也会让 watcher 冒 change 事件，不区分的话每次保存都会自己给自己报冲突。
@@ -27,9 +27,8 @@ export class VaultManager {
    */
   private selfWrites = new Map<string, string>()
 
-  attachWindow(win: BrowserWindow): void {
-    this.win = win
-  }
+  /** 保留签名给调用方；下行事件走 broadcast（多窗口时每个管理器只认一个 win 会让先开的那扇窗静默失聪） */
+  attachWindow(): void {}
 
   get currentRoot(): string | null {
     return this.root
@@ -98,7 +97,7 @@ export class VaultManager {
 
   /** self=true 表示这次变更是应用自己写出去的，冲突检测要跳过它 */
   private notify(path: string, self = false): void {
-    this.win?.webContents.send('vault:changed', { path, self })
+    broadcast('vault:changed', { path, self })
   }
 
   async close(): Promise<void> {

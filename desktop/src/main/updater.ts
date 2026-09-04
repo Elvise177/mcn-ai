@@ -1,7 +1,8 @@
-import { app, BrowserWindow } from 'electron'
+import { app } from 'electron'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { log } from './lib/logger'
+import { broadcast } from './lib/windows'
 
 /**
  * 自动更新（electron-updater / generic provider）。
@@ -50,7 +51,6 @@ type UpdateState = {
 let state: UpdateState = {
   ready: false, version: null, disabledReason: null, phase: 'idle', percent: 0, error: null,
 }
-let win: BrowserWindow | null = null
 let timer: NodeJS.Timeout | null = null
 
 export function updateState(): UpdateState {
@@ -67,8 +67,9 @@ function feedUrl(): string | null {
   }
 }
 
+/** 广播给所有窗口（多窗口时只推 `win` 那一扇，另一扇的更新条会永远停在旧状态） */
 function push(): void {
-  win?.webContents.send('update:ready', state)
+  broadcast('update:ready', state)
 }
 
 /**
@@ -86,8 +87,7 @@ const e2eUpdate = (): 'ready' | 'fail' | null => {
   return v === 'ready' || v === 'fail' ? v : null
 }
 
-export function initUpdater(window: BrowserWindow): void {
-  win = window
+export function initUpdater(): void {
 
   if (e2eUpdate()) {
     state = { ready: true, version: '9.9.9', disabledReason: null, phase: 'ready', percent: 100, error: null }

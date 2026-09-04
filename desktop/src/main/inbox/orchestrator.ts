@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { promises as fs, existsSync } from 'fs'
 import { join, basename, extname, dirname } from 'path'
-import { shell, type BrowserWindow } from 'electron'
+import { shell } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
 import { buildEntityCards } from '../vault/entity-cards'
@@ -77,7 +77,6 @@ export interface EnqueueResult {
 
 /** 投递箱编排：监听 inbox 目录 → 去抖合并 → 串行 spawn 冻结版 pipeline → 进度转 IPC */
 export class InboxOrchestrator {
-  private win: BrowserWindow | null = null
   private watcher: FSWatcher | null = null
   private vaultRoot: string | null = null
   private inboxDir: string | null = null
@@ -107,9 +106,9 @@ export class InboxOrchestrator {
    */
   private canceledIncomplete = false
 
-  attachWindow(win: BrowserWindow): void {
-    this.win = win
-  }
+  /** 保留签名给调用方。**这里本来就不发下行事件**（投递箱状态一律走任务层），
+      所以它现在是空的——留着只是为了 `createWindow()` 那一串调用整齐 */
+  attachWindow(): void {}
 
   /**
    * `id` 是这一轮开始时快照下来的任务 id（R2）：换库后 `this.taskId` 已经指向新库，

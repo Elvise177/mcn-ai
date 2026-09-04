@@ -35,7 +35,16 @@ const grab = (src, re) => uniq([...src.matchAll(re)].map((m) => m[1]))
 const invoked = grab(preload, /ipcRenderer\.invoke\(\s*['"]([^'"]+)['"]/g)
 const handled = grab(mainSrc, /ipcMain\.handle\(\s*['"]([^'"]+)['"]/g)
 const listened = grab(preload, /ipcRenderer\.on\(\s*['"]([^'"]+)['"]/g)
-const sent = grab(mainSrc, /webContents\.send\(\s*['"]([^'"]+)['"]/g)
+/**
+ * 下行事件有**两种发法**，两种都要认：
+ *  · `webContents.send('x')` —— 直接发给某一扇窗
+ *  · `broadcast('x')`        —— 发给所有窗口（`lib/windows.ts`，多窗口之后的主路径）
+ *
+ * 只认前一种的话，改成 broadcast 的那一刻这个检查会把**全部**下行事件报成
+ * 「preload 在监听但主进程从不发送」——一次报 6 条，看着像整条链路断了
+ * （2026-09-03 Cmd+N 多窗口那单实测）。
+ */
+const sent = grab(mainSrc, /(?:webContents\.send|\bbroadcast)\(\s*['"]([^'"]+)['"]/g)
 
 let bad = 0
 const ok = (m) => console.log(`  ✓ ${m}`)

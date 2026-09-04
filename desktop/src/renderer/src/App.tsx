@@ -11,6 +11,7 @@ import { pendingNote } from './lib/bus'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
 import { errText, zhError } from './lib/err'
 import { saveWithToast } from './lib/save'
+import { clearDraft, pruneDrafts } from './lib/draft'
 import { startTaskSync, useTask } from './hooks/useTasks'
 import { anchorStepGroup, clearStepGroups, startStepStream, trimStepGroups } from './lib/step-stream'
 import { TaskDock } from './components/TaskDock'
@@ -120,6 +121,10 @@ export default function App() {
     window.api.chat.list().then((list) => {
       convsRef.current = list
       setConvs(list)
+      // F2：清掉已删对话留下的孤儿草稿。不清的话用两年之后 localStorage 里
+      // 会躺着几百条属于早就删掉的对话的半截话
+      const dropped = pruneDrafts(list.map((c) => c.id))
+      if (dropped) void window.api.diag.log('info', `清理了 ${dropped} 条孤儿草稿`)
     })
     // 云端连不上时 getSession 可能长时间挂起（Supabase 被暂停时域名直接 NXDOMAIN），
     // 8 秒还没答案就先按"降级"开界面，真答案回来了再覆盖
@@ -131,9 +136,13 @@ export default function App() {
     })
     window.api.settings.get().then((s) => setVaultState(s.vaultPath ? 'ready' : 'none'))
     const offShortcut = window.api.shortcut.on((name) => {
+      // 快捷键的**唯一注册处是主进程菜单**（见 main/index.ts 的 buildMenu）；
+      // 这里只负责"收到之后做什么"
       if (name === 'new-chat') {
         setActive(newConv())
         setPage('workbench')
+      } else if (name === 'settings') {
+        setPage('settings')
       }
     })
     const offStream = window.api.chat.onStream((p) => {
@@ -437,6 +446,7 @@ export default function App() {
                         if (!okd) return
                         await window.api.chat.delete(c.id)
                         clearStepGroups(c.id) // 对话没了，它的步骤流也别留在内存里
+                        clearDraft(c.id) // 草稿同理（F2）
                         convsRef.current = convsRef.current.filter((x) => x.id !== c.id)
                         setConvs(convsRef.current)
                         if (active.id === c.id) setActive(newConv())

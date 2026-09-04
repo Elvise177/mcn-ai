@@ -6,6 +6,8 @@ import { backoffMs, isTransient, retryNotice, shouldAnnounceRetry } from './lib/
 import { nextRetryAt, notesForRoot, pickDue } from './lib/retry-ladder'
 import { INBOX_STAGES, STAGE_LABEL, stageLabel } from '../renderer/src/config/stages'
 import { fmLabel, formatFrontmatterValue, splitFrontmatter } from '../renderer/src/lib/note-format'
+import { isOnScreen, MIN_W, pickBounds } from './lib/window-bounds'
+import { clearDraft, pruneDrafts, readDraft, writeDraft } from '../renderer/src/lib/draft'
 
 /**
  * 过程可见性的**纯逻辑冒烟**：参数提取、结果计数、中文文案映射。零网络、零 token。
@@ -462,6 +464,78 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   check('裸 true/false 渲染成是/否', formatFrontmatterValue(true) === '是' && formatFrontmatterValue(false) === '否')
   check('数组照旧用斜杠连', formatFrontmatterValue(['灰太太', '皮蛋']) === '灰太太 / 皮蛋')
   check('空值仍是破折号', formatFrontmatterValue(null) === '—' && formatFrontmatterValue('  ') === '—')
+}
+
+/**
+ * ---- F25 窗口几何 / F2 草稿持久化（PLAN-v2 批 3）----
+ *
+ * 两条都是"要费劲才触发得到"的：窗口几何最要命的分支要**插拔外接显示器**，
+ * 草稿清理要等用了两年之后 localStorage 里攒够孤儿。抽成纯函数在这儿几毫秒验完。
+ */
+{
+  console.log('\n【F25 窗口几何】')
+  const MAIN = { x: 0, y: 25, width: 1728, height: 1000 }
+  const SIDE = { x: 1728, y: 0, width: 1920, height: 1080 } // 右侧外接显示器
+  const FB = { width: 1440, height: 920 }
+  check('没存过 → 出厂尺寸、位置交给系统', JSON.stringify(pickBounds(undefined, [MAIN], FB)) === JSON.stringify(FB))
+  check(
+    '坏值（0/NaN）也回出厂',
+    JSON.stringify(pickBounds({ width: 0, height: 0 }, [MAIN], FB)) === JSON.stringify(FB) &&
+      JSON.stringify(pickBounds({ width: NaN, height: 500 }, [MAIN], FB)) === JSON.stringify(FB)
+  )
+  check(
+    '存过且在屏内 → 原样还给他',
+    JSON.stringify(pickBounds({ x: 100, y: 80, width: 1200, height: 800 }, [MAIN], FB)) ===
+      JSON.stringify({ x: 100, y: 80, width: 1200, height: 800 })
+  )
+  check('尺寸小于下限顶到下限', pickBounds({ x: 0, y: 30, width: 400, height: 300 }, [MAIN], FB).width === MIN_W)
+  /**
+   * 这一条就是这个纯函数存在的全部理由：在公司把窗口拖到副屏，回家拔了线——
+   * 窗口开在不存在的地方，Dock 上有图标、菜单栏是它的，屏幕上什么都没有。
+   */
+  const offscreen = pickBounds({ x: 2400, y: 300, width: 1200, height: 800 }, [MAIN], FB)
+  check('副屏拔掉后不许开在屏幕外', offscreen.x === undefined && offscreen.y === undefined, JSON.stringify(offscreen))
+  check('但尺寸要留着（用户调过的大小不能白调）', offscreen.width === 1200 && offscreen.height === 800)
+  check('副屏还在时同一份坐标照常恢复', pickBounds({ x: 2400, y: 300, width: 1200, height: 800 }, [MAIN, SIDE], FB).x === 2400)
+  check(
+    '拖得半出屏是用户自己的选择，照常还原',
+    isOnScreen({ x: -200, y: 100, width: 1200, height: 800 }, [MAIN]) === true
+  )
+  check('整扇窗在屏幕上方（标题栏够不着）判为不可见', isOnScreen({ x: 100, y: -900, width: 1200, height: 800 }, [MAIN]) === false)
+}
+
+{
+  console.log('\n【F2 草稿持久化】')
+  // 主进程侧没有 localStorage：给一份最小实现，验的是 draft.ts 自己的逻辑
+  const mem = new Map<string, string>()
+  ;(globalThis as { localStorage?: unknown }).localStorage = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => void mem.set(k, v),
+    removeItem: (k: string) => void mem.delete(k),
+    get length() {
+      return mem.size
+    },
+    key: (i: number) => [...mem.keys()][i] ?? null,
+  }
+  writeDraft('c1', '写一份周报')
+  writeDraft('c2', '把年框做成 PPT')
+  check('写了能读回来', readDraft('c1') === '写一份周报')
+  check('两个会话各存各的', readDraft('c2') === '把年框做成 PPT')
+  check('没写过的会话回空串，不是 undefined', readDraft('c3') === '')
+  writeDraft('c1', '')
+  check('写空串等于删（不留空条目）', readDraft('c1') === '' && !mem.has('draft.c1'))
+  writeDraft('c1', 'x')
+  clearDraft('c1')
+  check('clearDraft 真删', !mem.has('draft.c1'))
+  // 孤儿清理：c2 还在、c9 的对话早删了
+  writeDraft('c2', '把年框做成 PPT')
+  writeDraft('c9', '属于一个已经删掉的对话')
+  mem.set('别的键', '不许动')
+  const dropped = pruneDrafts(['c2'])
+  check('清掉孤儿草稿', dropped === 1 && !mem.has('draft.c9'), String(dropped))
+  check('现存会话的草稿不许动', readDraft('c2') === '把年框做成 PPT')
+  check('不是草稿的键一个都不许碰', mem.get('别的键') === '不许动')
+  delete (globalThis as { localStorage?: unknown }).localStorage
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

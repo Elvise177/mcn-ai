@@ -1,6 +1,6 @@
-import type { BrowserWindow } from 'electron'
 import type { CloudState, Task, TaskEventPayload, TaskStatus } from './types'
 import { pendingSyncTotal } from './persist'
+import { broadcast } from '../lib/windows'
 
 /**
  * 全局任务注册表（设计见 docs/DESIGN-task-state.md §1.5 / §2）。
@@ -24,7 +24,6 @@ type TaskInit = {
 }[Task['kind']]
 
 class TaskRegistry {
-  private win: BrowserWindow | null = null
   /** 未终态 */
   private active = new Map<string, Task>()
   /** 终态，环形 */
@@ -41,14 +40,14 @@ class TaskRegistry {
   /** 测试观察口：无头冒烟不经 IPC 直接收事件 */
   tap: ((p: TaskEventPayload) => void) | null = null
 
-  attachWindow(win: BrowserWindow): void {
-    this.win = win
+  /** 窗口建好之后调一次：把落盘的待同步条数补进 Condition（下行事件走 broadcast，不认单个窗口） */
+  attachWindow(): void {
     this.cloud = { ...this.cloud, pendingSync: pendingSyncTotal() }
   }
 
   private emit(payload: TaskEventPayload): void {
     this.tap?.(payload)
-    if (this.win && !this.win.isDestroyed()) this.win.webContents.send('task:event', payload)
+    broadcast('task:event', payload)
   }
 
   private find(id: string): Task | undefined {

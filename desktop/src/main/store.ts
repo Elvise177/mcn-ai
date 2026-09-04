@@ -93,6 +93,15 @@ interface StoreSchema {
    * 判据在 `agent/timeout.ts`：80% 软提醒、100% 硬中断（先落盘半截正文再 abort）
    */
   agentTimeoutMin: number
+  /**
+   * 上次的窗口位置与大小（F25）。
+   *
+   * 不记的话每次开都是 1440×920 居中——**对 13 寸笔记本来说这是超出屏幕的**，
+   * 用户每天开一次就要拖一次。只存主窗口那一扇（第二扇 Cmd+N 出来的窗口按级联偏移放）。
+   * 最大化状态单独记：`getBounds()` 在最大化时返回的是最大化后的尺寸，
+   * 直接拿它当"用户想要的尺寸"，取消最大化之后就再也回不到原来那个大小了。
+   */
+  windowBounds?: { x?: number; y?: number; width: number; height: number; maximized?: boolean }
   /** 密钥指纹用的随机盐（不是秘密，见 secrets.ts） */
   secretSalt?: string
   encryptedApiKeyFp?: string

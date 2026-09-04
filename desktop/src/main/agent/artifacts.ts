@@ -2,8 +2,9 @@ import { createHash } from 'crypto'
 import { promises as fs, existsSync } from 'fs'
 import { join, relative, basename } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
-import { shell, type BrowserWindow } from 'electron'
+import { shell } from 'electron'
 import { notifyDingtalk } from '../lib/dingtalk'
+import { broadcast } from '../lib/windows'
 import { store } from '../store'
 import { inboxOrchestrator } from '../inbox/orchestrator'
 import { vaultManager } from '../vault'
@@ -30,7 +31,6 @@ const sha256 = async (abs: string): Promise<string> =>
 
 /** 监听 vault/90_产物：新产物推事件给产物面板 */
 export class ArtifactsWatcher {
-  private win: BrowserWindow | null = null
   private watcher: FSWatcher | null = null
   private dir: string | null = null
   /** 已 enqueue、等本轮 pipeline 跑完才知道成没成的产物 */
@@ -43,9 +43,8 @@ export class ArtifactsWatcher {
     inboxOrchestrator.onRunEnd((ok, canceled) => void this.resolvePending(ok, canceled))
   }
 
-  attachWindow(win: BrowserWindow): void {
-    this.win = win
-  }
+  /** 保留签名给调用方；下行事件走 broadcast（见 lib/windows.ts） */
+  attachWindow(): void {}
 
   /** 退出前显式关掉 watcher（见 index.ts 的 before-quit：Electron 43 起不关就退不掉） */
   async stop(): Promise<void> {
@@ -83,7 +82,7 @@ export class ArtifactsWatcher {
     })
     this.watcher.on('add', (p: string) => {
       const rel = relative(this.dir!, p)
-      this.win?.webContents.send('artifact:created', { path: rel, name: basename(p) })
+      broadcast('artifact:created', { path: rel, name: basename(p) })
       if (store.get('artifactAutoIngest')) void this.ingest(rel)
       notifyDingtalk('artifact', 'mcn-ai 产物', `### 新产物生成 📄\n\n**${basename(p)}**\n\n> ${new Date().toLocaleString('zh-CN')} · mcn-ai 自动化`)
     })

@@ -1,11 +1,13 @@
 import './env-hooks'
-import { app, BrowserWindow, dialog, Menu } from 'electron'
+import { app, BrowserWindow, dialog, Menu, screen } from 'electron'
 import { log } from './lib/logger'
 
 process.on('uncaughtException', (e) => log('error', 'main-uncaught', e))
 process.on('unhandledRejection', (r) => log('error', 'main-rejection', r instanceof Error ? r : String(r)))
 import { join } from 'path'
 import { registerIpc, openStoredVault } from './ipc'
+import { store } from './store'
+import { pickBounds } from './lib/window-bounds'
 import { probeCloud, provisionKeys } from './auth'
 import { startSyncRetry } from './knowledge/sync-queue'
 import { vaultManager } from './vault'
@@ -22,10 +24,39 @@ import { clearAttachments, clearAttachmentsSync } from './agent/attachments'
 // handler 在 ready 之后挂。没有它，笔记里抽出来的嵌图在渲染进程里是死链（见 vault/assets.ts）
 registerAssetScheme()
 
-function createWindow(): void {
+const DEFAULT_BOUNDS = { width: 1440, height: 920 }
+
+/**
+ * 恢复上次的窗口几何（F25）。判据在 `lib/window-bounds.ts`（纯函数，零花费可验）——
+ * 最要命的那条分支「上次记的坐标现在整个在屏幕外」要插拔显示器才触发得到。
+ *
+ * 第二扇窗口（Cmd+N）不吃这份几何，按系统默认级联偏移放，否则两扇窗完全重叠、
+ * 看着像只开了一个。
+ */
+function restoredBounds(): { x?: number; y?: number; width: number; height: number } {
+  return pickBounds(
+    store.get('windowBounds'),
+    screen.getAllDisplays().map((d) => d.workArea),
+    DEFAULT_BOUNDS
+  )
+}
+
+/** 主窗口（第一扇）才记几何：多窗口时记谁的都是错的，记第一扇最接近"用户常用的那个大小" */
+let primaryWin: BrowserWindow | null = null
+
+function rememberBounds(win: BrowserWindow): void {
+  if (win !== primaryWin || win.isDestroyed()) return
+  // 最大化时 getBounds() 回的是最大化后的尺寸；直接存它，取消最大化就再也回不到原尺寸
+  const maximized = win.isMaximized()
+  const prev = store.get('windowBounds')
+  const b = maximized && prev ? prev : win.getBounds()
+  store.set('windowBounds', { x: b.x, y: b.y, width: b.width, height: b.height, maximized })
+}
+
+function createWindow(): BrowserWindow {
+  const first = !primaryWin || primaryWin.isDestroyed()
   const win = new BrowserWindow({
-    width: 1440,
-    height: 920,
+    ...(first ? restoredBounds() : DEFAULT_BOUNDS),
     minWidth: 1080,
     minHeight: 700,
     title: 'SamePage',
@@ -38,11 +69,26 @@ function createWindow(): void {
       sandbox: true,
     },
   })
-  vaultManager.attachWindow(win)
-  inboxOrchestrator.attachWindow(win)
-  agentManager.attachWindow(win)
-  artifactsWatcher.attachWindow(win)
-  tasks.attachWindow(win)
+  if (first) {
+    primaryWin = win
+    if (store.get('windowBounds')?.maximized) win.maximize()
+    /**
+     * 落盘走**去抖**：拖动窗口时 resize/move 每帧都来，每帧写一次 config.json
+     * 等于把磁盘当日志用。关窗那一下再同步存一次，保证最后的状态一定落得到。
+     */
+    let t: NodeJS.Timeout | null = null
+    const later = (): void => {
+      if (t) clearTimeout(t)
+      t = setTimeout(() => rememberBounds(win), 500)
+      t.unref?.()
+    }
+    win.on('resize', later)
+    win.on('move', later)
+    win.on('close', () => {
+      if (t) clearTimeout(t)
+      rememberBounds(win)
+    })
+  }
 
   // 兜底：拖文件进窗口时 Electron 默认导航到 file://，整个应用被那个文件替换、只能退出重开。
   // 渲染层已在 main.tsx 全局 preventDefault，这里再拦一层（同 URL 放行，别挡住 reload）
@@ -62,10 +108,13 @@ function createWindow(): void {
   // 而 safeStorage 在一个进程里的首次调用是同步的、可能几十秒（M-29）。
   // 在 did-finish-load 之前触发它，用户看到的就是一扇白窗
   win.webContents.once('did-finish-load', () => {
+    // **只有第一扇窗口做这些启动动作**：Cmd+N 开第二扇窗时再跑一遍
+    // 等于重新 provision、重新起同步定时器、重新挂更新检查，纯属重复劳动还可能互相打架
+    if (win !== primaryWin) return
     void provisionKeys() // 已登录用户启动时刷新服务端下发的 AI 配置（值没变则零写入）
     void probeCloud() // 云端可达性：探测有超时，Supabase 被暂停时不会把启动拖住
     startSyncRetry() // 上次退出时没同步上去的聊天记录，开机补一轮（退避 1m/5m/30m→转手动）
-    initUpdater(win) // 自动更新：内部自带 20 秒延迟，不与上面几件事抢冷启动那一段
+    initUpdater() // 自动更新：内部自带 20 秒延迟，不与上面几件事抢冷启动那一段
     void pruneBackups() // AI 写入备份保留 30 天，启动时清一次（B4）
     /**
      * 上次运行留下的对话附件，开机清掉（B7 发现：`clearAttachments` 导出了却**从没人调**，
@@ -81,6 +130,16 @@ function createWindow(): void {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+  return win
+}
+
+/**
+ * 把一个快捷键动作转给**当前聚焦的那扇窗口**的渲染层。
+ * 菜单项是唯一权威的快捷键注册处——渲染层自己 `addEventListener('keydown')` 抢
+ * Cmd 系组合键的话，输入框里按 Cmd+A 之类的系统行为会被顺手吃掉。
+ */
+const toFocused = (name: string) => (): void => {
+  BrowserWindow.getFocusedWindow()?.webContents.send('shortcut', name)
 }
 
 function buildMenu(): void {
@@ -91,6 +150,9 @@ function buildMenu(): void {
         submenu: [
           { label: '关于 SamePage', role: 'about' },
           { type: 'separator' },
+          // Cmd+, 是 macOS 上"打开设置"的通用键位，用户会盲按（F8）
+          { label: '设置…', accelerator: 'CmdOrCtrl+,', click: toFocused('settings') },
+          { type: 'separator' },
           { label: '隐藏', role: 'hide' },
           { label: '退出 SamePage', role: 'quit' },
         ],
@@ -98,11 +160,16 @@ function buildMenu(): void {
       {
         label: '文件',
         submenu: [
-          {
-            label: '新对话',
-            accelerator: 'CmdOrCtrl+N',
-            click: () => BrowserWindow.getFocusedWindow()?.webContents.send('shortcut', 'new-chat'),
-          },
+          /**
+           * **Cmd+N = 新窗口，Cmd+T = 新对话**（2026-09-03 改，用户点名要 Cmd+N 开新窗口）。
+           * 原来 Cmd+N 是新对话——那是 IM 的习惯，而这个产品的窗口是"一个工作台"，
+           * 同时看两个库/两轮活儿是真实需求。新对话挪到 Cmd+T（同浏览器新标签页的直觉）。
+           */
+          { label: '新窗口', accelerator: 'CmdOrCtrl+N', click: () => createWindow() },
+          { label: '新对话', accelerator: 'CmdOrCtrl+T', click: toFocused('new-chat') },
+          { type: 'separator' },
+          // Cmd+W 关窗但**不退应用**（macOS 惯例，F10）：后台任务继续跑，Dock 上点一下就回来
+          { label: '关闭窗口', accelerator: 'CmdOrCtrl+W', role: 'close' },
         ],
       },
       {
@@ -115,6 +182,16 @@ function buildMenu(): void {
           { label: '复制', role: 'copy' },
           { label: '粘贴', role: 'paste' },
           { label: '全选', role: 'selectAll' },
+          { type: 'separator' },
+          // Cmd+F 在**当前这一屏**里找：对话页找聊天内容、知识库页找笔记
+          { label: '查找', accelerator: 'CmdOrCtrl+F', click: toFocused('find') },
+        ],
+      },
+      {
+        label: '前往',
+        submenu: [
+          // Cmd+K：搜对话 / 搜笔记 / 敲命令，一个入口（F5 + F8 合并成这一颗）
+          { label: '命令面板…', accelerator: 'CmdOrCtrl+K', click: toFocused('palette') },
         ],
       },
       {
@@ -122,6 +199,11 @@ function buildMenu(): void {
         submenu: [
           { label: '最小化', role: 'minimize' },
           { label: '缩放', role: 'zoom' },
+          { type: 'separator' },
+          // F25：界面缩放。老板拿 13 寸笔记本看的就是这一档
+          { label: '放大', role: 'zoomIn' },
+          { label: '缩小', role: 'zoomOut' },
+          { label: '实际大小', role: 'resetZoom' },
           { type: 'separator' },
           { label: '重新加载界面', role: 'reload' },
           { label: '开发者工具', role: 'toggleDevTools' },
@@ -135,6 +217,16 @@ app.whenReady().then(() => {
   buildMenu()
   registerIpc()
   registerAssetProtocol()
+  /**
+   * 管理器只在这儿"接一次"。下行事件全部走 `lib/windows.ts` 的 broadcast——
+   * 原来是每建一扇窗就 `attachWindow(win)` 覆盖一遍，Cmd+N 开第二扇的那一刻
+   * 第一扇就再也收不到任何事件了（而表现是"界面静静地不动"，最难查）。
+   */
+  vaultManager.attachWindow()
+  inboxOrchestrator.attachWindow()
+  agentManager.attachWindow()
+  artifactsWatcher.attachWindow()
+  tasks.attachWindow()
   createWindow()
   void openStoredVault() // 启动即加载上次的库，工作台首页直接可问
   app.on('activate', () => {
