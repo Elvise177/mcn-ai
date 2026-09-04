@@ -48,7 +48,18 @@ export default function LoginGate({
       <div className="mb-2 text-md text-ink-soft">你的 AI 工作操作台</div>
       <div className="mb-10 text-md text-muted">登录后即刻可用</div>
 
-      <div className="w-96 space-y-3">
+      {/**
+        * F8：**整块做成 form**，回车在哪个框里按都能提交。
+        * 原来只有密码框挂了 `onKeyDown`——在邮箱框里敲完回车什么都不会发生，
+        * 而"填完一栏按回车"是所有人的肌肉记忆（第一次用的人会以为登录键坏了）。
+        */}
+      <form
+        className="w-96 space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault()
+          void submit()
+        }}
+      >
         <input
           value={email}
           onChange={(e) => setEmail(e.target.value)}
@@ -60,7 +71,6 @@ export default function LoginGate({
           type="password"
           value={pwd}
           onChange={(e) => setPwd(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && submit()}
           placeholder="密码"
           className="w-full rounded-input border border-line bg-card px-4 py-3 text-md outline-none focus:border-accent"
         />
@@ -71,7 +81,7 @@ export default function LoginGate({
           </div>
         )}
         <button
-          onClick={submit}
+          type="submit"
           disabled={busy}
           className="w-full rounded-input bg-ink py-3 text-md font-medium text-on-solid hover:opacity-90 disabled:opacity-50"
         >
@@ -80,6 +90,7 @@ export default function LoginGate({
         {/* 可取消：Supabase 挂起时不给出口的话，这颗按钮会永远定格在「登录中…」（M-01） */}
         {busy && (
           <button
+            type="button"
             data-testid="login-cancel"
             onClick={() => void window.api.auth.loginCancel()}
             className="w-full rounded-input border border-line bg-card py-2 text-base text-muted hover:bg-hover"
@@ -87,7 +98,7 @@ export default function LoginGate({
             取消登录
           </button>
         )}
-      </div>
+      </form>
 
       <div className="mt-6 flex flex-col items-center gap-3 text-sm text-muted">
         <span>账号由管理员发放</span>

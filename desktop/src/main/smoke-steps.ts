@@ -7,7 +7,8 @@ import { nextRetryAt, notesForRoot, pickDue } from './lib/retry-ladder'
 import { INBOX_STAGES, STAGE_LABEL, stageLabel } from '../renderer/src/config/stages'
 import { fmLabel, formatFrontmatterValue, splitFrontmatter } from '../renderer/src/lib/note-format'
 import { isOnScreen, MIN_W, pickBounds } from './lib/window-bounds'
-import { clearDraft, pruneDrafts, readDraft, writeDraft } from '../renderer/src/lib/draft'
+import { clearDraft, pendingNewConvId, pruneDrafts, readDraft, resetPendingNewConvId, writeDraft } from '../renderer/src/lib/draft'
+import { excerpt, findInMessages, matchConversations, sortConversations } from '../renderer/src/lib/conversations'
 
 /**
  * 过程可见性的**纯逻辑冒烟**：参数提取、结果计数、中文文案映射。零网络、零 token。
@@ -535,7 +536,67 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   check('清掉孤儿草稿', dropped === 1 && !mem.has('draft.c9'), String(dropped))
   check('现存会话的草稿不许动', readDraft('c2') === '把年框做成 PPT')
   check('不是草稿的键一个都不许碰', mem.get('别的键') === '不许动')
+  /**
+   * 走查逮到的洞：**新对话在发出第一句话之前根本没落过盘**，
+   * 每次重载都换个 id 的话，打了一半的长提示词就挂在一个再也不会出现的 id 下面，
+   * 紧接着被这个清理函数当孤儿删掉——而"打一半的长提示词"最常发生的地方恰恰是新对话。
+   */
+  const p1 = pendingNewConvId()
+  check('待用的新对话 id 稳定（重载后还是同一个）', pendingNewConvId() === p1)
+  writeDraft(p1, '还没发出去的长提示词')
+  check('清理放过待用的那个新对话', pruneDrafts(['c2']) === 0 && readDraft(p1) === '还没发出去的长提示词')
+  const p2 = resetPendingNewConvId()
+  check('点「新对话」换一张白纸（换 id）', p2 !== p1)
+  check('换过之后，上一个待用 id 的草稿才该被清掉', pruneDrafts(['c2']) === 1 && readDraft(p1) === '')
   delete (globalThis as { localStorage?: unknown }).localStorage
+}
+
+/**
+ * ---- F5 会话排序与搜索 / 会话内查找（PLAN-v2 批 3）----
+ *
+ * 排序这类东西**错了不会报错，只会"看着不太对"**：置顶的掉到中间、
+ * 改完名字跳到列表头、搜「灰太太」搜不到明明在的那条。走查里靠人眼盯，这儿几毫秒守住。
+ */
+{
+  console.log('\n【F5 会话排序与搜索】')
+  const c = (id: string, title: string, updatedAt: number, pinned?: number, msgs?: string[]) => ({
+    id,
+    title,
+    updatedAt,
+    pinned,
+    messages: (msgs ?? []).map((text) => ({ role: 'user', text })),
+  })
+  const list = [
+    c('a', '灰太太年框', 300),
+    c('b', '周报', 500),
+    c('c', '带货复盘', 400, 1000),
+    c('d', '产品清单', 100, 2000),
+  ]
+  const ids = (xs: Array<{ id: string }>): string => xs.map((x) => x.id).join('')
+  check('置顶的排在最前', ids(sortConversations(list)).startsWith('dc'), ids(sortConversations(list)))
+  check('置顶之间：后钉的更靠前', ids(sortConversations(list)) === 'dcba', ids(sortConversations(list)))
+  check('没置顶的按最近活动', ids(sortConversations(list.filter((x) => !x.pinned))) === 'ba')
+  check('不改原数组', ids(list) === 'abcd')
+
+  const hit = (q: string): string => matchConversations(list, q).map((r) => r.conv.id).join('')
+  check('按标题搜', hit('周报') === 'b', hit('周报'))
+  check('空关键词 = 按顺序给前几条', hit('') === 'dcba', hit(''))
+  check('搜不到就是空', hit('霍格沃茨') === '')
+  // 用户记得住的往往是聊过的那句话，而不是自动截出来的前 18 个字当标题
+  const withBody = [c('x', '一个看不出内容的标题', 1, undefined, ['帮我把灰太太的年框合同整理一下'])]
+  const bodyHit = matchConversations(withBody, '年框合同')
+  check('正文命中也算', bodyHit.length === 1 && bodyHit[0].conv.id === 'x')
+  check('正文命中给上下文片段', !!bodyHit[0].snippet?.includes('年框合同'), bodyHit[0].snippet ?? '')
+  check('片段截在命中处附近，不是整段正文', (bodyHit[0].snippet ?? '').length < 60, String((bodyHit[0].snippet ?? '').length))
+  check('excerpt 长文本两头加省略号', excerpt('x'.repeat(100) + '目标' + 'y'.repeat(100), '目标').startsWith('…'))
+  check('limit 生效', matchConversations(list, '', 2).length === 2)
+
+  console.log('\n【会话内查找 Cmd+F】')
+  const msgs = [{ text: '灰太太的年框签了吗' }, { text: '签了' }, { text: '再看看灰太太的数据' }]
+  check('返回命中的消息下标', JSON.stringify(findInMessages(msgs, '灰太太')) === '[0,2]')
+  check('大小写不敏感', JSON.stringify(findInMessages([{ text: 'GMV 数据' }], 'gmv')) === '[0]')
+  check('空关键词不命中任何一条（不是全部）', findInMessages(msgs, '   ').length === 0)
+  check('没命中回空数组', findInMessages(msgs, '霍格沃茨').length === 0)
 }
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')

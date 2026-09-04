@@ -29,3 +29,29 @@ export const inboxPanel = {
     return () => void panelSubs.delete(fn)
   },
 }
+
+/**
+ * Cmd+F「在这一屏里找」（F8 + 用户点名的「会话内搜索」）。
+ *
+ * 快捷键在**主进程菜单**上注册（唯一权威，见 main/index.ts），App 收到之后转给
+ * 当前这一页：工作台打开会话内查找条，知识库页聚焦笔记搜索框。
+ * 与 `inboxPanel` 同一套形状——**订阅 + pending 两条路都要走通**，
+ * 否则"页面还没挂载时按的那一次"会静默丢掉。
+ */
+const findSubs = new Set<() => void>()
+export const findRequest = {
+  pending: false,
+  request(): void {
+    this.pending = true
+    findSubs.forEach((fn) => fn())
+  },
+  consume(): boolean {
+    const p = this.pending
+    this.pending = false
+    return p
+  },
+  subscribe(fn: () => void): () => void {
+    findSubs.add(fn)
+    return () => void findSubs.delete(fn)
+  },
+}

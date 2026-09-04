@@ -205,6 +205,8 @@ interface Conversation {
   updatedAt: number
   /** 这个会话选的档位（按会话记忆，新会话默认标准） */
   tier?: TierId
+  /** F5 置顶时间戳；0/undefined = 没置顶。用时间戳是为了多条置顶时排得出先后 */
+  pinned?: number
 }
 
 /** 一次拖入/入箱的结果（A-1）。跳过的几类分开计数，界面才说得清「为什么一个都没进来」 */

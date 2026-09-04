@@ -3038,7 +3038,7 @@ try {
     const probe = win.evaluate(async () => {
       const seen = { loading: false, treeWhileSearching: false }
       for (let i = 0; i < 200; i++) {
-        const q = document.querySelector('input[placeholder="搜索库…"]')?.value ?? ''
+        const q = document.querySelector('[data-testid="vault-search"]')?.value ?? ''
         if (q) {
           if (document.querySelector('[data-testid="search-loading"]')) seen.loading = true
           if (document.querySelectorAll('[data-testid="tree-col"] button.block.truncate').length)
@@ -3049,7 +3049,7 @@ try {
       }
       return seen
     })
-    await win.fill('input[placeholder="搜索库…"]', '灰太太')
+    await win.fill('[data-testid="vault-search"]', '灰太太')
     const seen = await probe
     if (seen.treeWhileSearching) throw new Error('有搜索词时左栏还在显示整棵文件树（H-11 的病灶）')
     if (!seen.loading) throw new Error('搜索期间没有出现「检索中…」加载态')
@@ -3115,7 +3115,7 @@ try {
     // 生僻字组合才是稳的：真实语料里不会出现，也不会哪天变成真词
     const nonsense = 'zzqx月半仚'
     const leavesBefore = await win.locator('[data-testid="tree-col"] button.block.truncate').count()
-    await win.fill('input[placeholder="搜索库…"]', nonsense)
+    await win.fill('[data-testid="vault-search"]', nonsense)
     await win.locator('[data-testid="search-empty"]').waitFor({ timeout: 15000 })
     const emptyText = await win.locator('[data-testid="search-empty"]').innerText()
     if (!emptyText.includes(nonsense)) throw new Error(`「没找到」没带上搜索词：「${emptyText}」`)
@@ -3125,7 +3125,7 @@ try {
     // 清空按钮真点：回到文件树，输入框也跟着空
     await win.click('[data-testid="search-clear"]')
     await win.waitForTimeout(500)
-    if ((await win.locator('input[placeholder="搜索库…"]').inputValue()) !== '')
+    if ((await win.locator('[data-testid="vault-search"]').inputValue()) !== '')
       throw new Error('点「清空搜索」后输入框没清空')
     if (leavesBefore && !(await win.locator('[data-testid="tree-col"] button.block.truncate').count()))
       throw new Error('点「清空搜索」后没有回到文件树')
@@ -3153,7 +3153,7 @@ try {
         // dragenter 上，dragover 只负责 preventDefault 好让 drop 能派发，见 useDragOver）
         await win.evaluate(() => {
           // 从搜索框往上冒泡，比 querySelector 撞根容器稳（根容器的 class 组合可能被其他页面命中）
-          const el = document.querySelector('input[placeholder="搜索库…"]') ?? document.querySelector('main .relative.flex.h-full')
+          const el = document.querySelector('[data-testid="vault-search"]') ?? document.querySelector('main .relative.flex.h-full')
           el?.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true }))
           el?.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true }))
         })
@@ -3298,15 +3298,35 @@ try {
              * 第一版只点了外层那颗，Dock 里恰好多一条失败任务时就永远等不到面板
              * （2026-09-03 走查现场：等 8 秒超时，看着像"唤回坏了"，其实是点错了地方）
              */
-            const dock = await win.evaluate(async () => {
-              const snap = await window.api.tasks.list()
-              const live = snap.tasks.filter(
-                (t) => (t.status === 'queued' || t.status === 'running') && t.kind !== 'sync'
-              )
-              const bad = snap.tasks.filter((t) => t.status === 'failed' && t.kind !== 'sync')
-              return { rows: live.length + bad.length, inboxTitle: live.find((t) => t.kind === 'inbox')?.title ?? '' }
-            })
-            if (!dock.inboxTitle) throw new Error('唤回断言的前提没了：任务层里已经没有在跑的投递任务')
+            const readDock = () =>
+              win.evaluate(async () => {
+                const snap = await window.api.tasks.list()
+                const live = snap.tasks.filter(
+                  (t) => (t.status === 'queued' || t.status === 'running') && t.kind !== 'sync'
+                )
+                const bad = snap.tasks.filter((t) => t.status === 'failed' && t.kind !== 'sync')
+                return { rows: live.length + bad.length, inboxTitle: live.find((t) => t.kind === 'inbox')?.title ?? '' }
+              })
+            /**
+             * **前提要能自愈**：本地模式一批文件几秒就跑完，上面那几步（等面板、点 ✕、
+             * 读状态）本身就要一两秒——读到这儿时任务可能刚好结束。
+             * 一次性判死的话这条断言会随机红在与它无关的地方（2026-09-04 连撞两次）。
+             * 所以：没了就再投一批、重新等，最多三轮（同 before-quit 那段的做法）。
+             */
+            let dock = await readDock()
+            for (let attempt = 0; attempt < 3 && !dock.inboxTitle; attempt++) {
+              const more = []
+              for (let i = 0; i < 6; i++) {
+                const p = join(tmpdir(), `e2e唤回补投_${Date.now()}_${attempt}_${i}.docx`)
+                copyFileSync(sample, p)
+                more.push(p)
+              }
+              await win.evaluate((ps) => window.api.inbox.enqueue(ps), more)
+              for (let i = 0; i < 240 && !(await liveInbox()); i++) await win.waitForTimeout(500)
+              for (const p of more) rmSync(p, { force: true })
+              dock = await readDock()
+            }
+            if (!dock.inboxTitle) throw new Error('三轮补投都没能让一个投递任务活到断言那一刻')
             await win.locator('[data-testid="task-dock-btn"]').click()
             if (dock.rows > 1) {
               // 标题从任务层取，不在断言里再抄一份文案
@@ -5353,6 +5373,224 @@ try {
     console.log('H-01 工作台拖入 ✓（应用未被替换 + 文件进队列）', dropName)
   }
 
+  // ==== PLAN-v2 批 3：高频功能 ====
+
+  /**
+   * 菜单 = **快捷键的唯一注册处**（main/index.ts 的 buildMenu）。
+   * 这里从主进程把菜单树读出来，逐条对键位——渲染层自己监听 keydown 的话，
+   * 输入框里 Cmd+A 之类的系统行为会被顺手吃掉，而那种事在截图上完全看不出来。
+   */
+  const menuItem = (label) =>
+    app.evaluate(({ Menu }, l) => {
+      const walk = (items) => {
+        for (const it of items) {
+          if (it.label === l) return it
+          if (it.submenu) {
+            const r = walk(it.submenu.items)
+            if (r) return r
+          }
+        }
+        return null
+      }
+      const it = walk(Menu.getApplicationMenu().items)
+      return it ? { accelerator: it.accelerator ?? '', enabled: it.enabled } : null
+    }, label)
+  const menuClick = (label) =>
+    app.evaluate(({ Menu }, l) => {
+      const walk = (items) => {
+        for (const it of items) {
+          if (it.label === l) return it
+          if (it.submenu) {
+            const r = walk(it.submenu.items)
+            if (r) return r
+          }
+        }
+        return null
+      }
+      const it = walk(Menu.getApplicationMenu().items)
+      if (!it) throw new Error('菜单里没有这一项：' + l)
+      it.click()
+      return true
+    }, label)
+
+  {
+    const want = {
+      新窗口: 'CmdOrCtrl+N',
+      新对话: 'CmdOrCtrl+T',
+      '命令面板…': 'CmdOrCtrl+K',
+      查找: 'CmdOrCtrl+F',
+      '设置…': 'CmdOrCtrl+,',
+      关闭窗口: 'CmdOrCtrl+W',
+    }
+    const got = {}
+    for (const [label, acc] of Object.entries(want)) {
+      const it = await menuItem(label)
+      if (!it) throw new Error(`菜单里找不到「${label}」`)
+      got[label] = it.accelerator
+      if (it.accelerator !== acc) throw new Error(`「${label}」的键位是 ${it.accelerator}，应为 ${acc}`)
+    }
+    console.log('F8 菜单键位 ✓', JSON.stringify(got))
+  }
+
+  // ---- F2 草稿按会话持久：切走切回、reload 都不该把打了一半的话吃掉 ----
+  {
+    const DRAFT_A = '这是一段没发出去的长提示词'
+    const DRAFT_B = '新对话里打了一半的话'
+    await win.evaluate(async () => {
+      await window.api.chat.save({ id: 'e2e-draft', title: 'e2e 草稿样例', messages: [], updatedAt: Date.now() })
+    })
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(1500)
+
+    // ① 已有会话：打一半 → 切到知识库 → 切回来，草稿要还在
+    await win.click('[data-testid="conv-row"]:has-text("e2e 草稿样例")')
+    await win.waitForTimeout(400)
+    await win.locator('textarea').first().fill(DRAFT_A)
+    await win.waitForTimeout(300)
+    await win.click('aside button:has-text("知识库")')
+    await win.waitForTimeout(500)
+    await win.click('[data-testid="conv-row"]:has-text("e2e 草稿样例")')
+    await win.waitForTimeout(500)
+    const back = await win.locator('textarea').first().inputValue()
+    if (back !== DRAFT_A) throw new Error(`切走再切回来草稿没了：「${back}」`)
+
+    /**
+     * ② **新对话**：这才是最疼的那一格——新对话在发出第一句话之前根本没落过盘，
+     * 第一版每次重载都换个 id，于是草稿挂在一个再也不会出现的 id 下面、随即被当孤儿清掉。
+     * 而"打一半的长提示词"最常发生的地方恰恰就是新对话（2026-09-04 走查逮到）。
+     */
+    await win.click('aside button[title="新对话"]')
+    await win.waitForTimeout(400)
+    await win.locator('textarea').first().fill(DRAFT_B)
+    await win.waitForTimeout(300)
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(1500)
+    const kept = await win.locator('textarea').first().inputValue()
+    if (kept !== DRAFT_B) throw new Error(`新对话重载后草稿没留住：「${kept}」`)
+    await snap('61-草稿持久-重载后仍在', 200)
+
+    // ③ 各存各的：回到那条已有会话，拿到的必须是它自己的草稿，不是新对话那条
+    await win.click('[data-testid="conv-row"]:has-text("e2e 草稿样例")')
+    await win.waitForTimeout(500)
+    const a2 = await win.locator('textarea').first().inputValue()
+    if (a2 !== DRAFT_A) throw new Error(`两个会话的草稿串了：期望「${DRAFT_A}」，实得「${a2}」`)
+    console.log('F2 草稿持久 ✓', JSON.stringify({ 已有会话: back, 新对话重载后: kept, 不串: a2 === DRAFT_A }))
+    await win.locator('textarea').first().fill('')
+  }
+
+  // ---- F5 会话重命名 / 置顶（右键菜单）----
+  {
+    await win.evaluate(async () => {
+      const now = Date.now()
+      await window.api.chat.save({ id: 'e2e-pin-a', title: 'e2e 待置顶的对话', messages: [], updatedAt: now - 60000 })
+      await window.api.chat.save({ id: 'e2e-pin-b', title: 'e2e 最近聊过的对话', messages: [], updatedAt: now })
+    })
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(1500)
+    const rowTitles = () => win.locator('[data-testid="conv-row"]').allInnerTexts()
+    const before = await rowTitles()
+    if (before[0]?.includes('待置顶')) throw new Error('前提不成立：待置顶那条本来就在最上面，验不出置顶效果')
+
+    // 右键 → 置顶
+    await win.locator('[data-testid="conv-row"]', { hasText: 'e2e 待置顶的对话' }).click({ button: 'right' })
+    await win.locator('[data-testid="conv-menu"]').waitFor({ timeout: 5000 })
+    await snap('62-会话右键菜单', 200)
+    await win.click('[data-testid="conv-menu-pin"]')
+    await win.waitForTimeout(600)
+    const after = await rowTitles()
+    if (!after[0]?.includes('待置顶')) throw new Error(`置顶之后它没排到最前：${JSON.stringify(after)}`)
+    const pinnedFlag = await win.locator('[data-testid="conv-row"]').first().getAttribute('data-pinned')
+    if (pinnedFlag !== '1') throw new Error('置顶了但列表项上没有置顶标记')
+    // **落盘了才算数**：只改内存的话重载就打回原形
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(1500)
+    if (!(await rowTitles())[0]?.includes('待置顶')) throw new Error('置顶没有落盘（重载后打回原形）')
+    await snap('62b-会话置顶-重载后仍在最前', 200)
+
+    // 右键 → 重命名。**不许把 updatedAt 顶上去**：改个名字不是"有新活动"
+    await win.locator('[data-testid="conv-row"]', { hasText: 'e2e 最近聊过的对话' }).click({ button: 'right' })
+    await win.click('[data-testid="conv-menu-rename"]')
+    await win.locator('[data-testid="modal"]').waitFor({ timeout: 5000 })
+    await win.fill('[data-testid="modal"] input', 'e2e 改过名的对话')
+    await win.click('[data-testid="modal"] button:has-text("保存")')
+    await win.locator('text=已重命名').waitFor({ timeout: 5000 })
+    await win.waitForTimeout(400)
+    const renamed = await rowTitles()
+    if (!renamed.some((t) => t.includes('改过名的对话'))) throw new Error(`重命名没生效：${JSON.stringify(renamed)}`)
+    if (!renamed[0]?.includes('待置顶')) throw new Error('重命名把它顶到了列表最上面（改名不该算"有新活动"）')
+    console.log('F5 重命名/置顶 ✓', JSON.stringify(renamed.slice(0, 3)))
+  }
+
+  // ---- F5 + F8 命令面板（Cmd+K）：一个入口搜对话、搜笔记、敲命令 ----
+  {
+    await menuClick('命令面板…')
+    const palette = win.locator('[data-testid="command-palette"]')
+    await palette.waitFor({ timeout: 8000 })
+    // 空关键词时命令常驻在最上面（搜索是渐进的，命令是带着目的来的）
+    if (!(await win.locator('[data-testid="palette-row-command"]').count()))
+      throw new Error('命令面板打开时一条命令都没有')
+    await win.fill('[data-testid="palette-input"]', '改过名的对话')
+    await win.locator('[data-testid="palette-row-conv"]').first().waitFor({ timeout: 8000 })
+    await snap('63-命令面板-搜对话', 300)
+    // 笔记那一段要真去主进程检索（走查库里「灰太太」必然有命中）
+    await win.fill('[data-testid="palette-input"]', '灰太太')
+    await win.locator('[data-testid="palette-row-note"]').first().waitFor({ timeout: 15000 })
+    const sections = await win.locator('[data-testid="palette-list"]').innerText()
+    if (!/笔记/.test(sections)) throw new Error(`命令面板没有笔记分段：「${sections.slice(0, 120)}」`)
+    await snap('63b-命令面板-搜笔记', 300)
+    // Esc 关掉；**不许留在界面上**
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(300)
+    if (await palette.count()) throw new Error('Esc 之后命令面板没关掉')
+    console.log('F5/F8 命令面板 ✓')
+  }
+
+  // ---- 会话内查找（Cmd+F）：用户点名要的那条 ----
+  {
+    await win.evaluate(async () => {
+      await window.api.chat.save({
+        id: 'e2e-find',
+        title: 'e2e 会话内查找样例',
+        messages: [
+          { role: 'user', text: '灰太太的年框签了吗' },
+          { role: 'assistant', text: '签了' },
+          { role: 'user', text: '再看看灰太太这个月的数据' },
+        ],
+        updatedAt: Date.now(),
+      })
+    })
+    await win.reload()
+    await armUpgradeGuard()
+    await win.waitForTimeout(1500)
+    await win.click('[data-testid="conv-row"]:has-text("e2e 会话内查找样例")')
+    await win.waitForTimeout(400)
+    await menuClick('查找')
+    await win.locator('[data-testid="chat-find"]').waitFor({ timeout: 8000 })
+    await win.fill('[data-testid="chat-find-input"]', '灰太太')
+    await win.waitForTimeout(400)
+    const count = await win.locator('[data-testid="chat-find-count"]').innerText()
+    // 两条消息含「灰太太」——数字必须报出来，只高亮不报数的话用户不知道还有没有下一处
+    if (!/第 1\/2 条/.test(count)) throw new Error(`会话内查找的计数不对：「${count}」`)
+    await snap('64-会话内查找', 250)
+    await win.click('[data-testid="chat-find-next"]')
+    await win.waitForTimeout(300)
+    const count2 = await win.locator('[data-testid="chat-find-count"]').innerText()
+    if (!/第 2\/2 条/.test(count2)) throw new Error(`「下一处」没跳：「${count2}」`)
+    // 找不到的时候要说话，不许空着
+    await win.fill('[data-testid="chat-find-input"]', '霍格沃茨')
+    await win.waitForTimeout(300)
+    if (!/没有匹配/.test(await win.locator('[data-testid="chat-find-count"]').innerText()))
+      throw new Error('查找零命中没有给出说法')
+    await win.keyboard.press('Escape')
+    await win.waitForTimeout(300)
+    if (await win.locator('[data-testid="chat-find"]').count()) throw new Error('Esc 之后查找条没关掉')
+    console.log('会话内查找 ✓', JSON.stringify({ 首次: count.trim(), 下一处: count2.trim() }))
+  }
+
   // ==== PLAN-v2 批 2：静默消灭 + 透明度 ====
 
   // ---- Q8 引用存疑角标：本轮没读过的 [[引用]] 要在气泡下面标出来，**且不掺进正文** ----
@@ -5430,6 +5668,49 @@ try {
     for (const f of fresh) rmSync(join(homedir(), 'Desktop', f), { force: true }) // 走查不许在真人桌面留垃圾
     await snap('57b-诊断报告已导出', 200)
     console.log('Q13/Q14 ✓', JSON.stringify({ 保存反馈: '已保存', 诊断: diagText }))
+  }
+
+  /**
+   * ---- Cmd+N 多窗口：**第一扇窗不许失聪** ----
+   *
+   * 这是 2026-09-03 那次重构的回归守卫。五个管理器原来各存一个 `this.win`，
+   * `createWindow()` 挨个 `attachWindow(win)` —— 开第二扇窗的那一刻，
+   * 后建的把前面那扇覆盖掉，**第一扇窗从此收不到任何事件**：
+   * 投递箱进度不动、流式正文不出、产物生成了也不刷新。
+   * 而它的表现是"界面静静地不动"，光看截图一点都看不出来。
+   *
+   * 判据取**任务事件**：开第二扇窗之后，往第一扇窗投个文件，它的 Dock 必须动。
+   */
+  {
+    await menuClick('新窗口')
+    await win.waitForTimeout(1500)
+    const wins = app.windows()
+    if (wins.length < 2) throw new Error(`点了「新窗口」却只有 ${wins.length} 扇窗`)
+    const second = wins[wins.length - 1]
+    await second.waitForLoadState('domcontentloaded').catch(() => {})
+    await second.waitForTimeout(1500)
+
+    // 第一扇窗：拿到当前 Dock 文案做基线，然后投一个新文件
+    await win.bringToFront()
+    const dockText = () =>
+      win.locator('[data-testid="task-dock-btn"]').innerText().catch(() => '')
+    const drop = join(tmpdir(), `e2e多窗口_${Date.now()}.docx`)
+    copyFileSync(join(root, 'e2e', 'sample.docx'), drop)
+    await win.evaluate((p) => window.api.inbox.enqueue([p]), drop)
+    let heard = false
+    for (let i = 0; i < 60 && !heard; i++) {
+      heard = /投递箱/.test(await dockText())
+      if (!heard) await win.waitForTimeout(500)
+    }
+    rmSync(drop, { force: true })
+    if (!heard)
+      throw new Error('开了第二扇窗之后，第一扇窗收不到任务事件了（管理器的 win 被覆盖 = 广播没生效）')
+    await snap('65-多窗口-第一扇窗仍在收事件', 250)
+    console.log('Cmd+N 多窗口 ✓ 第一扇窗仍在收事件')
+    // 关掉第二扇：后面的 before-quit 断言假定只有一扇窗
+    await second.close().catch(() => {})
+    await win.waitForTimeout(500)
+    await win.bringToFront()
   }
 
   // ---- toast 一家人检查：把整轮采到的几何样本统一比一遍（采集点见 grabToastGeo）----

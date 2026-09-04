@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Library, Settings as SettingsIcon, Plus, ChevronRight, AlertTriangle } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Library, Settings as SettingsIcon, Plus, ChevronRight, AlertTriangle, Pin } from 'lucide-react'
 import VaultPage from './pages/VaultPage'
 import Workbench from './pages/Workbench'
 import UsagePage from './pages/UsagePage'
@@ -7,11 +7,13 @@ import LoginGate from './pages/LoginGate'
 import { ui } from './components/ui'
 import { VaultWizard } from './components/VaultWizard'
 import Logo from './components/Logo'
-import { pendingNote } from './lib/bus'
+import { findRequest, pendingNote } from './lib/bus'
+import { sortConversations } from './lib/conversations'
+import { CommandPalette, type PaletteCommand } from './components/CommandPalette'
 import { getNickname, identityLabel, setNickname } from './lib/profile'
 import { errText, zhError } from './lib/err'
 import { saveWithToast } from './lib/save'
-import { clearDraft, pruneDrafts } from './lib/draft'
+import { clearDraft, pendingNewConvId, pruneDrafts, resetPendingNewConvId } from './lib/draft'
 import { startTaskSync, useTask } from './hooks/useTasks'
 import { anchorStepGroup, clearStepGroups, startStepStream, trimStepGroups } from './lib/step-stream'
 import { TaskDock } from './components/TaskDock'
@@ -39,8 +41,16 @@ const NAV: [Page, string, typeof Library][] = [
   ['settings', '设置', SettingsIcon],
 ]
 
-const newConv = (): Conversation => ({
-  id: crypto.randomUUID(),
+/**
+ * 造一条新对话。
+ *
+ * `reuse=true`（**只有启动那一次**）复用上次那个"还没用过的新对话" id——
+ * 新对话在发出第一句话之前根本没落过盘，每次重载都换个 id 的话，
+ * 打了一半的长提示词就挂在一个再也不会出现的 id 下面，紧接着被当孤儿清掉（F2 走查逮到）。
+ * 用户点「新对话」时走 `reuse=false`：那是他明确要一张白纸。
+ */
+const newConv = (reuse = false): Conversation => ({
+  id: reuse ? pendingNewConvId() : resetPendingNewConvId(),
   title: '新对话',
   messages: [],
   updatedAt: Date.now(),
@@ -53,7 +63,7 @@ export default function App() {
   const APP_VERSION = useAppVersion()
   const [page, setPage] = useState<Page>('workbench')
   const [convs, setConvs] = useState<Conversation[]>([])
-  const [active, setActive] = useState<Conversation>(newConv)
+  const [active, setActive] = useState<Conversation>(() => newConv(true))
   // degraded = 云端探测超时，还不知道登没登录。此时**不能**弹登录门（那等于把离线用户
   // 挡在门外，正是 bug#1 的"打不开"体感），而是照常进主界面 + 顶部挂云端离线条
   const [account, setAccount] = useState<{ loggedIn: boolean; email?: string; degraded?: boolean } | null>(null)
@@ -143,6 +153,11 @@ export default function App() {
         setPage('workbench')
       } else if (name === 'settings') {
         setPage('settings')
+      } else if (name === 'palette') {
+        setPaletteOpen(true)
+      } else if (name === 'find') {
+        // 「在这一屏里找」：交给当前这一页自己处理（工作台=会话内查找，知识库=聚焦搜索框）
+        findRequest.request()
       }
     })
     const offStream = window.api.chat.onStream((p) => {
@@ -324,6 +339,104 @@ export default function App() {
     [upsert]
   )
 
+  // ---- F5 会话管理：排序 / 打开 / 重命名 / 置顶 / 删除 ----
+  const sortedConvs = sortConversations(convs)
+
+  const openConv = useCallback((c: Conversation) => {
+    setActive(c)
+    setPage('workbench')
+  }, [])
+
+  const deleteConv = useCallback(
+    async (c: Conversation) => {
+      const okd = await ui.confirm({
+        title: '确认删除这个对话？',
+        message: `「${c.title}」\n\n对话记录会从本机删除，无法找回。`,
+        danger: true,
+        okText: '删除',
+      })
+      if (!okd) return
+      await window.api.chat.delete(c.id)
+      clearStepGroups(c.id) // 对话没了，它的步骤流也别留在内存里
+      clearDraft(c.id) // 草稿同理（F2）
+      convsRef.current = convsRef.current.filter((x) => x.id !== c.id)
+      setConvs(convsRef.current)
+      if (activeRef.current.id === c.id) setActive(newConv())
+      ui.toast(`已删除对话「${c.title}」`)
+    },
+    []
+  )
+
+  const renameConv = useCallback(
+    async (c: Conversation) => {
+      const name = await ui.prompt({ title: '重命名对话', initial: c.title, okText: '保存' })
+      if (!name || name === c.title) return
+      // **不动 updatedAt**：改个名字不是"有新活动"，把它顶到列表最上面会让人以为刚聊过
+      upsert({ ...c, title: name })
+      ui.toast('已重命名', 'ok')
+    },
+    [upsert]
+  )
+
+  const togglePin = useCallback(
+    (c: Conversation) => {
+      const pinned = c.pinned ? undefined : Date.now()
+      upsert({ ...c, pinned })
+      ui.toast(pinned ? `已置顶「${c.title}」` : `已取消置顶「${c.title}」`)
+    },
+    [upsert]
+  )
+
+  /** 右键菜单的位置与目标；null = 没打开 */
+  const [convMenu, setConvMenu] = useState<{ conv: Conversation; x: number; y: number } | null>(null)
+  useEffect(() => {
+    if (!convMenu) return
+    const close = (): void => setConvMenu(null)
+    const onEsc = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') close()
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onEsc)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onEsc)
+    }
+  }, [convMenu])
+
+  /** F8：列表里 ↑↓ 换选中、Enter 打开。**只在列表有焦点时生效**，不抢全局 */
+  const onConvListKey = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return
+      const list = sortConversations(convsRef.current)
+      if (!list.length) return
+      e.preventDefault()
+      if (e.key === 'Enter') return openConv(activeRef.current)
+      const at = list.findIndex((x) => x.id === activeRef.current.id)
+      const next = e.key === 'ArrowDown' ? (at + 1 + list.length) % list.length : (at - 1 + list.length) % list.length
+      openConv(list[next < 0 ? 0 : next])
+    },
+    [openConv]
+  )
+
+  // ---- F8 Cmd+K 命令面板 ----
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  const paletteCommands: PaletteCommand[] = useMemo(
+    () => [
+      { id: 'new-chat', label: '新对话', hint: '⌘T', run: () => { setActive(newConv()); setPage('workbench') } },
+      { id: 'vault', label: '打开知识库', run: () => setPage('vault') },
+      { id: 'settings', label: '打开设置', hint: '⌘,', run: () => setPage('settings') },
+      { id: 'usage', label: '查看用量', run: () => setPage('usage') },
+      {
+        id: 'switch-vault',
+        label: '切换知识库',
+        // 换库的确认与出口都在知识库页里（H-02），命令面板只负责把人带过去，
+        // 不在这里再造一套换库流程——两套流程迟早会漂
+        run: () => setPage('vault'),
+      },
+    ],
+    []
+  )
+
   const openNoteFromChat = useCallback(async (wikiTarget: string) => {
     const resolved = await window.api.vault.resolveLink(wikiTarget)
     if (resolved) {
@@ -416,42 +529,44 @@ export default function App() {
         </nav>
 
         <div className="mt-8 flex min-h-0 flex-1 flex-col">
-          {convs.length > 0 && (
+          {sortedConvs.length > 0 && (
             <>
               <div className="mb-1.5 px-5 text-2xs tracking-wide text-muted-soft">最近对话</div>
-              <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
-                {convs.map((c) => (
+              {/*
+                F8 上下键选会话：焦点在列表里时 ↑↓ 换选中项、Enter 打开。
+                **只在这一块里生效**（不是全局监听）——全局抢 ↑↓ 会把输入框里的
+                光标移动一起吃掉，那是比"没有快捷键"更糟的事。
+              */}
+              <div
+                data-testid="conv-list"
+                tabIndex={0}
+                onKeyDown={onConvListKey}
+                className="min-h-0 flex-1 overflow-auto px-3 pb-2 outline-none"
+              >
+                {sortedConvs.map((c) => (
                   <div key={c.id} className="group relative">
                     <button
-                      onClick={() => {
-                        setActive(c)
-                        setPage('workbench')
+                      data-testid="conv-row"
+                      data-pinned={c.pinned ? '1' : ''}
+                      onClick={() => openConv(c)}
+                      // F5：右键出「重命名 / 置顶 / 删除」。低频且危险的操作不占常驻位置，
+                      // 与文件树右键是同一套语言（那边已经这么做了）
+                      onContextMenu={(e) => {
+                        e.preventDefault()
+                        setConvMenu({ conv: c, x: e.clientX, y: e.clientY })
                       }}
-                      className={`w-full truncate rounded-md px-3 py-1.5 pr-7 text-left text-base ${
+                      className={`flex w-full items-center gap-1.5 truncate rounded-md px-3 py-1.5 pr-7 text-left text-base ${
                         page === 'workbench' && active.id === c.id ? 'bg-card font-medium' : 'text-ink-soft hover:bg-hover'
                       }`}
                     >
-                      {c.title}
+                      {/* 置顶的给一个钉子：不给标记的话"它为什么排在最上面"只能靠猜 */}
+                      {!!c.pinned && <Pin size={11} className="shrink-0 text-accent" />}
+                      <span className="min-w-0 flex-1 truncate">{c.title}</span>
                     </button>
                     {/* 与笔记删除同一套标准：二次确认（带标题）+ 删除后 toast。
                         以前是 hover ✕ 一点就永久没了，同类操作两套标准 */}
                     <button
-                      onClick={async () => {
-                        const okd = await ui.confirm({
-                          title: '确认删除这个对话？',
-                          message: `「${c.title}」\n\n对话记录会从本机删除，无法找回。`,
-                          danger: true,
-                          okText: '删除',
-                        })
-                        if (!okd) return
-                        await window.api.chat.delete(c.id)
-                        clearStepGroups(c.id) // 对话没了，它的步骤流也别留在内存里
-                        clearDraft(c.id) // 草稿同理（F2）
-                        convsRef.current = convsRef.current.filter((x) => x.id !== c.id)
-                        setConvs(convsRef.current)
-                        if (active.id === c.id) setActive(newConv())
-                        ui.toast(`已删除对话「${c.title}」`)
-                      }}
+                      onClick={() => void deleteConv(c)}
                       className="absolute right-1.5 top-1 hidden rounded px-1 text-sm text-muted hover:text-accent group-hover:block"
                       title="删除对话"
                     >
@@ -482,11 +597,8 @@ export default function App() {
               onRetry={handleRetry}
               onOpenNote={openNoteFromChat}
               nickname={nickname}
-              recentConvs={convs}
-              onOpenConv={(c) => {
-                setActive(c)
-                setPage('workbench')
-              }}
+              recentConvs={sortedConvs}
+              onOpenConv={openConv}
               onTierChange={handleTierChange}
             />
           )}
@@ -508,6 +620,47 @@ export default function App() {
           {page === 'usage' && <UsagePage onBack={() => setPage('settings')} />}
         </div>
       </main>
+
+      {/* F5 会话右键菜单：跟着鼠标落点画，不占常驻位置 */}
+      {convMenu && (
+        <div
+          data-testid="conv-menu"
+          onClick={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          style={{ left: convMenu.x, top: convMenu.y }}
+          className="fade-up fixed z-[70] w-36 overflow-hidden rounded-md border border-line bg-card py-1 shadow-modal"
+        >
+          {[
+            { key: 'rename', label: '重命名', run: () => void renameConv(convMenu.conv) },
+            { key: 'pin', label: convMenu.conv.pinned ? '取消置顶' : '置顶', run: () => togglePin(convMenu.conv) },
+            { key: 'delete', label: '删除', danger: true, run: () => void deleteConv(convMenu.conv) },
+          ].map((it) => (
+            <button
+              key={it.key}
+              data-testid={`conv-menu-${it.key}`}
+              onClick={() => {
+                setConvMenu(null)
+                it.run()
+              }}
+              className={`block w-full px-3 py-1.5 text-left text-base hover:bg-hover ${it.danger ? 'text-danger' : ''}`}
+            >
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        convs={convs}
+        commands={paletteCommands}
+        onOpenConv={openConv}
+        onOpenNote={(rel) => {
+          pendingNote.path = rel
+          setPage('vault')
+        }}
+      />
     </div>
   )
 }

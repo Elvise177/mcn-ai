@@ -8,7 +8,7 @@ import { VaultWizard } from '../components/VaultWizard'
 import { ConflictBar } from '../components/ConflictBar'
 import { ui } from '../components/ui'
 import { X, Inbox, MoveUpLeft, MoreHorizontal, Loader2, FileWarning, RotateCcw } from 'lucide-react'
-import { pendingNote, inboxPanel } from '../lib/bus'
+import { pendingNote, inboxPanel, findRequest } from '../lib/bus'
 import { GRAPH_KIND_TOKEN, GRAPH_LEGEND, token, tokenPx } from '../theme'
 import { EMPTY_MARK, fmLabel, formatFrontmatterValue, formatNoteBody, splitFrontmatter } from '../lib/note-format'
 import { STAGE_LABEL } from '../config/stages'
@@ -440,6 +440,21 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
   // 于是"读失败 = 什么都不出现"，用户只会反复点同一条
   const [noteErr, setNoteErr] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  /**
+   * Cmd+F 聚焦搜索框（F8）。快捷键在主进程菜单上注册，经 App 转成 `findRequest`——
+   * 与 `inboxPanel` 同一套形状：**订阅 + pending 两条路都要走通**，
+   * 否则"页面还没挂载时按的那一次"会静默丢掉。
+   */
+  const searchRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    const focus = (): void => {
+      findRequest.consume()
+      searchRef.current?.focus()
+      searchRef.current?.select()
+    }
+    if (findRequest.consume()) focus()
+    return findRequest.subscribe(focus)
+  }, [])
   // 搜索三态（H-11）：null=还没有结果（未搜索/检索中），有值才是"这就是全部结果"
   const [result, setResult] = useState<SearchResult | null>(null)
   const [searching, setSearching] = useState(false)
@@ -917,9 +932,18 @@ function Explorer({ vault, onSwitch }: { vault: VaultOpenResult; onSwitch: () =>
         {/* 顶部两行：搜索框独占一行，下一行「篇数居左 · 操作居右」 */}
         <div className="border-b border-line px-3 py-2.5">
           <input
+            ref={searchRef}
+            data-testid="vault-search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索库…"
+            // Esc 清空并交还焦点：搜完之后想回文件树，不该只能用鼠标点（F8）
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                setQuery('')
+                ;(e.target as HTMLInputElement).blur()
+              }
+            }}
+            placeholder="搜索知识库…"
             className="h-8 w-full rounded-md border border-line bg-card px-2.5 text-md outline-none focus:border-accent"
           />
           <div className="mt-2.5 flex items-center justify-between gap-2 text-xs text-muted">

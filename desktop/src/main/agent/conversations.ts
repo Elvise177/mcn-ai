@@ -18,6 +18,11 @@ export interface Conversation {
   updatedAt: number
   /** 会话级模型档位（标准/增强）。按会话记忆，所以它跟着对话一起落盘 */
   tier?: 'standard' | 'enhanced'
+  /**
+   * 置顶时间戳（F5）；0/undefined = 没置顶。
+   * **用时间戳不用布尔**：多条置顶时才排得出先后（刚钉上的那条通常正是现在要用的）。
+   */
+  pinned?: number
 }
 
 /** M3 本地持久化（electron-store）；M4 切 Supabase 直写 */

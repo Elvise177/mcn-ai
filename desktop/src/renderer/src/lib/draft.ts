@@ -23,6 +23,49 @@ const PREFIX = 'draft.'
 
 const key = (convId: string): string => `${PREFIX}${convId}`
 
+/**
+ * **还没发出过第一句话的那个"新对话"的 id**（走查逮到的洞）。
+ *
+ * 草稿是按 `convId` 存的，而"新对话"在发出第一条消息之前**根本没落过盘**——
+ * 重载界面时 App 会 `crypto.randomUUID()` 造一个新的，于是刚才那半截话
+ * 挂在一个再也不会出现的 id 下面，紧接着被 `pruneDrafts` 当孤儿清掉。
+ *
+ * 而"打一半的长提示词"最常发生的地方**恰恰就是新对话**——F2 要是在这儿失效，
+ * 等于只修了最不疼的那一半。所以把这个待用 id 也记下来，重载后接着用同一个。
+ */
+const PENDING_KEY = 'chat.pendingNewConv'
+
+/** 取上次那个"还没用过的新对话" id；没有就现造一个并记住 */
+export function pendingNewConvId(): string {
+  try {
+    const kept = localStorage.getItem(PENDING_KEY)
+    if (kept) return kept
+  } catch {
+    /* 读不到就现造 */
+  }
+  return resetPendingNewConvId()
+}
+
+/** 换一个新的（用户点了「新对话」，或这个 id 已经真的落盘成一条对话了） */
+export function resetPendingNewConvId(): string {
+  const id = crypto.randomUUID()
+  try {
+    localStorage.setItem(PENDING_KEY, id)
+  } catch {
+    /* 存不下也不影响这一次用 */
+  }
+  return id
+}
+
+/** `pruneDrafts` 要放过它：它对应的对话还没落盘，但草稿是真的 */
+export const currentPendingId = (): string | null => {
+  try {
+    return localStorage.getItem(PENDING_KEY)
+  } catch {
+    return null
+  }
+}
+
 /** 读草稿。localStorage 在隐私模式/配额满时会抛，读不到就当没有 */
 export function readDraft(convId: string): string {
   try {
@@ -51,7 +94,9 @@ export function clearDraft(convId: string): void {
  * 返回清掉的条数，纯粹为了能断言——不返回的话这个函数没法零花费验。
  */
 export function pruneDrafts(liveConvIds: string[]): number {
-  const live = new Set(liveConvIds)
+  // 待用的那个"新对话"没落盘，但它的草稿是真的——不放过它就等于白修
+  const pending = currentPendingId()
+  const live = new Set([...liveConvIds, ...(pending ? [pending] : [])])
   let n = 0
   try {
     const stale: string[] = []

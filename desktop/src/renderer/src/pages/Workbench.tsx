@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check, RotateCcw, AlertTriangle } from 'lucide-react'
+import { ArrowUp, Square, Copy, Loader2, X, Paperclip, MessageSquare, Inbox, Check, RotateCcw, AlertTriangle, Search } from 'lucide-react'
 import { FastMarkdown } from '../components/Markdown'
 import { FileIcon } from '../components/FileIcon'
 import { ui } from '../components/ui'
@@ -13,6 +13,8 @@ import { TierSelector } from '../components/TierSelector'
 import { StepStream, useArtifactMedians } from '../components/StepStream'
 import { anchorStepGroup, tierNote, useSessionSteps } from '../lib/step-stream'
 import { clearDraft, readDraft, writeDraft } from '../lib/draft'
+import { findInMessages } from '../lib/conversations'
+import { findRequest } from '../lib/bus'
 
 /**
  * 打开产物（M-05）。`shell.openPath` 失败（没装 Keynote/Office、产物已被删）以前是静默的，
@@ -203,6 +205,28 @@ export default function Workbench({
     [onOpenNote]
   )
 
+  /**
+   * 会话内查找（Cmd+F）。开关在这一层：查找条画在消息区上方，
+   * 命中之后要滚动消息容器——两件事都得由持有 `scrollRef` 的这个组件来做。
+   */
+  const [finding, setFinding] = useState(false)
+  const [findHit, setFindHit] = useState<number | null>(null)
+  useEffect(() => {
+    const open = (): void => {
+      findRequest.consume()
+      setFinding(true)
+    }
+    if (findRequest.consume()) open() // 页面还没挂载时按的那一次（同 inboxPanel 的两条路）
+    return findRequest.subscribe(open)
+  }, [])
+  // 命中就滚过去。`block:'center'` 而不是 'nearest'：命中在屏幕最边上等于没看见
+  useEffect(() => {
+    if (findHit === null) return
+    scrollRef.current
+      ?.querySelector(`[data-msg-index="${findHit}"]`)
+      ?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [findHit])
+
   const empty = messages.length === 0 && !streaming
 
   /**
@@ -346,12 +370,26 @@ export default function Workbench({
           </div>
         ) : (
           <>
+            {finding && (
+              <FindBar
+                messages={messages}
+                onJump={setFindHit}
+                onClose={() => {
+                  setFinding(false)
+                  setFindHit(null)
+                }}
+              />
+            )}
             <div ref={scrollRef} className="flex-1 overflow-auto px-8 py-6">
               <div className="mx-auto max-w-3xl space-y-5">
                 {messages.map((m, i) =>
                   m.role === 'user' ? (
-                    <div key={i} className="flex justify-end">
-                      <div className="max-w-[80%] rounded-xl bg-surface px-4 py-2.5 text-md">
+                    <div key={i} data-msg-index={i} className="flex justify-end">
+                      <div
+                        className={`max-w-[80%] rounded-xl bg-surface px-4 py-2.5 text-md ${
+                          findHit === i ? 'ring-2 ring-accent' : ''
+                        }`}
+                      >
                         {!!m.attachments?.length && (
                           <div data-testid="bubble-attachments" className="mb-2 flex flex-wrap gap-2">
                             {m.attachments.map((a, k) =>
@@ -381,7 +419,11 @@ export default function Workbench({
                       </div>
                     </div>
                   ) : (
-                    <div key={i} className="group flex gap-3">
+                    <div
+                      key={i}
+                      data-msg-index={i}
+                      className={`group flex gap-3 ${findHit === i ? 'rounded-md ring-2 ring-accent' : ''}`}
+                    >
                       {/* 出错那条的圆点走红：语义色留给"持续存在的状态"，一条错误回答
                           会一直留在历史里，值得占着颜色（瞬时 toast 才是炭黑+图标） */}
                       <span
@@ -534,6 +576,88 @@ function TurnStatusLine({
   return (
     <div data-testid="turn-status" data-tier={tier} className="mb-2 text-sm text-muted">
       {parts.join(' · ')}
+    </div>
+  )
+}
+
+/**
+ * 会话内查找（Cmd+F，用户点名的那条）。
+ *
+ * ## 为什么不用系统的「查找」
+ *
+ * Electron 有 `findInPage`，但它找的是**当前 DOM 里已经渲染出来的文字**——
+ * 而长对话是滚动容器，没滚到的部分照样在 DOM 里，看着能用。真正的问题是
+ * 它给不出"第几条消息命中"这个业务概念，也没法在命中之间跳。
+ * 自己按消息数组找一遍，反而更简单也更准。
+ *
+ * ## 三条取向
+ *
+ * ① **一直显示 `第 n/N 条`**：只高亮不报数的话，用户不知道还有没有下一处
+ * ② **回车 / ↑↓ 跳下一处**，Esc 关掉并把焦点还给输入框
+ * ③ **不改消息内容**：命中只是滚过去 + 描一圈边。往正文里插 `<mark>` 会打乱
+ *    Markdown 渲染（代码块里插标签直接坏页）
+ */
+function FindBar({
+  messages,
+  onJump,
+  onClose,
+}: {
+  messages: ChatMessage[]
+  onJump: (index: number) => void
+  onClose: () => void
+}) {
+  const [q, setQ] = useState('')
+  const [at, setAt] = useState(0)
+  const ref = useRef<HTMLInputElement>(null)
+  useEffect(() => ref.current?.focus(), [])
+
+  const hits = findInMessages(messages, q)
+  // 关键词一变就回到第一处：停在第 5 处而现在只有 2 处的话，「下一处」按了没反应
+  useEffect(() => setAt(0), [q])
+  useEffect(() => {
+    if (hits.length) onJump(hits[Math.min(at, hits.length - 1)])
+  }, [q, at, hits.length]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const step = (d: number): void => {
+    if (!hits.length) return
+    setAt((n) => (n + d + hits.length) % hits.length)
+  }
+
+  return (
+    <div
+      data-testid="chat-find"
+      className="flex items-center gap-2 border-b border-line bg-surface px-8 py-2"
+    >
+      <Search size={13} className="shrink-0 text-muted" />
+      <input
+        ref={ref}
+        data-testid="chat-find-input"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose()
+          if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+            e.preventDefault()
+            step(e.shiftKey ? -1 : 1)
+          }
+          if (e.key === 'ArrowDown') { e.preventDefault(); step(1) }
+          if (e.key === 'ArrowUp') { e.preventDefault(); step(-1) }
+        }}
+        placeholder="在这个对话里查找…"
+        className="min-w-0 flex-1 bg-transparent text-base outline-none"
+      />
+      <span data-testid="chat-find-count" className="shrink-0 text-sm text-muted">
+        {q.trim() ? (hits.length ? `第 ${Math.min(at, hits.length - 1) + 1}/${hits.length} 条` : '没有匹配') : ''}
+      </span>
+      <button onClick={() => step(-1)} disabled={!hits.length} className="shrink-0 rounded px-1.5 text-sm text-muted hover:text-accent disabled:opacity-40">
+        ↑
+      </button>
+      <button data-testid="chat-find-next" onClick={() => step(1)} disabled={!hits.length} className="shrink-0 rounded px-1.5 text-sm text-muted hover:text-accent disabled:opacity-40">
+        ↓
+      </button>
+      <button data-testid="chat-find-close" onClick={onClose} title="关闭查找（Esc）" className="shrink-0 rounded p-1 text-muted hover:text-accent">
+        <X size={13} />
+      </button>
     </div>
   )
 }

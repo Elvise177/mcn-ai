@@ -138,9 +138,21 @@ function createWindow(): BrowserWindow {
  * 菜单项是唯一权威的快捷键注册处——渲染层自己 `addEventListener('keydown')` 抢
  * Cmd 系组合键的话，输入框里按 Cmd+A 之类的系统行为会被顺手吃掉。
  */
-const toFocused = (name: string) => (): void => {
-  BrowserWindow.getFocusedWindow()?.webContents.send('shortcut', name)
-}
+const toFocused =
+  (name: string) =>
+  (_item?: unknown, fromWindow?: Electron.BaseWindow): void => {
+    /**
+     * 目标窗口按这个顺序找：**菜单系统告诉我们的那扇 → 当前聚焦的 → 第一扇**。
+     *
+     * 只写 `getFocusedWindow()` 的话有一整类情况会静默无效：应用没有 OS 焦点时
+     * 它回 null（走查驱动的窗口、从 Dock 菜单触发、以及 macOS 上菜单栏抢焦点的那一瞬），
+     * 于是快捷键"按了没反应"——而这正是这一批要消灭的那种故障
+     * （2026-09-04 走查现场：Cmd+K 的菜单项点了，面板不出来）。
+     */
+    const from = BrowserWindow.getAllWindows().find((w) => w.id === (fromWindow as BrowserWindow | undefined)?.id)
+    const target = from ?? BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+    target?.webContents.send('shortcut', name)
+  }
 
 function buildMenu(): void {
   Menu.setApplicationMenu(
