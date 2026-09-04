@@ -10,6 +10,11 @@
  *   node scripts/usage-report.mjs --dir /tmp/mcnai-e2e-userdata/usage
  *   MCNAI_USER_DATA=/tmp/mcnai-e2e-userdata node scripts/usage-report.mjs
  *   node scripts/usage-report.mjs --month 2026-08
+ *   node scripts/usage-report.mjs --json          # 机器可读（三方对账/断言用）
+ *
+ * **`--json` 存在的理由**：这个脚本的归一化与计价是应用里那份的**手抄镜像**，
+ * 两份长歪过一次就再也对不上账（文件头下面那段 `pricing.usd` 判据的教训）。
+ * `npm run smoke:usage` 拿同一份桩数据同时喂两边、逐项比对，靠的就是这个输出。
  */
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join } from 'path'
@@ -135,6 +140,11 @@ const INPUT_KEYS = /^(input_tokens|inputTokens|prompt_tokens|promptTokens)$/
 const CACHE_READ_KEYS = /^(cache_read_input_tokens|cacheReadInputTokens)$/
 const CACHE_WRITE_KEYS = /^(cache_creation_input_tokens|cacheCreationInputTokens)$/
 const OUTPUT_KEYS = /^(output_tokens|outputTokens|completion_tokens|completionTokens)$/
+// R8：OpenAI 兼容口径的缓存命中**含在 prompt_tokens 里**（Anthropic 口径相反，两者互斥），
+// 所以是从 input 里挪出来、不是加上去——加上去就是把缓存那段按全价再算一遍（B-2 的翻版）。
+// 这几个 key **之间取最大值不求和**：DeepSeek 同一份 usage 里把同一个数报两遍
+// （`prompt_cache_hit_tokens` 与 `prompt_tokens_details.cached_tokens`），求和会翻倍
+const CACHE_HIT_INCLUSIVE_KEYS = /^(prompt_cache_hit_tokens|promptCacheHitTokens|cached_tokens|cachedTokens)$/
 
 function tokensOf(raw) {
   let node = raw
@@ -146,6 +156,7 @@ function tokensOf(raw) {
   let cacheRead = 0
   let cacheWrite = 0
   let output = 0
+  const hits = new Map()
   const walk = (v, depth) => {
     if (!v || typeof v !== 'object' || depth > 4) return
     for (const [k, val] of Object.entries(v)) {
@@ -154,10 +165,17 @@ function tokensOf(raw) {
         else if (CACHE_READ_KEYS.test(k)) cacheRead += val
         else if (CACHE_WRITE_KEYS.test(k)) cacheWrite += val
         else if (OUTPUT_KEYS.test(k)) output += val
+        else if (CACHE_HIT_INCLUSIVE_KEYS.test(k)) hits.set(k, (hits.get(k) ?? 0) + val)
       } else walk(val, depth + 1)
     }
   }
   walk(node, 0)
+  const inclusiveHit = hits.size ? Math.max(...hits.values()) : 0
+  if (inclusiveHit > 0) {
+    const moved = Math.min(inclusiveHit, input) // 钳住：自相矛盾的数据也不许把总量算大
+    input -= moved
+    cacheRead += moved
+  }
   return { input, cacheRead, cacheWrite, output }
 }
 
@@ -216,6 +234,53 @@ function group(keyFn) {
 
 const TIER_LABEL = { standard: '标准', enhanced: '增强' }
 
+/**
+ * 归因维度（S2）：模板系统落地前 `template` 恒为 null，所以这张表现在按
+ * 「模板 / pipeline 阶段」两级落到一个键上——先让管道通着，模板一上线这张表自然有内容。
+ */
+const attrKey = (r) => {
+  const a = r.attribution
+  if (!a) return '(无归因·R8 之前的记录)'
+  if (a.template) return `模板 ${a.template}`
+  return a.stage ? `阶段 ${a.stage}` : '(未标模板)'
+}
+
+/**
+ * `--json`：机器可读，给 smoke:usage 做「应用侧 vs 脚本侧」逐项对账用（见文件头）。
+ * 输出的是**最原始的三个量 + 花费**，不是给人看的表——人看的表随时可以改，
+ * 这份输出改了就会有断言红，正是我们想要的那种约束。
+ */
+if (argv.includes('--json')) {
+  const t = records.reduce(
+    (acc, r) => {
+      const k = tokensOf(r.usage)
+      acc.input += k.input
+      acc.cacheRead += k.cacheRead
+      acc.cacheWrite += k.cacheWrite
+      acc.output += k.output
+      acc.costCny += recCost(r)
+      acc.calls += r.calls ?? 1
+      return acc
+    },
+    { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costCny: 0, calls: 0 }
+  )
+  const byType = {}
+  for (const r of records) {
+    const k = tokensOf(r.usage)
+    const row = (byType[r.taskType ?? '(未知)'] ??= {
+      calls: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, costCny: 0,
+    })
+    row.calls += r.calls ?? 1
+    row.input += k.input
+    row.cacheRead += k.cacheRead
+    row.cacheWrite += k.cacheWrite
+    row.output += k.output
+    row.costCny += recCost(r)
+  }
+  console.log(JSON.stringify({ dir, files, records: records.length, total: t, byType }, null, 2))
+  process.exit(0)
+}
+
 console.log(`\n用量汇总　目录 ${dir}　文件 ${files.join('、')}　共 ${records.length} 条`)
 const routeLine = Object.entries(PRICING.routes ?? {})
   .map(([k, v]) => {
@@ -241,6 +306,9 @@ console.table(group((r) => (r.tier ? TIER_LABEL[r.tier] ?? r.tier : '（不经�
 console.log('— 按实际模型 —')
 console.table(group((r) => r.resolved_model || `${r.expected_model || '(未知)'}（未上报实际模型）`))
 
+console.log('— 按归因（模板 / pipeline 阶段，S2）—')
+console.table(group(attrKey))
+
 const totalCny = records.reduce((n, r) => n + recCost(r), 0)
 const legacyRouteGuesses = records.filter((r) => !r.route).length
 const degraded = records.filter((r) => r.degraded)
@@ -257,6 +325,22 @@ if (degraded.length) {
     console.log(`   ${new Date(r.ts).toLocaleString('zh-CN')} 期望 ${r.expected_model} → 实际 ${r.models?.join('/') ?? r.resolved_model}`)
   }
 }
-const noUsage = records.filter((r) => !r.usage).length
-if (noUsage) console.log(`\nℹ️  ${noUsage} 条记录没有 usage（只记了次数，多为入库打标），其 token 计为 0`)
+/**
+ * 判据认「有没有 token」，不认「有没有 usage 字段」：R8 之后 pipeline 会报
+ * `usage: {}`（这一轮真的一次没调），那也是没量可计的一条。
+ */
+const noTokens = records.filter((r) => {
+  const t = tokensOf(r.usage)
+  return t.input + t.cacheRead + t.cacheWrite + t.output === 0
+})
+const tagNoTokens = noTokens.filter((r) => r.taskType === 'ingest-tag').length
+if (noTokens.length) {
+  console.log(`\nℹ️  ${noTokens.length} 条记录没有 token（只记了次数），其 token 计为 0`)
+  if (tagNoTokens) {
+    console.log(
+      `   其中 ${tagNoTokens} 条是入库打标——**R8（打标 token 回传）之前的处理程序不报用量**，` +
+        `那几条的花费确实不在总数里；升级后跑的轮次不该再出现在这里，出现了就是回传断了`
+    )
+  }
+}
 console.log('')

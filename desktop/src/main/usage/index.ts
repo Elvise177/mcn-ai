@@ -28,6 +28,31 @@ export const TASK_TYPE_LABEL: Record<UsageTaskType, string> = {
   'ingest-tag': '入库打标',
 }
 
+/**
+ * 归因（PLAN-v2 批 5 S2，**给模板系统预留**）。
+ *
+ * 为什么现在就加、而不是等模板系统落地：账本是**只能向前写**的东西。
+ * 模板系统（R13 / 批 7）上线那天想回答「这个模板花了多少钱」，只能看它上线之后的记录——
+ * 字段晚加一个月，就永远缺一个月的归因。加进去的成本是几个可选字段，
+ * 不加的成本是一段查不回来的历史。B-2 那次的 `route` 就是这个教训的实例：
+ * 改版前的 44 条记录没有 `route`，逐笔正向对账到今天也做不了（bug#8 关联段）。
+ *
+ * **全部可选、全部允许 null**：老记录没有这一层，读取侧一律按"拿不到"处理。
+ */
+export interface UsageAttribution {
+  /**
+   * 模板 id。模板系统落地前**恒为 null**——留着的是位置，不是功能。
+   * 这里不许填"内置""默认"之类的占位串：那会让将来的分组表凭空多出一行假模板。
+   */
+  template?: string | null
+  /** 触发这笔花费的任务 id（`inbox:<库根>` / 对话的 conversationId） */
+  taskId?: string | null
+  /** 库根路径。对话记录靠它才答得出「哪个库的问答花了多少」（sessionId 里没有库） */
+  vault?: string | null
+  /** pipeline 侧的阶段名（`tag_llm` / `route_参考资料`），非 pipeline 链路为 null */
+  stage?: string | null
+}
+
 export interface UsageRecord {
   ts: number
   sessionId: string
@@ -51,8 +76,14 @@ export interface UsageRecord {
   /** 原样存储的完整 usage 对象；拿不到就是 null */
   usage: unknown
   costUsd?: number | null
-  /** 拿不到 usage 的链路（pipeline 打标）只记次数 */
+  /**
+   * 这条记录代表几次 LLM 调用。
+   * 对话是一轮一条（不填 = 1）；**入库打标是一轮 N 篇**，`calls` 就是这一轮真调了几次
+   * （R8 之前它恒为 1，因为那时候连 token 都拿不到，"次数"只能按轮记）
+   */
   calls?: number
+  /** 归因（S2 预留），见 `UsageAttribution` */
+  attribution?: UsageAttribution
 }
 
 function usageDir(): string {
@@ -122,6 +153,27 @@ const INPUT_KEYS = /^(input_tokens|inputTokens|prompt_tokens|promptTokens)$/
 const CACHE_READ_KEYS = /^(cache_read_input_tokens|cacheReadInputTokens)$/
 const CACHE_WRITE_KEYS = /^(cache_creation_input_tokens|cacheCreationInputTokens)$/
 const OUTPUT_KEYS = /^(output_tokens|outputTokens|completion_tokens|completionTokens)$/
+/**
+ * **OpenAI 兼容口径的缓存命中数：它是 `prompt_tokens` 的一部分，不是另一份。**
+ *
+ * 两家口径正好相反，这是 R8 接 pipeline 打标用量时才第一次遇上的：
+ *  · Anthropic（对话链路）：`input_tokens` 与 `cache_read_input_tokens` **互斥**，直接相加
+ *  · OpenAI 兼容（DeepSeek，打标链路）：`prompt_tokens` **含**缓存那部分，
+ *    命中数另报 `prompt_cache_hit_tokens`（OpenAI 自己是 `prompt_tokens_details.cached_tokens`）
+ *
+ * 不减掉的话，缓存那段会被**按全价输入再算一遍**——正是 B-2 里高估 3.1 倍那个病的翻版，
+ * 而且打标恰恰是缓存命中率最高的链路（同一套 system prompt 逐篇重发）。
+ * `prompt_cache_miss_tokens` 故意不认：它等于 prompt − hit，认了就是把同一笔加三遍。
+ *
+ * **这几个 key 之间取最大值，不是求和**（2026-09-04 真跑一轮打标才发现）：
+ * DeepSeek 一份 usage 里**同一个数报了两遍**——`prompt_cache_hit_tokens: 17920`
+ * 与 `prompt_tokens_details.cached_tokens: 17920`。求和得 35840 > prompt 26274，
+ * 被钳位钳成"整段 prompt 都是缓存"，于是 input 记成 0、缓存读记成 26274。
+ * 总量守恒所以**页面上的 tokens 完全正常**，错的是拆分——而缓存读按 1/30 计价，
+ * 这一轮的花费因此低估约 10%（¥0.107 对 ¥0.119）。别名说的是同一个量，取最大值才对。
+ * 合成桩数据发现不了这条：只有真实回包才会同时带上两个别名。
+ */
+const CACHE_HIT_INCLUSIVE_KEYS = /^(prompt_cache_hit_tokens|promptCacheHitTokens|cached_tokens|cachedTokens)$/
 
 /**
  * 从任意形状的 usage 对象里抠出输入/输出 token。
@@ -140,6 +192,8 @@ export function tokensOf(raw: unknown): TokenCounts {
   let cacheRead = 0
   let cacheWrite = 0
   let output = 0
+  /** 含在 input 里的缓存命中，**按 key 名分开攒**：别名之间取最大值，不求和 */
+  const hits = new Map<string, number>()
   const walk = (v: unknown, depth: number): void => {
     if (!v || typeof v !== 'object' || depth > 4) return
     for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
@@ -148,10 +202,19 @@ export function tokensOf(raw: unknown): TokenCounts {
         else if (CACHE_READ_KEYS.test(k)) cacheRead += val
         else if (CACHE_WRITE_KEYS.test(k)) cacheWrite += val
         else if (OUTPUT_KEYS.test(k)) output += val
+        else if (CACHE_HIT_INCLUSIVE_KEYS.test(k)) hits.set(k, (hits.get(k) ?? 0) + val)
       } else walk(val, depth + 1)
     }
   }
   walk(node, 0)
+  // 挪，不是加（见 CACHE_HIT_INCLUSIVE_KEYS 的注释）。钳在 input 上限内：
+  // 万一哪家接口报了 hit > prompt 这种自相矛盾的数，也不能让 input 变成负的把总量算小
+  const inclusiveHit = hits.size ? Math.max(...hits.values()) : 0
+  if (inclusiveHit > 0) {
+    const moved = Math.min(inclusiveHit, input)
+    input -= moved
+    cacheRead += moved
+  }
   return { input, cacheRead, cacheWrite, output }
 }
 
@@ -201,6 +264,15 @@ export interface UsageSummary {
     costCny: number
     medianMs: number
   }>
+  /**
+   * 入库打标的**计量状态**（R8）。页面的脚注按它说话，不再写死那句「没有计入」。
+   *
+   * 写死一句话正是 desktop/CLAUDE.md「界面版本号」那条教训的形状：
+   * pipeline 补上回传之后，那句话会**一直绿着继续骗人**，而且没有任何断言会红。
+   * 所以这里从数据算：`unmetered` = 本月没有 token 的打标记录条数
+   * （老版本 pipeline 跑出来的，或换库时被停掉那一轮）。
+   */
+  ingest: { records: number; unmetered: number }
 }
 
 /** 最近 N 天可能跨月，把涉及到的月文件都读进来 */
@@ -269,6 +341,14 @@ export function summarize(month = currentMonth()): UsageSummary {
     daily.push({ date, count: day.length, standard: day.length - enhanced, enhanced })
   }
 
+  // 「有没有计量到」的判据是**这条记录到底有没有 token**，不是它有没有 usage 字段：
+  // pipeline 报了 `usage: {}`（新产物、这轮一次没调）也算没量可计
+  const ingestRecs = recs.filter((r) => r.taskType === 'ingest-tag')
+  const unmetered = ingestRecs.filter((r) => {
+    const t = tokensOf(r.usage)
+    return t.input + t.cacheRead + t.cacheWrite + t.output === 0
+  }).length
+
   return {
     month,
     chatCount: recs.filter((r) => r.taskType === 'chat').length,
@@ -279,5 +359,6 @@ export function summarize(month = currentMonth()): UsageSummary {
     daily,
     byTier,
     byType,
+    ingest: { records: ingestRecs.length, unmetered },
   }
 }

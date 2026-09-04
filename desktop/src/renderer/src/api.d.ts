@@ -267,6 +267,11 @@ interface UsageSummary {
     costCny: number
   }>
   byType: Array<{ type: string; label: string; count: number; tokens: number; costCny: number; medianMs: number }>
+  /**
+   * 入库打标的计量状态（R8）：`unmetered` = 本月只有次数、没有 token 的那几条
+   * （旧版处理程序不回传用量）。页面的两条脚注按它说话，不写死"没有计入"
+   */
+  ingest: { records: number; unmetered: number }
 }
 
 /**

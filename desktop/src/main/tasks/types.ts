@@ -20,8 +20,11 @@ export interface InboxEvent {
   pending?: number
   file?: string
   ok?: boolean
-  /** pipeline 若在阶段行里报了 token 用量就原样带上（目前只有智能打标可能有），没有就是 undefined */
-  usage?: unknown
+  /**
+   * **token 用量不在这儿**（R8）。pipeline 走的是一条独立的 `status:'usage'` 行，
+   * 由 orchestrator 单独接走落账（`usage/ingest.ts`）——阶段事件是给界面看的，
+   * 混进记账字段会让「阶段日志」和「账本」共用一个形状，改一边就会碰坏另一边。
+   */
   /** A-4：`convert_failures` 事件带的两张清单——转换失败的、格式不支持的 */
   failed?: string[]
   unsupported?: string[]

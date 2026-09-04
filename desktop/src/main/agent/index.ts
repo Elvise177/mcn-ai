@@ -931,6 +931,14 @@ export class AgentManager {
                 modelUsage: models.length ? modelUsage : null,
               },
               costUsd: costUsd ?? null,
+              // 归因（S2 预留）：模板系统落地前 template 恒 null，先把库与会话记下来——
+              // 账本只能向前写，字段晚加一天就永远缺这一天的归因（见 UsageAttribution）
+              attribution: {
+                template: null,
+                taskId: sessionId,
+                vault: vaultManager.currentRoot ?? null,
+                stage: null,
+              },
             })
           }
           // B-6：校验回答里的每一条 `[[…]]`。两种没有依据的情况都算：

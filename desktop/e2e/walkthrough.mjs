@@ -4655,9 +4655,17 @@ try {
       // 增强档带 100000 缓存读：B-2 的核心（缓存按模型倍率折价）此前完全没被走查覆盖，
       // 不给缓存 token 的话，把倍率改成 1 或 0.1 这条断言都发现不了
       { ts: Date.now() - 3600000, sessionId: 'e2e-2', taskType: 'make-ppt', tier: 'enhanced', route: 'aihubmix', expected_model: 'claude-opus-5', resolved_model: 'claude-opus-5', models: ['claude-opus-5'], degraded: false, durationMs: 52000, usage: { usage: { input_tokens: 22000, cache_read_input_tokens: 100000, output_tokens: 4000 }, modelUsage: { 'claude-opus-5': { inputTokens: 22000, cacheReadInputTokens: 100000, outputTokens: 4000 } } } },
+      // 入库打标**有 token 的形态**（R8）：pipeline 回传后落的就是这个形状——
+      // OpenAI 兼容口径，`prompt_tokens` **含**缓存命中（Anthropic 口径正好相反）。
+      // 归一化要把命中挪出来：不挪就是把缓存那段按全价输入再算一遍（B-2 的翻版）
+      { ts: Date.now() - 900000, sessionId: 'inbox:/tmp/mcnai-e2e-vault', taskType: 'ingest-tag', tier: null, route: 'deepseek', expected_model: 'deepseek-v4-flash', resolved_model: 'deepseek-v4-flash', degraded: false, durationMs: 91000, calls: 37, usage: { prompt_tokens: 500000, completion_tokens: 80000, prompt_cache_hit_tokens: 300000, total_tokens: 580000 }, attribution: { template: null, taskId: 'inbox:/tmp/mcnai-e2e-vault', vault: '/tmp/mcnai-e2e-vault', stage: 'tag_llm' } },
+      // R8 **之前**的老记录（只有次数、没有 token）。留着它是为了验页面那两条脚注：
+      // 还有没计量的就得说清有几条，不许写死"已全部计入"
       { ts: Date.now() - 600000, sessionId: 'e2e-3', taskType: 'ingest-tag', tier: null, expected_model: 'deepseek-v4-flash', resolved_model: null, durationMs: 91000, usage: null, calls: 1 },
     ]
     const before = await win.evaluate(() => window.api.usage.summary())
+    // 基线从**另一侧**取（E2E_CHAT 那轮页面上本来就有真实记录，不能假定是 0）
+    const before0Tag = before.byType.find((r) => r.type === 'ingest-tag')?.count ?? 0
     writeFileSync(join(usageDir, `${ym}.jsonl`), stub.map((r) => JSON.stringify(r)).join('\n') + '\n', { flag: 'a' })
     await win.click('text=刷新')
     await win.waitForTimeout(800)
@@ -4671,10 +4679,30 @@ try {
     const stdRow = after.byTier.find((t) => t.tier === 'standard')
     if (!enhRow || enhRow.total < 26000) throw new Error(`增强档 token 合计不对：${JSON.stringify(enhRow)}`)
     if (!stdRow || stdRow.total < 1200) throw new Error(`标准档 token 合计不对：${JSON.stringify(stdRow)}`)
-    // 拿不到 usage 的入库打标只记次数，token 显示「—」
+    /**
+     * 入库打标（R8 / bug#8）。**这里以前断言的是「不该有 token」**——
+     * pipeline 补上回传之后，那条断言会红在正确的改动上，而它守的那个"事实"
+     * 本身就是缺陷（98.7% 的打标花费在用量页上看不见）。现在反过来验：
+     *   ① 有量的那条真的进了账　② 归一化按 OpenAI 口径把缓存挪出去了
+     *   ③ 老记录仍按 0 token 计，且次数是**篇数之和**不是轮数
+     */
     const tagRow = after.byType.find((r) => r.type === 'ingest-tag')
-    if (!tagRow || tagRow.count < 1) throw new Error('入库打标那条没被记成次数')
-    if (tagRow.tokens !== 0) throw new Error(`入库打标不该有 token：${tagRow.tokens}`)
+    if (!tagRow) throw new Error('入库打标那条没进按类型表')
+    if (tagRow.count < before0Tag + 38)
+      throw new Error(`入库打标次数该按篇数累加（37 + 1 条老记录）：${tagRow.count}`)
+    // 500000 prompt 里含 300000 缓存命中 → input 200000 + cacheRead 300000 + output 80000
+    if (tagRow.tokens < 580000)
+      throw new Error(`入库打标的 token 没进账（R8 回传断了？）：${tagRow.tokens}`)
+    // 缓存没挪出来的话总量会变成 500000+300000+80000=880000
+    if (tagRow.tokens >= 880000)
+      throw new Error(`缓存命中被当成了额外输入，总量算胀了：${tagRow.tokens}`)
+    // 页面脚注按数据说话：本月还剩 1 条没量的老记录，就必须说出来
+    if (after.ingest.unmetered !== before.ingest.unmetered + 1)
+      throw new Error(`未计量条数不对：${before.ingest.unmetered} → ${after.ingest.unmetered}`)
+    if (!(await win.locator('[data-testid="usage-unmetered-note"]').count()))
+      throw new Error('还有没计量的打标记录，脚注却没说')
+    const unmeteredNote = await win.locator('[data-testid="usage-unmetered-note"]').innerText()
+    if (!/1 次/.test(unmeteredNote)) throw new Error(`未计量脚注没报出条数：「${unmeteredNote}」`)
 
     // 页面结构：三个大数字 / 14 天柱状图 / 档位对比 / 类型细分 / 两条脚注
     for (const [id, name] of [
@@ -4732,14 +4760,27 @@ try {
       console.log('管理员开关打开后金额 ✓', JSON.stringify({ 增强档: `¥${cny}` }))
       /**
        * 金额旁边这两句话是**对账查出来的**，不是凑文案：
-       *  · 入库打标拿不到 token 就没计价——实测一天，账单上 flash 有 27.8 万 input，
-       *    账本里只有 4,302，98.7% 的打标花费不在这个数里。不写明白，用户会拿它当总花费。
+       *  · 覆盖范围（含不含入库打标）——实测一天，账单上 flash 有 27.8 万 input，
+       *    账本里只有 4,302，98.7% 的打标花费不在那个数里。不写明白，用户会拿它当总花费。
        *  · 官方分时计价，同一模型不同时段单价实测差一倍，固定单价估不准。
        * 两句都删得掉、删了也不会报错，所以在这里钉死。
+       *
+       * **断言认"说没说清覆盖范围"，不认那句具体措辞**（R8 之后措辞会随数据变）：
+       * 旧断言写死 `/没有计入/`，一旦 pipeline 补上回传、页面改说"已包含"，
+       * 它会红在正确的改动上；反过来更糟——如果页面**永远**说"没有计入"，
+       * 这条断言会一直绿着替一句谎话背书（同「界面版本号」那条教训）。
+       * 所以判据是：脚注说的**必须跟数据一致**。
        */
       const costNote = (await win.locator('[data-testid="usage-cost-note"]').innerText()).replace(/\s+/g, '')
-      if (!/入库打标.*没有计入|没有计入/.test(costNote))
-        throw new Error(`费用脚注没说明"打标不计入"：「${costNote}」`)
+      const sum = await win.evaluate(() => window.api.usage.summary())
+      if (sum.ingest.unmetered > 0) {
+        if (!/不含|没有计入/.test(costNote))
+          throw new Error(`本月还有 ${sum.ingest.unmetered} 条打标没计量，脚注却没说不含它：「${costNote}」`)
+        if (!costNote.includes(String(sum.ingest.unmetered)))
+          throw new Error(`脚注没报出未计量的条数（${sum.ingest.unmetered}）：「${costNote}」`)
+      } else if (!/已包含入库打标/.test(costNote)) {
+        throw new Error(`打标已全部计量，脚注却没说已包含：「${costNote}」`)
+      }
       if (!/分时计价/.test(costNote)) throw new Error(`费用脚注没说明分时计价：「${costNote}」`)
       if (/\*\*/.test(costNote)) throw new Error(`费用脚注里有没渲染的 Markdown 星号：「${costNote}」`)
       // 开金额是运维态，那两条「不含打标 / 分时有偏差」的说明只在这个态下才出现，
@@ -4860,9 +4901,17 @@ try {
       await win.mouse.move(4, 4)
     }
     const note = (await win.locator('[data-testid="usage-token-note"]').innerText()).replace(/\s+/g, '')
-    // tokens 含哪几项、以及打标为什么显示「—」，两件事都得写出来
-    if (!/缓存读/.test(note) || !/只记次数/.test(note))
-      throw new Error(`tokens 脚注没说清口径：「${note}」`)
+    /**
+     * tokens 含哪几项，必须写出来（老断言还要求写「只记次数」——R8 之后打标已经有 token 了，
+     * 那句话不再是事实；判据跟着数据走，别再钉死措辞）。
+     */
+    if (!/缓存读/.test(note)) throw new Error(`tokens 脚注没说清含哪几项：「${note}」`)
+    const sum0 = await win.evaluate(() => window.api.usage.summary())
+    if (sum0.ingest.unmetered > 0 && !/只有次数没有token/.test(note))
+      throw new Error(`本月有 ${sum0.ingest.unmetered} 条没计量的打标，脚注没说：「${note}」`)
+    if (sum0.ingest.unmetered === 0 && /只有次数没有token/.test(note))
+      throw new Error(`打标已全部计量，脚注还挂着"只有次数"：「${note}」`)
+    if (/\*\*/.test(note)) throw new Error(`tokens 脚注里有没渲染的 Markdown 星号：「${note}」`)
     // 配额进度条本期是隐藏的占位（将来按量计费启用）
     if (await win.locator('[data-testid="usage-quota"]').count())
       throw new Error('配额进度条本期不该显示（只是预留组件位）')

@@ -305,8 +305,19 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                   ))}
                 </tbody>
               </table>
+              {/**
+                * 脚注**按数据说话，不写死一句**（R8）。
+                * 原来这里挂着「入库打标拿不到 token，只记次数」——pipeline 补上回传之后，
+                * 那句话会一直绿着继续骗人，而且没有任何断言会红（同「界面版本号」那条教训）。
+                * 现在判据来自 `summary.ingest`：还剩几条没量的，就说剩几条。
+                */}
               <div data-testid="usage-token-note" className="mt-3 text-sm leading-5 text-muted">
-                tokens 含输入、缓存读与输出；入库打标由后台程序调用，拿不到 token 数，只记次数（显示为「—」）。
+                tokens 含输入、缓存读与输出；入库打标的「次数」是这个月真正调用模型的<b>篇数</b>，不是入库的轮数。
+                {data.ingest.unmetered > 0 && (
+                  <span data-testid="usage-unmetered-note" className="mt-1 block">
+                    其中 {fmt(data.ingest.unmetered)} 次是旧版本记下的，只有次数没有 token（旧版处理程序不回传用量），这部分的花费没有计入。
+                  </span>
+                )}
               </div>
             </div>
 
@@ -318,11 +329,23 @@ export default function UsagePage({ onBack }: { onBack: () => void }) {
                   重复内容命中缓存后按折扣价计费（折扣按模型不同），所以 tokens 多不等于花费高。
                 </span>
                 单价按实际线路取——同一个模型走不同线路可能差好几倍。
-                {/* 这条得写明白：拿不到 token 就没法计价，这笔钱确实不在上面那个数里面。
-                    实测过一天：入库打标那条线的花费能盖过对话，只看上面的数会严重低估 */}
+                {/**
+                  * 覆盖范围也按数据说话（R8）。
+                  * 入库打标那条线的花费实测能盖过对话（对过一天：¥1.13 对 ¥0.0146），
+                  * 所以「含不含它」必须写在明面上，但**不能写死**：pipeline 回传落地后
+                  * 它就已经计入了，还挂着"没有计入"就是新的谎话。
+                  */}
                 <span data-testid="usage-scope-note" className="mt-1 block">
-                  上面的花费<b>只含对话与做文档</b>；入库打标拿不到 token，没有计入——
-                  批量入库当月，实际账单会明显高于这里的估算。
+                  {data.ingest.unmetered > 0 ? (
+                    <>
+                      上面的花费<b>不含那 {fmt(data.ingest.unmetered)} 次旧版入库打标</b>
+                      （只有次数、没有 token）——这部分发生的月份，实际账单会高于这里的估算。
+                    </>
+                  ) : (
+                    <>
+                      上面的花费<b>已包含入库打标</b>（对话、做文档、入库打标三条线都在里面）。
+                    </>
+                  )}
                 </span>
                 <span data-testid="usage-offpeak-note" className="mt-1 block">
                   DeepSeek 官方存在分时计价（同一模型不同时段单价实测差一倍），这里按固定单价估，两个方向都会有偏差。

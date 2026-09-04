@@ -1,6 +1,6 @@
 # SamePage 补课方案 v2（PLAN-v2）
 
-> 2026-09-02 ｜ 状态：**已批准。批 0 + 批 1 已执行（2026-09-02，见 HANDOFF §0-新d）；批 2 + 批 3 已执行（2026-09-03/04，见 HANDOFF §0-新g），随 0.1.3 发；批 4 起待做**
+> 2026-09-02 ｜ 状态：**已批准。批 0 + 批 1 已执行（2026-09-02，见 HANDOFF §0-新d）；批 2 + 批 3 已执行（2026-09-03/04，见 HANDOFF §0-新g），随 0.1.3 发；批 5 的 R8 + S2「账本修复」已执行（2026-09-04，见 HANDOFF §0-新h，未发版）；批 4 与批 5 剩余项（R9 / F11 / R16）待做**
 > 输入：`PRODUCT-AUDIT.md`（阶段一）→ v1；`REFERENCE-codex.md` / `REFERENCE-products.md` / `DESIGN-scale.md`（阶段二）→ 反向修订 → v2。
 > 排序原则（任务书原话）：架构债里「挡团队版/模板系统路的」最先；功能卷按价值高 × 成本小；UI 卷刻度表第一批（地基），其余在模板系统形态定型后。
 > 档位记法：**A** = 成本小/中 × 感知或演进价值高（先做）；**B** = 成本中 × 价值中，或成本大 × 价值高（排期做）；**C** = 价值低或团队版才有意义（挂账）。
@@ -181,16 +181,22 @@
 - 走查影响：全部 142 张基线重拍；新增 spacing 白名单断言。
 - 排在批 3 之后的原因：批 3 会新增控件，先做地基再加控件会返工两次。
 
-### 批 5 · 可测性与账本（3 天，跨 pkb-pipeline）
+### 批 5 · 可测性与账本（3 天，跨 pkb-pipeline）　—— **R8 已完成 2026-09-04**（见 HANDOFF §0-新h，未发版）
 
 | 项 | 做法 |
 |---|---|
-| R8 | `03_tag_llm` 累加 usage 并 `emit({stage:'tag_llm', status:'ok', usage})`；`cli.py _tag()` 返回聚合；orchestrator 落账；用量页去掉「未计入」脚注；三方对账一次 |
+| R8 ✅ | `03_tag_llm` 累加 usage 并打一行 `{stage:'tag_llm', status:'usage', usage, calls, model}`；orchestrator 单独接走 → `usage/ingest.ts` 落账；用量页脚注改按 `summary.ingest.unmetered` 说话；三方对账一次（实花 ¥0.23）。**与原计划两处不同**：① 用独立的 `status:'usage'` 行而不是挂在 `tag_llm` ok 事件上——挂上去的话撞熔断线/抛异常那两条路径的花费会丢，而且会出现"阶段事件"与"账本"两份真相；② `cli.py` 侧不再返回聚合（返回值会被 `run_stage` 并进 ok 事件 = 同一笔记两遍），只补了分流轻管线 `route_*` 的主题打标用量——那笔以前完全没人记 |
+| S2 ✅ | 用量记录加 `attribution{template,taskId,vault,stage}`（模板系统落地前 `template` 恒 null）；对账脚本加「按归因」表 |
 | R9 | `agent/result.ts` 抽 `judgeResult(result, expectedModel)` → `{kind:'ok'|'error', degraded, models, billable}`；`smoke:steps` 同款喂 fixture |
 | F11 | orchestrator 记每文件失败计数（`.failed/attempts.json`），≥3 次移入 `.failed/` 并写原因 |
 | R16 | search-worker `error` 重建；vault watcher `error` + root `unlinkDir` → Condition `vault-lost` 顶条「知识库目录不可访问」 |
 
 验收：R8 真跑一轮打标对账 ≈ ¥1；其余零花费。走查影响：2 张截图（vault-lost 条、失败件移入）。
+
+**R8/S2 收尾（2026-09-04）**：新增 `smoke:usage`（L1，40+ 条零花费，含"应用侧 vs 对账脚本"跨实现比对）、
+`smoke:pipeline` 第 7 节（本机 http 桩验冻结产物真回传）、`e2e/usage-reconcile.mjs`（真实入库三方对账）。
+走查用量页断言从「打标不该有 token」翻转成「打标的 token 必须进账 + 缓存拆分不许算胀」。
+**R9 / F11 / R16 未做**，仍挂在本批。
 
 ### 批 6 · 团队版前置三件套（大单，各自立项；顺序固定）
 

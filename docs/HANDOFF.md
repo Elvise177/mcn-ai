@@ -6,6 +6,87 @@
 
 ---
 
+## 0-新h. PLAN-v2 批 5「账本修复」（2026-09-04 执行，**未发版，随下一版出**）
+
+> 方案 `docs/PLAN-v2.md` 批 5 的 **R8 + S2 + 对账**三项（跨 pkb-pipeline）。
+> 同批表里的 R9 / F11 / R16 本单不做，仍挂在批 5 名下。
+
+### 起因：bug#8「入库打标的花费完全不入账」
+
+`UsageRecord` 对 pipeline 打标那条链只记 `{"usage":null,"calls":1}`，一个 token 都不记。
+拿 DeepSeek 官方账单比对当天：**98.7% 的打标花费在用量页上看不见**（≈¥1.13 对 ¥0.0146）。
+补它必须两侧一起改——pipeline 回传 token，主进程落账。
+
+### 做了什么
+
+| 项 | 落点 | 一句话 |
+|---|---|---|
+| R8 pipeline 侧 | `pkb-pipeline/usage_acc.py`（新）· `03_tag_llm.py` · `cli.py` | 打标逐次累加 usage，收尾打一行 `{"stage":"tag_llm","status":"usage",...}`；分流轻管线的主题打标（`route_*`）**同样进账**——那笔以前完全没人记 |
+| R8 主进程侧 | `inbox/orchestrator.ts` · `usage/ingest.ts`（新） | `status:'usage'` 行单独接走（不进 stages），尾段交给纯函数 `buildIngestUsageRecords` 落账 |
+| 归一化 | `usage/index.ts` 的 `tokensOf` | 认 OpenAI 兼容口径：缓存命中**含在 prompt_tokens 里**，要挪出来而不是加上去 |
+| S2 归因 | `UsageAttribution` | `template / taskId / vault / stage` 四个字段，对话与打标两条链都填；`template` 在模板系统落地前恒 null |
+| 用量页 | `UsagePage.tsx` | 两条脚注改成**按数据说话**：`summary.ingest.unmetered` 为 0 就说「已包含入库打标」，不为 0 就说清还剩几条没量 |
+| 对账脚本 | `scripts/usage-report.mjs` | 同步归一化口径；新增「按归因」表与 `--json`（给断言做逐项比对） |
+| 零花费断言 | `smoke:usage`（新，40+ 条）· `smoke:pipeline` 第 7 节 | 见下 |
+
+**三条分支必须分清**（`usage/ingest.ts` 的全部意义）：pipeline 报了用量就完全按它记，
+**报了 `calls: 0` 就一条都不记**（凭空记一笔没花的钱比不记更坏）；一条都没报（老冻结产物）
+才退回「只记次数」的旧行为——删掉这条兜底的话，还没升级的客户会从"记了次数"变成"完全不记"，是倒退。
+
+### 真跑一轮对出来的两件事
+
+**① 真回包里同一个数报了两遍，害得计价低估 10%。** DeepSeek 的 usage 同时给
+`prompt_cache_hit_tokens: 17920` 与 `prompt_tokens_details.cached_tokens: 17920`。
+我原来对这几个别名**求和**，35840 > prompt 26274，被钳位钳成"整段 prompt 都是缓存"→
+纯输入记 0、缓存读记 26274。**总量守恒，所以页面上的 tokens 完全正常**，错的只是拆分——
+而缓存读按 1/30 计价，这一轮花费低估约 10%（¥0.107 对 ¥0.119）。
+改成**别名之间取最大值**。合成桩数据永远发现不了它（自己编的桩只会带一个别名），
+所以那份真回包已经原样钉进 `smoke:usage` 当固定素材。
+
+**② 只对总量的断言拦不住这类错。** 第一版对账脚本只比 token 合计，上面那条错误照样绿。
+现在多比一层拆分（纯输入 / 缓存读 / 输出），期望值从 pipeline 自己的
+`.checkpoint.jsonl` 独立推算，不问应用要。
+
+### 顺手逮到的三个既有缺陷（都不在单子上）
+
+1. **`smoke:pipeline` 第 5 节有一条断言从写下来那天起就没跑过。**
+   `/error|unrecognized/i.test(...)` 紧跟在上一行 `… ? ok(…) : fail(…)` 后面，
+   而这个文件不写分号 → ASI 不断句，那个 `/` 被当成**除号**，整段被并进上一行三元表达式的
+   `:` 分支，判据为真时**根本不求值**：不报错、不打勾、也不打叉（加一行 log 断开它立刻炸出
+   `ReferenceError: error is not defined`）。它守的正是 R4「stderr 尾部进任务 error」那条链的素材。
+   同类：以 `/` `(` `[` `+` `-` 开头的续行，在不写分号的文件里都会被上一行吞掉。已扫过
+   `scripts/` 与 `e2e/` 全部 .mjs，只此一处。
+2. **投 `.md`/`.txt` 时原件被判成「暂不支持 .md 格式」扔进 `.failed/`——可笔记明明已经入库了。**
+   `cli.py` 的 `SUPPORTED = set(m02.CONVERTERS.keys())` 少了直拷的 `.md`/`.txt`（R7 漏的一处）。
+3. **同一批 `.md`/`.txt` 的 LLM 打标会被整批跳过。** `_tag()` 按 mtime 差集选本批，
+   而直拷保留原 mtime → batch 为空 → 只剩规则打标，**界面上这一轮还是绿的**。
+   pkb-pipeline `2c72ba0` 在分流线上修过同一个根因，业务线没跟着改。
+
+第 1 条本单已修（改动就在这个文件里）；第 2、3 条已单独立项，不在这一批里顺手改。
+
+### 验收
+
+- `npm run verify` **15/15 全绿**（新增 `smoke:usage` 进 L1）
+- `smoke:usage` 40+ 条零花费断言：两家相反的缓存口径、`buildIngestUsageRecords` 三条分支、
+  打标线路计价，以及**跨实现对账**——同一份桩数据同时喂应用侧与 `usage-report.mjs`
+  逐项比对（脚本里那份归一化是手抄镜像，`pricing.usd` 判据那次就是这么长歪的）。
+  故意把脚本改坏验过一次：4 条立刻红
+- `smoke:pipeline` 第 7 节：本机 http 桩当 LLM 端点，**零花费验冻结产物真的打出了 usage 行**——
+  `usage_acc` 是新模块，而 `03_tag_llm` 靠 SourceFileLoader 加载，它进没进 PYZ 只有打包形态才验得出
+- **真实入库对账 `e2e/usage-reconcile.mjs`**：9 篇样本，`.checkpoint.jsonl` ↔ 账本 jsonl ↔
+  用量页/对账脚本三处逐字段一致（26,274 prompt / 26,193 completion / 25,344 缓存命中，9 次调用，¥0.1205）
+- **实花 ¥0.23**（两轮：¥0.107 修拆分前 + ¥0.121 修完复跑），原报 ≈¥1，**低于预算**
+
+### 挂账
+
+| 挂的什么 | 现状 |
+|---|---|
+| **DeepSeek 官方后台那一方没对** | 我登不了后台。脚本第 7 节已把模型 / 时间窗 / token 三项打出来，请对着当天账单核一次量级 |
+| 批 5 的 R9 / F11 / R16 | 本单只做账本三项，那三项仍在批 5 名下未动 |
+| `e2e/fresh-install.mjs` 的建库步骤停在老写法 | 只点 `wizard-create` 不点模板卡（0.2.0 之后建库是两步），跑起来会卡在"投递箱未就绪"。L4 平时不跑，没人踩到 |
+
+---
+
 ## 0-新g. PLAN-v2 批 2 + 批 3（2026-09-03/04 执行，**0.1.3 已发版并上传更新源**）
 
 ### 0.1.3 发版记录（2026-09-04）
@@ -804,15 +885,21 @@ Electron App（macOS arm64，v0.1.0）
    **与 A-3（`08_table_to_cards` 达人卡进链）关联：A-3 立项时一并评估敏感笔记的关联怎么补**，
    不要各修各的（`docs/PLAN-fix-batch.md` §5f-1）
 
-8. **【账本缺口 · 入库打标的花费完全不入账（P1，2026-08-18 三方对账查出，未修）】**：
+8. ~~**【账本缺口 · 入库打标的花费完全不入账（P1，2026-08-18 三方对账查出）】**~~
+   ✅ **2026-09-04 已修（PLAN-v2 批 5 R8，见 §0-新h，未发版）**。原文保留作案卷：
+
    `UsageRecord` 对 pipeline 打标那条链只记 `{"usage":null,"calls":1}`——**一个 token 都不记**。
    拿 DeepSeek 官方账单比对当天：v4-flash 账单上有 278,629 纯 input / 232,064 缓存读 / 157,914 输出，
    账本里只有 4,302 / 0 / 1,467，**98.7% 的打标花费在用量页上看不见**（当天 ≈ ¥1.13 对 ¥0.0146）。
    flash 正是打标用的模型，所以这笔账归属很明确。
-   - **本批只做了「说实话」**：用量页金额下加了「上面的花费只含对话与做文档；入库打标拿不到 token，没有计入」
-   - **要补上得两侧一起改**：Python pipeline 回传 token 用量 → 主进程落账。列为下一批 P1
-   - 关联：这也是为什么这轮**逐笔正向对账做不到**——账单按天聚合，当天同一把 key 上还混着
+   - **2026-08-18 那批只做了「说实话」**：用量页金额下加了「上面的花费只含对话与做文档；入库打标拿不到 token，没有计入」
+   - **要补上得两侧一起改**：Python pipeline 回传 token 用量 → 主进程落账。→ 批 5 做掉了：
+     `03_tag_llm` / `cli.py` 打 `status:'usage'` 行 → `usage/ingest.ts` 落账；
+     那句脚注也从写死改成按 `summary.ingest.unmetered` 说话（写死的话，补上之后它会继续骗人）
+   - 关联：这也是为什么 2026-08 那轮**逐笔正向对账做不到**——账单按天聚合，当天同一把 key 上还混着
      44 条没有 `route` 字段的老记录（第 2 批加 `route` 之前跑的）。详见 `docs/QA-REPORT-qa.md` §9
+   - **老记录仍然是缺的**：补的是从这一版起的新记录。历史那部分永远补不回来，用量页会把
+     "本月还有几条只有次数没有 token" 明说出来
 
 9. **【已知误差 · 计价（2026-08-18，本批不修）】**：
    - **混用模型按 `resolved_model` 一口价**：一次会话里 flash 子调用被按 pro 计价，实测 **+0.77%**
@@ -1325,6 +1412,8 @@ desktop/
 │   │   ├ ai/          tiers.ts(档位→线路映射/老用户迁移) health.ts(线路探测,5min缓存)
 │   │   │              provider.ts(历史配置读口 + agentEnv)
 │   │   ├ usage/       index.ts：jsonl 落盘 + 汇总（tokensOf 归一化只在这一侧）
+│   │   │              ingest.ts：pipeline 打标用量 → 账本记录的纯函数（R8 三条分支）
+│   │   │              pricing.ts：线路 × 模型单价（B-2）
 │   │   ├ agent/       Agent SDK 会话管理、流式转发
 │   │   ├ vault/       index.ts(索引) reader.ts(扫描/解析) watcher graph
 │   │   ├ inbox/       orchestrator（队列/进度/落位/分区投递/取消：detached 进程组 + kill）
@@ -1346,6 +1435,7 @@ desktop/
 │   ├ walkthrough.mjs    E2E 走查脚本（改 GUI 必跑）
 │   ├ login-provision.mjs「登录即用」端到端（产出 00b/11/12）
 │   ├ external-edit.mjs  模拟「别的程序改了这个文件」（M-27 冲突检测用，必须是外部进程写盘）
+│   ├ usage-reconcile.mjs 账本三方对账（真实小样本入库 ≈¥0.12，R8 收尾验收）
 │   └ shots/             截图基线（中文命名，按流程编号）
 ├ release/             构建产物（dmg/zip；「已重签」dmg 是 ad-hoc 重签版）
 ├ scripts/             构建辅助 + usage-report.mjs（开发者用量/成本汇总，不进 UI）

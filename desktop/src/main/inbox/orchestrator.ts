@@ -15,6 +15,7 @@ import { notifyDingtalk } from '../lib/dingtalk'
 import { notify } from '../lib/notify'
 import { tasks } from '../tasks/registry'
 import { appendUsage } from '../usage'
+import { buildIngestUsageRecords, type PipelineUsageEvent } from '../usage/ingest'
 import {
   INBOX_FLOW,
   computeInboxProgress,
@@ -86,6 +87,12 @@ export class InboxOrchestrator {
   private debounce: ReturnType<typeof setTimeout> | null = null
   /** 最近一次运行的阶段记录，任务对象的 stages 从这里来 */
   private stages: InboxEvent[] = []
+  /**
+   * 本轮 pipeline 报上来的 token 用量（R8）。**不进 stages**——它不是阶段迁移，
+   * 混进去会在阶段日志上多画一行、并把 8 个阶段的进度算歪（同 `tagProgress` 的处境）。
+   * run-start 时清空，尾段落账时读一次快照。
+   */
+  private runUsage: PipelineUsageEvent[] = []
   /** 本轮收到的文件名（钉钉通知用），run-end 后清空 */
   private runFiles: string[] = []
   /**
@@ -116,7 +123,10 @@ export class InboxOrchestrator {
    * 旧轮次的尾段事件（run-end）不传快照就会 patch 到新库的任务上。不传 = 当前库（watcher 事件用）。
    */
   private send(ev: InboxEvent, id?: string): void {
-    if (ev.type === 'run-start') this.stages = []
+    if (ev.type === 'run-start') {
+      this.stages = []
+      this.runUsage = []
+    }
     if (ev.type === 'stage') {
       this.stages.push(ev)
       if (ev.status === 'error') log('error', 'inbox', `${ev.stage}: ${ev.message}`)
@@ -1015,6 +1025,22 @@ export class InboxOrchestrator {
               tasks.patch(taskId, { progress: this.computeProgress() } as Partial<InboxTask>)
               continue
             }
+            /**
+             * **这一轮真花了多少 token**（R8）。pipeline 在打标结束时（含撞熔断线、
+             * 抛异常的路径）打一行 `{stage, status:'usage', usage, calls, model}`。
+             * 同 progress 行：它不是阶段迁移，**不进 stages**，只攒着，尾段一起落账。
+             * 在此之前这条链只记 `{"usage":null,"calls":1}`——拿官方账单比对过，
+             * 98.7% 的打标花费在用量页上看不见（bug#8）。
+             */
+            if (ev.status === 'usage') {
+              this.runUsage.push({
+                stage: String(ev.stage ?? ''),
+                usage: ev.usage,
+                calls: Number(ev.calls) || 0,
+                model: typeof ev.model === 'string' ? ev.model : null,
+              })
+              continue
+            }
             if (ev.stage === 'done') lastStatus = ev.status
             this.send(
               {
@@ -1025,8 +1051,6 @@ export class InboxOrchestrator {
                 pending: ev.pending,
                 failed: ev.failed,
                 unsupported: ev.unsupported,
-                // 打标阶段若报了 token 用量就带上；pipeline 目前不报，那就只记次数（见下方 appendUsage）
-                usage: ev.usage,
               },
               taskId
             )
@@ -1071,6 +1095,13 @@ export class InboxOrchestrator {
       })
     })
 
+    /**
+     * 用量事件在这里就快照下来（R2 的同一条规矩）：下面 buildCards / cloudSync 各有若干
+     * `await`，中途用户换库的话 `this.runUsage` 已经被下一轮的 run-start 清空了，
+     * 落账时读到的会是空数组——这一轮的钱当场蒸发，而且界面上完全看不出来。
+     */
+    const usageEvents = [...this.runUsage]
+
     // 建卡 → 上云。顺序不能反：新卡也要上云，而敏感继承卡必须在上云前就被识别出来。
     // **只对快照的 root 做**：换库后 this.vaultRoot 已是新库，对新库跑建卡/上云就是 bug#10 的另一半
     const sensitiveCards = ok && !this.canceledBy ? await this.buildCards(root, taskId) : []
@@ -1079,23 +1110,24 @@ export class InboxOrchestrator {
 
     const canceled = !!this.canceledBy
 
-    // 用量记账：智能打标是 pipeline 子进程里的 LLM 调用，绝大多数情况拿不到 token 数
-    // ——那就**只记次数**（一轮一条），比"因为没有 usage 就不记"诚实得多
+    /**
+     * 用量记账（R8）。判据与记录形状全在 `usage/ingest.ts` 的纯函数里——
+     * 这段只有真跑一轮打标才走到，留在这儿就等于没人测（铁律：花钱才触发的逻辑必须抽出去）。
+     * 这里只负责把"这一轮的事实"凑齐递进去。
+     */
     if (llmKey && !canceled) {
-      const tag = this.stages.find((s) => s.stage === 'tag_llm' && s.status !== 'skipped')
-      if (tag) {
-        appendUsage({
-          ts: Date.now(),
-          sessionId: taskId,
-          taskType: 'ingest-tag',
-          tier: null, // 入库打标不经档位层，走的是 llmBaseUrl/llmModel 那条独立线路
-          expected_model: store.get('llmModel'),
-          resolved_model: null,
-          durationMs: Date.now() - runStart,
-          usage: tag.usage ?? null,
-          calls: 1,
-        })
-      }
+      const records = buildIngestUsageRecords({
+        ts: Date.now(),
+        taskId,
+        vault: root,
+        startedAt: runStart,
+        endedAt: Date.now(),
+        baseUrl: store.get('llmBaseUrl'),
+        expectedModel: store.get('llmModel'),
+        events: usageEvents,
+        tagRan: this.stages.some((s) => s.stage === 'tag_llm' && s.status !== 'skipped'),
+      })
+      for (const r of records) appendUsage(r)
     }
 
     this.send({ type: 'run-end', ok }, taskId)
