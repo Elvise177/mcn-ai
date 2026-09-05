@@ -23,3 +23,6 @@ e2e/*.zip
 
 # icns 的中间产物：可由 scripts/gen-icon.mjs 一键重出，真正进构建的是 build/icon.icns
 build/icon.iconset/
+
+# 检索基准的运行产物（每次一目录，含回答全文）
+e2e/retrieval-bench/runs/

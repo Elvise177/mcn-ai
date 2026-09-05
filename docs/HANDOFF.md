@@ -1,8 +1,37 @@
 # mcn-ai 产品交接文档（HANDOFF）
 
-> 更新：2026-08-20（**0.1.1 已签名公证，待上传更新源**）｜ 范围：mcn-ai 产品线（桌面版 + 云端），不含 OMG 钉钉自动化定制项目（那是独立仓库 `~/Documents/AI/omg-dingtalk-automation`，有自己的 README 和交付文档）
+> 更新：2026-09-05（**检索基准与 0.1.3 基线已建，见 §0-新i**）｜ 范围：mcn-ai 产品线（桌面版 + 云端），不含 OMG 钉钉自动化定制项目（那是独立仓库 `~/Documents/AI/omg-dingtalk-automation`，有自己的 README 和交付文档）
 > 当前阶段：MVP（M0–M4）+ QA 修复大单四批完成 + A-3 实体层收官 +
 > **首个正式签名版 0.1.0 已交付客户，0.1.1 修复版已出包**（见下方 §0-新）
+
+---
+
+## 0-新i. 检索准确率基准与 0.1.3 基线（2026-09-05，不改产品代码）
+
+> 后续所有检索优化的尺子。数字与结论在 **`docs/RETRIEVAL-BENCH.md`**，口径在 `desktop/e2e/retrieval-bench/README.md`。
+
+| 入口 | 位置 |
+|---|---|
+| 测试集 | `desktop/e2e/retrieval-bench/bench.jsonl`：45 题 = 关键词 / 语义 / 跨文档 / 敏感区各 10 + 陷阱 5；Maggie 库 19、Jerry 库 21；标准答案由人读原文写 |
+| 评分脚本 | `desktop/scripts/retrieval-bench.mjs`（`npm run bench:retrieval`，支持 `--dry-run / --only / --type / --from / --rejudge [--rejudge-failed] / --json`） |
+| 无头执行端 | `desktop/src/main/retrieval-bench.ts` → `out/main/retrieval-bench.js`（**构建入口表加了一项**，与 smoke-* 同类，应用不引用它）。用 `agentManager.send` 走产品自己的对话链路，检索词重放 `vaultManager.search` 拿"摆到模型面前的文件"，账本增量 + `costCny` 计价 |
+| 库 | Maggie 复刻库与 Jerry 预检库都已清：用 `~/Documents/AI/maggie-vault` 与 `~/Downloads/我的知识库`，rsync 到 `/tmp/mcnai-bench-*`（排除 .git/_assets），原库零写入；userData `/tmp/mcnai-bench-userdata`，测试账号登录拿标准档 |
+
+**0.1.3 基线（本地检索口径，deepseek-v4-pro）**：
+
+| 题型 | 召回命中率 | 全命中率 | 要点覆盖率 | 核心要点覆盖率 | 引用正确率 | 中位耗时 |
+|---|---|---|---|---|---|---|
+| 关键词 | 95% | 90% | 68% | 88% | 100% | 17.9s |
+| 语义 | 70% | 70% | 61% | 73% | 41% | 41.7s |
+| 跨文档 | 68% | 40% | 55% | 57% | 69% | 46.4s |
+| 敏感区 | 100% | 100% | 68% | 80% | 91% | 24.3s |
+| 陷阱 | 拒答 5/5 | — | — | — | — | 74.4s |
+| 合计 45 题 | 83% | 75% | 63% | 74% | 70% | 34.0s |
+
+结论一句话：**敏感区本地路径没有短板，关键词题检索基本不丢；最差的是跨文档（只检索一次、读前 1-3 篇就作答，第 3-4 份被前 6 条排名挤掉）和语义题（词不重合整篇落空，转而拿相近文档硬答，引用正确率 41%）。丢分两层各占一半：J-S2 / J-X5 是检索层（文件没到面前），M-P5 / M-K3 是生成层（读到了却挑错口径或答半截）。**
+一轮实花 ¥10.11 对话 + ¥2.08 判分（预估 ¥9 + ¥0.9，对话超 12%），墙钟 63 分钟。
+踩到两个坑都已修：判分 `max_tokens` 1800 被推理块耗光（首轮 32/45 判分为空，改 8000 后 `--rejudge-failed` 补判）；执行端一开始在 store 初始化前取 userData，账本读到了真实目录（改成显式 `app.setPath` + 动态 import 之后再取）。
+挂账：产品 B-6 引用校验不认 Grep 命中（T-2 引用了 Grep 看到但没 Read 的文件被标存疑，引用其实是对的），先记不改。
 
 ---
 
@@ -1488,6 +1517,7 @@ mcn-ai/
 | `DESIGN-scale.md` | 设计刻度表（间距 8 点栅格 7 档 / 行高 / 阴影 / 字重）；token 已定义，存量替换在批 4 | 草案→token 已落 |
 | `PLAN-v2.md` | 补课方案 v2，批 0–7；**已批准，批 0+1 于 2026-09-02 执行** | 现行 |
 | `architecture.md` | webpage 侧早期架构 | 早期 |
+| `RETRIEVAL-BENCH.md` | 检索准确率基线（0.1.3，45 题），题型短板与失败层归因；尺子在 `desktop/e2e/retrieval-bench/` | 现行 |
 
 ### desktop/ 内部
 

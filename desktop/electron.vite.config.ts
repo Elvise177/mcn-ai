@@ -21,6 +21,8 @@ export default defineConfig({
           'smoke-taxonomy': resolve(__dirname, 'src/main/smoke-taxonomy.ts'),
           'smoke-guards': resolve(__dirname, 'src/main/smoke-guards.ts'),
           'smoke-usage': resolve(__dirname, 'src/main/smoke-usage.ts'),
+          // 检索准确率基准的无头驱动（scripts/retrieval-bench.mjs 调），与 smoke-* 同一类：不被应用引用
+          'retrieval-bench': resolve(__dirname, 'src/main/retrieval-bench.ts'),
         },
       },
     },
