@@ -90,9 +90,24 @@ interface JudgePoint {
   reason: string
   evidence: string
 }
+/** 预期集合之外的引用：判分要说它跟问题相关不相关，以及**依据什么**（文件摘要/正文里的哪句话） */
+interface JudgeCitation {
+  name: string
+  relevant: boolean
+  basis: string
+}
+/** 交给判分的引用上下文：文件标题、frontmatter 摘要、正文开头，以及回答里引用它的那句话 */
+interface CitationContext {
+  name: string
+  path: string
+  summary: string
+  excerpt: string
+  citedIn: string
+}
 interface JudgeResult {
   points: JudgePoint[]
   refusal: { says_not_found: boolean; fabricated: boolean; reason: string }
+  citations?: JudgeCitation[]
   raw?: string
   error?: string
   model?: string
@@ -120,13 +135,58 @@ function extractJson(text: string): unknown {
   return JSON.parse(text.slice(s, e + 1))
 }
 
+/**
+ * 「引用错位率」的素材（尺子第二版，2026-09-05 用户拍板）：预期集合**之外**的引用不再一律算错，
+ * 由判分看它跟问题相关不相关。判分看不到库，所以把文件的 frontmatter 摘要 + 正文开头
+ * + 回答里引用它的那句话一起递过去，并要求判分把「相关性依据」写出来。
+ * 预期集合之内的引用天然相关，不送判。
+ */
+function buildCitationContext(
+  root: string,
+  expectedFiles: string[],
+  citations: Array<{ name: string; resolved: string | null }>,
+  answer: string
+): CitationContext[] {
+  const expected = new Set(expectedFiles.map(noteKey))
+  const out: CitationContext[] = []
+  for (const c of citations) {
+    if (!c.resolved || expected.has(noteKey(c.resolved))) continue
+    let summary = ''
+    let excerpt = ''
+    try {
+      const raw = readFileSync(join(root, c.resolved), 'utf-8')
+      const fm = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)
+      const body = fm ? raw.slice(fm[0].length) : raw
+      summary = fm?.[1].match(/^summary:\s*(.+)$/m)?.[1]?.replace(/^["']|["']$/g, '') ?? ''
+      excerpt = body.replace(/\s+/g, ' ').trim().slice(0, 400)
+    } catch {
+      excerpt = '（文件读不到）'
+    }
+    const esc = c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const m = answer.match(new RegExp(`[^。\\n]{0,160}\\[\\[${esc}(?:[|#][^\\]]*)?\\]\\][^。\\n]{0,40}`))
+    out.push({ name: c.name, path: c.resolved, summary, excerpt, citedIn: m ? m[0].trim() : '（未定位到引用句）' })
+  }
+  return out
+}
+
 const JUDGE_SYSTEM =
   '你是检索问答系统的评分员。只依据给你的「标准答案要点」与「系统回答」做判断，' +
   '不用自己的知识补充或推断事实。判分要保守：要点里的具体数字、名称、结论在回答里没有明确出现，就不算 covered。' +
   '输出严格 JSON，不要任何多余文字。'
 
-function judgePrompt(q: BenchQuestion, answer: string): string {
+function judgePrompt(q: BenchQuestion, answer: string, cites: CitationContext[] = []): string {
   const pts = q.gold_points.map((p, i) => `${i + 1}. ${p}`).join('\n')
+  const citeBlock = cites.length
+    ? '\n\n【引用相关性判定】下面这些是回答里引用了、但不在标准答案文件集合里的库内文件。请逐个判断它**与这个问题是否相关**' +
+      '（相关 = 文件内容确实是这个问题的一部分答案或直接背景；不相关 = 只是词面沾边、或与问题无关）。' +
+      'basis 必须写明依据：引用文件摘要/正文里的哪句话、以及回答里用它支撑了什么。\n' +
+      cites
+        .map(
+          (c, i) =>
+            `${i + 1}. [[${c.name}]]（${c.path}）\n   文件摘要：${c.summary || '（无）'}\n   正文开头：${c.excerpt}\n   回答里引用它的句子：${c.citedIn}`
+        )
+        .join('\n')
+    : ''
   const trapNote =
     q.type === 'trap'
       ? '\n【说明】这是一道陷阱题：知识库里**没有**能回答这个问题的资料。正确行为是明确告诉用户没有找到/库里没有相关记录，不编造。' +
@@ -135,7 +195,7 @@ function judgePrompt(q: BenchQuestion, answer: string): string {
       : ''
   return (
     `【问题】${q.question}\n【题型】${q.type}${trapNote}\n\n【标准答案要点】\n${pts || '（无）'}\n\n` +
-    `【系统回答】\n<<<\n${answer || '（空回答）'}\n>>>\n\n` +
+    `【系统回答】\n<<<\n${answer || '（空回答）'}\n>>>${citeBlock}\n\n` +
     '请逐条判断标准要点是否被回答覆盖：\n' +
     '- covered：要点的核心事实（数字 / 名称 / 结论）在回答中明确出现且不矛盾；要点含多个数字时全部对上才算\n' +
     '- partial：只答到一部分，或数字 / 名称有出入但方向一致\n' +
@@ -147,14 +207,17 @@ function judgePrompt(q: BenchQuestion, answer: string): string {
     '回答里多提到一些相关但不属于标准要点、且标注了来源的事实，不算编造\n' +
     '- reason：一句话\n\n' +
     '只输出一个 JSON 对象：{"points":[{"idx":1,"verdict":"covered|partial|missing","reason":"...","evidence":"..."}],' +
-    '"refusal":{"says_not_found":false,"fabricated":false,"reason":"..."}}'
+    '"refusal":{"says_not_found":false,"fabricated":false,"reason":"..."}' +
+    (cites.length ? ',"citations":[{"name":"文件名","relevant":true,"basis":"..."}]' : '') +
+    '}'
   )
 }
 
 async function callJudge(
   provider: { baseUrl: string; model: string; apiKey: string },
   q: BenchQuestion,
-  answer: string
+  answer: string,
+  cites: CitationContext[] = []
 ): Promise<JudgeResult> {
   const { tokensOf } = await import('./usage')
   const { costCny, routeOf } = await import('./usage/pricing')
@@ -165,7 +228,7 @@ async function callJudge(
     max_tokens: 8000,
     temperature: 0,
     system: JUDGE_SYSTEM,
-    messages: [{ role: 'user', content: judgePrompt(q, answer) }],
+    messages: [{ role: 'user', content: judgePrompt(q, answer, cites) }],
   }
   let lastErr = ''
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -202,6 +265,7 @@ async function callJudge(
       return {
         points: Array.isArray(parsed.points) ? parsed.points : [],
         refusal: parsed.refusal ?? { says_not_found: false, fabricated: false, reason: '（判分未给出）' },
+        citations: cites.length ? (Array.isArray(parsed.citations) ? parsed.citations : []) : undefined,
         raw: reply,
         model: data.model ?? provider.model,
         tokens,
@@ -262,12 +326,15 @@ async function main(): Promise<void> {
     writeFileSync(job.out, '')
     for (const row of rows) {
       const q = job.questions.find((x) => x.id === row.id)
-      if (!q) continue
-      if (job.rejudgeFailedOnly && row.judge && !row.judge.error) {
+      // 不在本次筛选范围（--type / --only）的题原样保留：重判语义题不能把别的题弄丢
+      if (!q || (job.rejudgeFailedOnly && row.judge && !row.judge.error)) {
         appendFileSync(job.out, JSON.stringify(row) + '\n')
         continue
       }
-      row.judge = await callJudge(provider, q, row.answer ?? '')
+      const root = job.vaults[row.vault as string] ?? ''
+      const ctx = buildCitationContext(root, q.expected_files, (row.citations as CitationContext[] & Array<{ name: string; resolved: string | null }>) ?? [], row.answer ?? '')
+      row.citationContext = ctx
+      row.judge = await callJudge(provider, q, row.answer ?? '', ctx)
       appendFileSync(job.out, JSON.stringify(row) + '\n')
       progress(`重判 ${row.id} ${row.judge.error ? '❌ ' + row.judge.error.slice(0, 120) : '✓'}`)
     }
@@ -416,7 +483,9 @@ async function main(): Promise<void> {
       usage: { tokens, costCny: cny, ledgerRecords: newLines.length },
     }
     if (job.judge) {
-      row.judge = await callJudge(provider, q, answer)
+      const ctx = buildCitationContext(root, q.expected_files, citations, answer)
+      row.citationContext = ctx
+      row.judge = await callJudge(provider, q, answer, ctx)
     }
     appendFileSync(job.out, JSON.stringify(row) + '\n')
     const hitExpected = q.expected_files.filter((f) => surfacedShown.some((s) => noteKey(s) === noteKey(f))).length

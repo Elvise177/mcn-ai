@@ -171,6 +171,20 @@ function scoreRow(r) {
   const resolved = (r.citations ?? []).filter((c) => c.resolved)
   const correctCites = resolved.filter((c) => exp.has(noteKey(c.resolved))).length
   const unresolved = (r.citations ?? []).length - resolved.length
+  /**
+   * 引用错位（尺子第二版，2026-09-05 拍板）：预期集合之外的引用不再一律算错，
+   * 判分看了文件摘要/正文开头/引用句之后判"与问题相关不相关"，**不相关**才算错位。
+   * 判分没给出相关性（老结果、判分失败）的记成"未判"，不算错也不算对。
+   */
+  const offTarget = resolved.filter((c) => !exp.has(noteKey(c.resolved)))
+  const jc = new Map((r.judge?.citations ?? []).map((c) => [String(c.name).trim(), c]))
+  let misplaced = 0
+  let unjudgedOff = 0
+  for (const c of offTarget) {
+    const v = jc.get(String(c.name).trim())
+    if (!v) unjudgedOff++
+    else if (v.relevant === false) misplaced++
+  }
 
   const refusal = r.judge?.refusal
   const trapOk = isTrap && judged ? !!refusal?.says_not_found && !refusal?.fabricated : null
@@ -205,6 +219,11 @@ function scoreRow(r) {
     citationsResolved: resolved.length,
     citationsCorrect: correctCites,
     citationsUnresolved: unresolved,
+    citationsOffTarget: offTarget.length,
+    citationsMisplaced: misplaced,
+    citationsUnjudged: unjudgedOff,
+    misplacedQuestion: misplaced > 0,
+    citationJudgments: r.judge?.citations ?? [],
     unverifiedCitations: r.unverifiedCitations ?? [],
     trapOk,
     falseNotFound,
@@ -216,6 +235,13 @@ function scoreRow(r) {
     question: r.question,
     models: r.models ?? [],
   }
+}
+
+/** 引用错位率格子：`题占比｜错/总条`，有未判的相关性就标出来，别让老结果的 0 看起来像"零错位" */
+const misp = (g) => {
+  if (g.misplacedRate == null) return '—'
+  const tail = g.unjudgedCites ? `，${g.unjudgedCites} 条未判` : ''
+  return `${pct(g.misplacedRate)}｜${g.misplacedCites}/${g.citationsResolved}${tail}`
 }
 
 const TYPE_LABEL = { keyword: '①关键词题', semantic: '②语义题', multi: '③跨文档汇总题', sensitive: '④敏感区题', trap: '⑤陷阱题' }
@@ -242,6 +268,9 @@ function aggregate(rows) {
       coreCoverage: mean(nonTrap.map((s) => s.coreCoverage).filter((x) => x != null)),
       judged: g.filter((s) => s.judged).length,
       citationPrecision: cites ? citesOk / cites : null,
+      misplacedRate: nonTrap.length ? nonTrap.filter((s) => s.misplacedQuestion).length / nonTrap.length : null,
+      misplacedCites: nonTrap.reduce((a, s) => a + s.citationsMisplaced, 0),
+      unjudgedCites: nonTrap.reduce((a, s) => a + s.citationsUnjudged, 0),
       citationsResolved: cites,
       citationsUnresolved: nonTrap.reduce((a, s) => a + s.citationsUnresolved, 0),
       noCitation: nonTrap.filter((s) => s.citationsTotal === 0).length,
@@ -264,7 +293,7 @@ function aggregate(rows) {
 
 function renderMarkdown(agg, meta) {
   const L = []
-  L.push(`| 题型 | 题数 | 召回命中率 | 全命中率 | 读到率 | 要点覆盖率 | 核心要点覆盖率（前2条） | 引用正确率 | 中位耗时 | P90 耗时 | 实花（对话） |`)
+  L.push(`| 题型 | 题数 | 召回命中率 | 全命中率 | 读到率 | 要点覆盖率 | 核心要点覆盖率（前2条） | 引用错位率（题｜条） | 中位耗时 | P90 耗时 | 实花（对话） |`)
   L.push(`|---|---|---|---|---|---|---|---|---|---|---|`)
   for (const t of TYPE_ORDER) {
     const g = agg.groups[t]
@@ -273,7 +302,7 @@ function renderMarkdown(agg, meta) {
       L.push(`| ${g.label} | ${g.n} | — | — | — | 拒答率 ${pct(g.trapRefusalRate)} | — | — | ${sec(g.medianMs)} | ${sec(g.p90Ms)} | ¥${g.costCny.toFixed(2)} |`)
     } else {
       L.push(
-        `| ${g.label} | ${g.n} | ${pct(g.recallShown)} | ${pct(g.allHitRate)} | ${pct(g.readRate)} | ${pct(g.coverage)} | ${pct(g.coreCoverage)} | ${pct(g.citationPrecision)}（${g.citationsResolved} 条） | ${sec(g.medianMs)} | ${sec(g.p90Ms)} | ¥${g.costCny.toFixed(2)} |`
+        `| ${g.label} | ${g.n} | ${pct(g.recallShown)} | ${pct(g.allHitRate)} | ${pct(g.readRate)} | ${pct(g.coverage)} | ${pct(g.coreCoverage)} | ${misp(g)} | ${sec(g.medianMs)} | ${sec(g.p90Ms)} | ¥${g.costCny.toFixed(2)} |`
       )
     }
   }
@@ -281,21 +310,21 @@ function renderMarkdown(agg, meta) {
   const cites = nonTrap.reduce((a, s) => a + s.citationsResolved, 0)
   const citesOk = nonTrap.reduce((a, s) => a + s.citationsCorrect, 0)
   L.push(
-    `| **合计** | ${agg.totals.n} | ${pct(mean(nonTrap.map((s) => s.recallShown).filter((x) => x != null)))} | ${pct(nonTrap.length ? nonTrap.filter((s) => s.allHit).length / nonTrap.length : null)} | ${pct(mean(nonTrap.map((s) => (s.expectedCount ? s.hitRead / s.expectedCount : null)).filter((x) => x != null)))} | ${pct(mean(nonTrap.map((s) => s.coverage).filter((x) => x != null)))} | ${pct(mean(nonTrap.map((s) => s.coreCoverage).filter((x) => x != null)))} | ${pct(cites ? citesOk / cites : null)}（${cites} 条） | ${sec(median(agg.scored.map((s) => s.durationMs)))} | — | ¥${agg.totals.costCny.toFixed(2)}（判分另 ¥${agg.totals.judgeCostCny.toFixed(2)}） |`
+    `| **合计** | ${agg.totals.n} | ${pct(mean(nonTrap.map((s) => s.recallShown).filter((x) => x != null)))} | ${pct(nonTrap.length ? nonTrap.filter((s) => s.allHit).length / nonTrap.length : null)} | ${pct(mean(nonTrap.map((s) => (s.expectedCount ? s.hitRead / s.expectedCount : null)).filter((x) => x != null)))} | ${pct(mean(nonTrap.map((s) => s.coverage).filter((x) => x != null)))} | ${pct(mean(nonTrap.map((s) => s.coreCoverage).filter((x) => x != null)))} | ${misp({ misplacedRate: nonTrap.length ? nonTrap.filter((s) => s.misplacedQuestion).length / nonTrap.length : null, misplacedCites: nonTrap.reduce((a, s) => a + s.citationsMisplaced, 0), citationsResolved: cites, unjudgedCites: nonTrap.reduce((a, s) => a + s.citationsUnjudged, 0) })} | ${sec(median(agg.scored.map((s) => s.durationMs)))} | — | ¥${agg.totals.costCny.toFixed(2)}（判分另 ¥${agg.totals.judgeCostCny.toFixed(2)}） |`
   )
   L.push('')
-  L.push(`> 口径：召回命中率 = 应命中文件里被摆到模型面前（检索前 6 条 ∪ Read 过）的比例，按题平均；全命中率 = 应命中文件全部被摆到面前的题占比；读到率 = 应命中文件真的被 Read 的比例；要点覆盖率 = 判分 covered 1 / partial 0.5 / missing 0 按题平均；核心要点覆盖率 = 只算每题前 2 条要点（问题直接问的那部分）；引用正确率 = 能解析到库内文件的引用里落在应命中集合内的比例（合并统计）；陷阱题拒答率 = 明确说"库里没有"且未编造的比例。`)
+  L.push(`> 口径：召回命中率 = 应命中文件里被摆到模型面前（检索前 6 条 ∪ Read 过）的比例，按题平均；全命中率 = 应命中文件全部被摆到面前的题占比；读到率 = 应命中文件真的被 Read 的比例；要点覆盖率 = 判分 covered 1 / partial 0.5 / missing 0 按题平均；核心要点覆盖率 = 只算每题前 2 条要点（问题直接问的那部分）；引用错位率 = 引用了与问题不相关文件的题占比｜错位引用条数/解析到文件的引用条数（预期集合内天然相关；集合外由判分看文件摘要与引用句判相关性并写明依据；「未判」= 老结果没有相关性判定）；陷阱题拒答率 = 明确说"库里没有"且未编造的比例。`)
   if (meta?.provider) L.push(`> 线路：${meta.provider.baseUrl} / ${meta.provider.model}；开始 ${meta.startedAt}${meta.finishedAt ? `，结束 ${meta.finishedAt}` : ''}`)
   L.push('')
   L.push('### 逐题明细')
   L.push('')
-  L.push('| 题号 | 题型 | 库 | 状态 | 耗时 | 检索/读/扫 | 应命中→命中(读到) | 要点 | 引用 正确/解析/未解析 | 花费 |')
+  L.push('| 题号 | 题型 | 库 | 状态 | 耗时 | 检索/读/扫 | 应命中→命中(读到) | 要点 | 引用 错位/集合外/解析（未判） | 花费 |')
   L.push('|---|---|---|---|---|---|---|---|---|---|')
   for (const s of agg.scored) {
     const status = s.error ? `❌ ${s.error.slice(0, 40)}` : s.stopped ? '⏱ 超时停止' : '✓'
     const pts = s.type === 'trap' ? (s.judged ? (s.trapOk ? '拒答 ✓' : `未拒答（${s.refusal?.says_not_found ? '说了没有但有编造' : '当成有答了'}）`) : '未判') : s.judged ? `${pct(s.coverage)}（${s.points.map((p) => (p.verdict === 'covered' ? '●' : p.verdict === 'partial' ? '◐' : '○')).join('')}）` : `未判${s.judgeError ? '：' + s.judgeError.slice(0, 30) : ''}`
     L.push(
-      `| ${s.id} | ${s.type}${s.sensitive && s.type !== 'sensitive' ? '·敏' : ''} | ${s.vault} | ${status} | ${sec(s.durationMs)} | ${s.searches.length}/${s.reads.length}/${s.scans.length} | ${s.expectedCount}→${s.hitShown}(${s.hitRead}) | ${pts} | ${s.citationsCorrect}/${s.citationsResolved}/${s.citationsUnresolved} | ¥${s.costCny.toFixed(3)} |`
+      `| ${s.id} | ${s.type}${s.sensitive && s.type !== 'sensitive' ? '·敏' : ''} | ${s.vault} | ${status} | ${sec(s.durationMs)} | ${s.searches.length}/${s.reads.length}/${s.scans.length} | ${s.expectedCount}→${s.hitShown}(${s.hitRead}) | ${pts} | ${s.citationsMisplaced}/${s.citationsOffTarget}/${s.citationsResolved}${s.citationsUnjudged ? `（${s.citationsUnjudged} 未判）` : ''} | ¥${s.costCny.toFixed(3)} |`
     )
   }
   return L.join('\n')
@@ -317,7 +346,7 @@ function renderDiff(agg, base, baseLabel) {
   const money = (a, b) => `¥${a.toFixed(2)}${b != null ? ` (${a - b >= 0 ? '+' : ''}${(a - b).toFixed(2)})` : ''}`
   L.push(`### 对照基线（${baseLabel}）`)
   L.push('')
-  L.push('| 题型 | 召回命中率 | 全命中率 | 读到率 | 要点覆盖率 | 核心要点覆盖率 | 引用正确率 | 中位耗时 | 实花 |')
+  L.push('| 题型 | 召回命中率 | 全命中率 | 读到率 | 要点覆盖率 | 核心要点覆盖率 | 引用错位率（题｜条） | 中位耗时 | 实花 |')
   L.push('|---|---|---|---|---|---|---|---|---|')
   for (const t of TYPE_ORDER) {
     const g = agg.groups[t]
@@ -328,14 +357,14 @@ function renderDiff(agg, base, baseLabel) {
       continue
     }
     L.push(
-      `| ${g.label} | ${d(g.recallShown, b?.recallShown)} | ${d(g.allHitRate, b?.allHitRate)} | ${d(g.readRate, b?.readRate)} | ${d(g.coverage, b?.coverage)} | ${d(g.coreCoverage, b?.coreCoverage)} | ${d(g.citationPrecision, b?.citationPrecision)}（${g.citationsResolved} 条） | ${d(g.medianMs, b?.medianMs, sec)} | ${money(g.costCny, b?.costCny)} |`
+      `| ${g.label} | ${d(g.recallShown, b?.recallShown)} | ${d(g.allHitRate, b?.allHitRate)} | ${d(g.readRate, b?.readRate)} | ${d(g.coverage, b?.coverage)} | ${d(g.coreCoverage, b?.coreCoverage)} | ${misp(g)}${b ? ` ← 基线 ${misp(b)}` : ''} | ${d(g.medianMs, b?.medianMs, sec)} | ${money(g.costCny, b?.costCny)} |`
     )
   }
   L.push(`| **合计** | | | | | | | | ${money(agg.totals.costCny, base.totals.costCny)}，判分 ¥${agg.totals.judgeCostCny.toFixed(2)} |`)
   L.push('')
   L.push('逐题变化（只列有变化的）：')
   L.push('')
-  L.push('| 题号 | 题型 | 应命中→命中 | 要点覆盖 | 核心覆盖 | 引用 正确/解析 | 耗时 |')
+  L.push('| 题号 | 题型 | 应命中→命中 | 要点覆盖 | 核心覆盖 | 引用 错位/解析 | 耗时 |')
   L.push('|---|---|---|---|---|---|---|')
   const bs = new Map(base.scored.map((s) => [s.id, s]))
   const n = (x) => (x == null ? '—' : String(x))
@@ -346,12 +375,12 @@ function renderDiff(agg, base, baseLabel) {
     const changed =
       s.hitShown !== b.hitShown ||
       s.coverage !== b.coverage ||
-      s.citationsCorrect !== b.citationsCorrect ||
+      s.citationsMisplaced !== b.citationsMisplaced ||
       s.citationsResolved !== b.citationsResolved ||
       (s.type === 'trap' && s.trapOk !== b.trapOk)
     if (!changed) continue
     L.push(
-      `| ${s.id} | ${s.type} | ${s.expectedCount}→${arrow(s.hitShown, b.hitShown, n)} | ${s.type === 'trap' ? (s.trapOk ? '拒答 ✓' : '未拒答') : arrow(s.coverage, b.coverage, pct)} | ${s.type === 'trap' ? '—' : arrow(s.coreCoverage, b.coreCoverage, pct)} | ${arrow(s.citationsCorrect, b.citationsCorrect, n)}/${arrow(s.citationsResolved, b.citationsResolved, n)} | ${arrow(s.durationMs, b.durationMs, sec)} |`
+      `| ${s.id} | ${s.type} | ${s.expectedCount}→${arrow(s.hitShown, b.hitShown, n)} | ${s.type === 'trap' ? (s.trapOk ? '拒答 ✓' : '未拒答') : arrow(s.coverage, b.coverage, pct)} | ${s.type === 'trap' ? '—' : arrow(s.coreCoverage, b.coreCoverage, pct)} | ${arrow(s.citationsMisplaced, b.citationsMisplaced, n)}/${arrow(s.citationsResolved, b.citationsResolved, n)} | ${arrow(s.durationMs, b.durationMs, sec)} |`
     )
   }
   return L.join('\n')
@@ -382,7 +411,8 @@ function renderDetails(agg) {
     L.push('> ' + s.answer.replace(/\n/g, '\n> '))
     L.push('')
     if (s.citationsTotal) {
-      L.push(`**引用**：正确 ${s.citationsCorrect} / 解析到文件 ${s.citationsResolved} / 解析不到 ${s.citationsUnresolved}${s.unverifiedCitations.length ? `；产品自己标为"存疑"的：${s.unverifiedCitations.join('、')}` : ''}`)
+      L.push(`**引用**：解析到文件 ${s.citationsResolved} / 解析不到 ${s.citationsUnresolved}；集合内 ${s.citationsCorrect}，集合外 ${s.citationsOffTarget}（错位 ${s.citationsMisplaced}${s.citationsUnjudged ? `，未判 ${s.citationsUnjudged}` : ''}）${s.unverifiedCitations.length ? `；产品自己标为"存疑"的：${s.unverifiedCitations.join('、')}` : ''}`)
+      for (const c of s.citationJudgments) L.push(`- [[${c.name}]] ${c.relevant ? '相关' : '**不相关（错位）**'} —— ${String(c.basis ?? '').replace(/\n/g, ' ')}`)
       L.push('')
     }
     if (s.judged) {
