@@ -170,6 +170,34 @@ export function toolResultText(content: unknown): string {
 }
 
 /**
+ * 从 Grep / Glob 的 tool_result 里抠出**笔记路径**（相对库根），给 B-6 引用校验用。
+ *
+ * 检索基线 T-2（2026-09-05）抓到的口径盲区：模型 Grep 到《作业评改灰太太》后直接引用，
+ * 引用是对的，却被标成"存疑"——`surfaced` 只收 search_knowledge 命中与 Read 入参，
+ * Grep/Glob 看到的文件从来不算"看过"。
+ *
+ * 三种输出形态都要认：
+ *  - files_with_matches：`Found N files` 头 + 每行一个路径
+ *  - content 模式：`路径:行号:内容`（或 `路径-行号-内容` 的上下文行）
+ *  - Glob：每行一个路径
+ * 路径里可能有空格（「塔基业务流 SOP【1.0】.md」「年度目标拆解 .md」），所以不能按空白切，
+ * 按「以 .md 结尾、后面要么行尾要么 `:数字`」取。Grep 拒绝语（护栏）里没有 .md，天然回空。
+ */
+export function notePathsFromScanResult(text: string, root: string): string[] {
+  const out = new Set<string>()
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line || /^Found\s+\d+\s+files?/i.test(line) || /^No (?:files|matches|content) found/i.test(line)) continue
+    const m = line.match(/^(.+?\.md)(?=$|[:-]\d+[:-])/i)
+    if (!m) continue
+    const rel = relToRoot(m[1], root)
+    if (rel && !rel.startsWith('/')) out.add(rel)
+    else if (rel) out.add(rel) // 不在库根下的绝对路径也记下：噪音总比漏判"引用无据"便宜
+  }
+  return [...out]
+}
+
+/**
  * 这一步拿回来几条结果，**以及那个数字的单位**。数不出来回 undefined。
  *
  * - `search_knowledge` 是我们自己的工具，返回格式固定（编号列表 / 「（无命中）」）→ 份

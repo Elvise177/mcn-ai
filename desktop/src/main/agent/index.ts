@@ -29,6 +29,7 @@ import { backupBeforeWrite, takeUndoNotice } from './write-backup'
 import {
   countToolResults,
   isStepWorthy,
+  notePathsFromScanResult,
   pickStepArgs,
   shortToolName,
   toolResultText,
@@ -131,6 +132,15 @@ interface LiveSession {
  * 实测 **174 秒**，比不管还慢。闸门的位置和拒绝语的措辞一样重要。
  */
 const SCAN_LIMIT = 5
+
+/**
+ * search_knowledge 一次返回给模型几条命中（检索优化第一单，2026-09-05）。
+ *
+ * 基线（0.1.3，6 条）里跨文档题全命中只有 40%：第 3、4 份相关文档被排名挤在第 7-10 位，
+ * 标题里就带关键词的《人力编制测算模型》排在两份绩效档案后面。先放到 10 看跨文档全命中的变化，
+ * 再决定要不要动排名。**导出**是给 `retrieval-bench.ts` 重放用的——基准的"摆到面前"口径必须与这里同一个数。
+ */
+export const SEARCH_SHOWN_LIMIT = 10
 
 /** B4：AI 写知识库的确认弹窗等多久。到点默认**拒**（见 askWrite 的注释） */
 const WRITE_CONFIRM_TIMEOUT_MS = 60_000
@@ -581,18 +591,28 @@ export class AgentManager {
                   .join('\n')
                 return { content: [{ type: 'text', text }] }
               }
-              const { hits, fuzzy } = await vaultManager.search(q)
-              for (const h of hits) surfaced.add(noteKey(h.path))
-              if (!hits.length) return { content: [{ type: 'text', text: '（无命中）' }] }
-              const list = hits
-                .slice(0, 6)
-                .map((h, i) => `${i + 1}. [[${h.title}]] (${h.path})\n   ${h.snippet}`)
-                .join('\n')
+              const { hits, fuzzy, total } = await vaultManager.search(q)
+              // 同一篇只给一次（索引按笔记建，理论上不重复；守一道，放宽条数后重复更显眼）
+              const seen = new Set<string>()
+              const unique = hits.filter((h) => {
+                const k = noteKey(h.path)
+                if (seen.has(k)) return false
+                seen.add(k)
+                return true
+              })
+              for (const h of unique) surfaced.add(noteKey(h.path))
+              if (!unique.length) return { content: [{ type: 'text', text: '（无命中）' }] }
+              const shown = unique.slice(0, SEARCH_SHOWN_LIMIT)
+              const list = shown.map((h, i) => `${i + 1}. [[${h.title}]] (${h.path})\n   ${h.snippet}`).join('\n')
+              const more = unique.length > shown.length ? `\n（共 ${total} 条命中，只列前 ${shown.length} 条；要看更多就换更具体的词再检索）` : ''
               // 模糊那一遍的结果必须**说出来**：模型分不清「精确命中」和「相近结果」时，
-              // 会把相近的当成答案讲出去——陷阱题就是这么从假阴性变成假阳性的
+              // 会把相近的当成答案讲出去——陷阱题就是这么从假阴性变成假阳性的。
+              // 基线（2026-09-05）语义题引用正确率 41%：相近结果被当成来源直接引。所以这里把规矩一起说：
+              // 相近结果**先验证再引**——Read 或 Grep 确认它真含问题里的关键词，否则只能作为"推断"。
               const text = fuzzy
-                ? `（精确检索无命中，以下是**相近结果**，可能与问题无关；不要据此断定库里有这份资料）\n${list}`
-                : list
+                ? `（精确检索无命中，以下是**相近结果**，可能与问题无关；不要据此断定库里有这份资料。` +
+                  `引用其中任何一篇之前，必须先 Read 它或用 Grep 确认它真的包含问题里的关键词；确认不了的只能写成「推断」，不加 [[引用]]）\n${list}${more}`
+                : list + more
               return { content: [{ type: 'text', text }] }
             }
           ),
@@ -817,6 +837,11 @@ export class AgentManager {
             const st = stepByToolUse.get(String(b.tool_use_id ?? ''))
             if (!st) continue
             const resultText = toolResultText(b.content)
+            // B-6 的第三个来源：Grep/Glob 结果里出现过的笔记也算"看过"（基线 T-2：Grep 到的文件被引用却标存疑）。
+            // 只认路径，不认内容——模型仍须 Read 才能拿到正文，但引用的"依据"至少是真实存在且被它看到过的文件
+            if ((st.tool === 'Grep' || st.tool === 'Glob') && b.is_error !== true) {
+              for (const p of notePathsFromScanResult(resultText, root)) surfaced.add(noteKey(p))
+            }
             const counted = countToolResults(st.tool, resultText)
             // 被自家护栏拦下的那一步：不算失败，单独标出来（见 SCAN_LIMIT）
             const capped = resultText.includes(SCAN_CAP_MARK)

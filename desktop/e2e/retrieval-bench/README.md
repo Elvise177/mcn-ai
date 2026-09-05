@@ -30,7 +30,7 @@
 
 | 指标 | 定义 | 数据来自哪 |
 |---|---|---|
-| 召回命中率 | 应命中文件里**被摆到模型面前**的比例，按题平均。"摆到面前" = `search_knowledge` 返回给模型的前 6 条 ∪ `Read` 打开过的文件 | 执行端把每一步 `search_knowledge` 的检索词**重放** `vaultManager.search()`（确定性），加上步骤流里 Read 的入参——与产品 B-6 引用校验的 `surfaced` 同口径 |
+| 召回命中率 | 应命中文件里**被摆到模型面前**的比例，按题平均。"摆到面前" = `search_knowledge` 返回给模型的前 N 条（N = `agent/index.ts` 的 `SEARCH_SHOWN_LIMIT`，0.1.3 基线时为 6，检索优化第一单起为 10）∪ `Read` 打开过的文件 | 执行端把每一步 `search_knowledge` 的检索词**重放** `vaultManager.search()`（确定性），加上步骤流里 Read 的入参——与产品 B-6 引用校验的 `surfaced` 同口径 |
 | 全命中率 | 应命中文件**全部**被摆到面前的题占比 | 同上 |
 | 读到率 | 应命中文件真的被 Read 的比例（比"命中"更强：命中只说明标题在列表里） | 步骤流 |
 | 要点覆盖率 | 每条要点 covered=1 / partial=0.5 / missing=0，按题平均。判分模型 = 标准档同一线路（deepseek-v4-pro），temperature 0，`max_tokens` 8000（它先吐推理块，给少了正文为空），每条附**理由 + 从回答里逐字摘的证据** | `results.jsonl` 的 `judge.points`；人工复核看 `summary.md` 明细 |

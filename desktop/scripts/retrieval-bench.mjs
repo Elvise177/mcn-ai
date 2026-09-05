@@ -12,6 +12,7 @@
  *   npm run bench:retrieval -- --only M-K1,T-1     # 只跑几题（调试）
  *   npm run bench:retrieval -- --type trap         # 只跑一类
  *   npm run bench:retrieval -- --from <results.jsonl> [--json]   # 只重新汇总一份已有结果
+ *   npm run bench:retrieval -- [--from …] --baseline <基线 results.jsonl>  # 附对照基线的 diff 表（每格 本轮 (Δpp)）
  *   npm run bench:retrieval -- --rejudge <results.jsonl>         # 用同一份回答重新判分（不再跑对话）
  *   npm run bench:retrieval -- --rejudge <results.jsonl> --rejudge-failed   # 只补判上次判分失败的题
  *
@@ -51,6 +52,7 @@ const JSON_OUT = flag('json')
 const ONLY = (opt('only', '') || '').split(',').map((s) => s.trim()).filter(Boolean)
 const TYPE = opt('type', '')
 const FROM = opt('from', '')
+const BASELINE = opt('baseline', '') // 另一份 results.jsonl：汇总时并排给出每项指标的变化（对照基线出 diff 表）
 const REJUDGE = opt('rejudge', '')
 const REJUDGE_FAILED = flag('rejudge-failed') // 与 --rejudge 同用：只补判上次判分失败的题
 const TIMEOUT_MS = Number(opt('timeout', '420000'))
@@ -299,6 +301,62 @@ function renderMarkdown(agg, meta) {
   return L.join('\n')
 }
 
+/**
+ * 对照表：本轮 vs 基线，每格 `本轮 (Δ)`。Δ 用百分点（耗时用秒）。
+ * 逐题一栏只列**变化了的题**（召回/覆盖/引用任一项变了），没变的不占版面。
+ */
+function renderDiff(agg, base, baseLabel) {
+  const L = []
+  const d = (a, b, fmt = pct) => {
+    if (a == null || b == null) return fmt(a)
+    const delta = a - b
+    const sign = delta > 0 ? '+' : ''
+    const dl = fmt === sec ? `${sign}${(delta / 1000).toFixed(1)}s` : `${sign}${(delta * 100).toFixed(0)}pp`
+    return `${fmt(a)} (${dl})`
+  }
+  const money = (a, b) => `¥${a.toFixed(2)}${b != null ? ` (${a - b >= 0 ? '+' : ''}${(a - b).toFixed(2)})` : ''}`
+  L.push(`### 对照基线（${baseLabel}）`)
+  L.push('')
+  L.push('| 题型 | 召回命中率 | 全命中率 | 读到率 | 要点覆盖率 | 核心要点覆盖率 | 引用正确率 | 中位耗时 | 实花 |')
+  L.push('|---|---|---|---|---|---|---|---|---|')
+  for (const t of TYPE_ORDER) {
+    const g = agg.groups[t]
+    const b = base.groups[t]
+    if (!g) continue
+    if (t === 'trap') {
+      L.push(`| ${g.label} | — | — | — | 拒答 ${d(g.trapRefusalRate, b?.trapRefusalRate)} | — | — | ${d(g.medianMs, b?.medianMs, sec)} | ${money(g.costCny, b?.costCny)} |`)
+      continue
+    }
+    L.push(
+      `| ${g.label} | ${d(g.recallShown, b?.recallShown)} | ${d(g.allHitRate, b?.allHitRate)} | ${d(g.readRate, b?.readRate)} | ${d(g.coverage, b?.coverage)} | ${d(g.coreCoverage, b?.coreCoverage)} | ${d(g.citationPrecision, b?.citationPrecision)}（${g.citationsResolved} 条） | ${d(g.medianMs, b?.medianMs, sec)} | ${money(g.costCny, b?.costCny)} |`
+    )
+  }
+  L.push(`| **合计** | | | | | | | | ${money(agg.totals.costCny, base.totals.costCny)}，判分 ¥${agg.totals.judgeCostCny.toFixed(2)} |`)
+  L.push('')
+  L.push('逐题变化（只列有变化的）：')
+  L.push('')
+  L.push('| 题号 | 题型 | 应命中→命中 | 要点覆盖 | 核心覆盖 | 引用 正确/解析 | 耗时 |')
+  L.push('|---|---|---|---|---|---|---|')
+  const bs = new Map(base.scored.map((s) => [s.id, s]))
+  const n = (x) => (x == null ? '—' : String(x))
+  const arrow = (a, b, fmt) => (a === b ? fmt(a) : `${fmt(b)} → ${fmt(a)}`)
+  for (const s of agg.scored) {
+    const b = bs.get(s.id)
+    if (!b) continue
+    const changed =
+      s.hitShown !== b.hitShown ||
+      s.coverage !== b.coverage ||
+      s.citationsCorrect !== b.citationsCorrect ||
+      s.citationsResolved !== b.citationsResolved ||
+      (s.type === 'trap' && s.trapOk !== b.trapOk)
+    if (!changed) continue
+    L.push(
+      `| ${s.id} | ${s.type} | ${s.expectedCount}→${arrow(s.hitShown, b.hitShown, n)} | ${s.type === 'trap' ? (s.trapOk ? '拒答 ✓' : '未拒答') : arrow(s.coverage, b.coverage, pct)} | ${s.type === 'trap' ? '—' : arrow(s.coreCoverage, b.coreCoverage, pct)} | ${arrow(s.citationsCorrect, b.citationsCorrect, n)}/${arrow(s.citationsResolved, b.citationsResolved, n)} | ${arrow(s.durationMs, b.durationMs, sec)} |`
+    )
+  }
+  return L.join('\n')
+}
+
 /** 逐题的判分理由——给人复核用，客户问"准确率怎么来的"时拿这个 */
 function renderDetails(agg) {
   const L = []
@@ -425,7 +483,11 @@ async function run() {
 }
 
 function emit(agg, meta, dir) {
-  const md = renderMarkdown(agg, meta)
+  let md = renderMarkdown(agg, meta)
+  if (BASELINE) {
+    const baseRows = readFileSync(BASELINE, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    md += '\n\n' + renderDiff(agg, aggregate(baseRows), BASELINE)
+  }
   const details = renderDetails(agg)
   writeFileSync(join(dir, 'summary.md'), md + '\n\n' + details)
   writeFileSync(join(dir, 'summary.json'), JSON.stringify({ meta, groups: agg.groups, totals: agg.totals, questions: agg.scored }, null, 2))

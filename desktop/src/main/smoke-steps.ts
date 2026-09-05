@@ -1,4 +1,4 @@
-import { countToolResults, isStepWorthy, pickStepArgs, shortToolName, toolResultText } from './agent/steps'
+import { countToolResults, isStepWorthy, notePathsFromScanResult, pickStepArgs, shortToolName, toolResultText } from './agent/steps'
 import { judgeResult } from './agent/result'
 import { computeInboxProgress, judgeBackfill } from './tasks/types'
 import { describeStep, durationHint, scanTarget } from '../renderer/src/config/steps'
@@ -89,6 +89,29 @@ check('Grep 零命中', cnt('Grep', 'No files found') === '{"count":0,"unit":"fi
 check('Grep 逐行命中 → 处（不是份）', cnt('Grep', 'a.md:1:命中\na.md:2:命中\na.md:3:命中') === '{"count":3,"unit":"match"}')
 check('Glob 逐行路径 → 份', cnt('Glob', '/v/a.md\n/v/b.md\n/v/c.md') === '{"count":3,"unit":"file"}')
 check('Read 不给数字', countToolResults('Read', '# 标题\n正文') === undefined)
+console.log('\n【2b】Grep/Glob 结果里的笔记路径（B-6 引用校验要认它们，检索基线 T-2 的盲区）')
+{
+  const root = '/tmp/v'
+  const paths = (t: string): string => JSON.stringify(notePathsFromScanResult(t, root))
+  check(
+    'files_with_matches：头行跳过，路径相对化',
+    paths('Found 2 files\n/tmp/v/80_Library/a/作业评改灰太太.md\n/tmp/v/80_Library/b/皮蛋.md') ===
+      '["80_Library/a/作业评改灰太太.md","80_Library/b/皮蛋.md"]'
+  )
+  check(
+    'content 模式：路径:行号:内容，同一篇多行只记一次',
+    paths('/tmp/v/x/日记账-2026年.md:12:商标注册 3600\n/tmp/v/x/日记账-2026年.md:40:商标\n/tmp/v/y/报销表.md-3-上下文行') ===
+      '["x/日记账-2026年.md","y/报销表.md"]'
+  )
+  check(
+    '路径含空格与全角括号也整段认下',
+    paths('/tmp/v/业务/OMG美妆带货-塔基业务流 SOP【1.0】.md:5:晋升\n/tmp/v/管理/2026-各业务线年度目标拆解 .md') ===
+      '["业务/OMG美妆带货-塔基业务流 SOP【1.0】.md","管理/2026-各业务线年度目标拆解 .md"]'
+  )
+  check('护栏拒绝语与 No files found 回空', paths('No files found') === '[]' && paths('文件查找次数已达上限（5 次）。不要再找了') === '[]')
+  check('非 md 文件不算笔记', paths('/tmp/v/_assets/x/img01.png\n/tmp/v/a.docx') === '[]')
+}
+
 // 相近标注：云端语义检索没有相关度闸门，恒定返回 top-6，必须标出来（§3-13）
 check(
   '云端结果标成相近（认「相关度」格式）',

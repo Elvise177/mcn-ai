@@ -14,7 +14,7 @@
  *  - 步骤流：search_knowledge 的检索词、Read 过的文件、Grep/Glob 次数（来自 `agentManager.tap`，
  *    与界面步骤流是同一份事件）
  *  - **被摆到模型面前的文件**：检索词逐条**重放** `vaultManager.search()` 拿命中路径（工具返回给模型的
- *    就是前 6 条，重放是确定性的），加上 Read 的入参——这与 agent/index.ts 里 B-6 的 `surfaced` 同一口径
+ *    就是前 SEARCH_SHOWN_LIMIT 条，重放是确定性的），加上 Read 的入参——这与 agent/index.ts 里 B-6 的 `surfaced` 同一口径
  *  - 回答里的 `[[引用]]` 解析成路径（`vaultManager.resolveLink`，与产品校验引用用的同一函数）
  *  - 用量：读隔离 userData 的账本 jsonl 增量，花费用产品自己的 `tokensOf` + `costCny` 算，与用量页同口径
  *  - 判分：标准档同一线路（`resolveTierForRequest('standard')`），直接打 Anthropic 兼容的 /v1/messages，
@@ -228,7 +228,7 @@ async function main(): Promise<void> {
   const { vaultManager } = await import('./vault')
   // 账本目录必须在 store 初始化（env-hooks 生效）之后取，并与 usage/index.ts 的 usageDir() 同源
   const userData = app.getPath('userData')
-  const { agentManager } = await import('./agent')
+  const { agentManager, SEARCH_SHOWN_LIMIT } = await import('./agent')
   const { resolveTierForRequest, describeTier, setTierConfig } = await import('./ai/tiers')
   const { keyVault } = await import('./store')
   const { tokensOf } = await import('./usage')
@@ -354,7 +354,7 @@ async function main(): Promise<void> {
         query: s.args.query,
         total: r.total,
         fuzzy: !!r.fuzzy,
-        shown: r.hits.slice(0, 6).map((h) => h.path),
+        shown: r.hits.slice(0, SEARCH_SHOWN_LIMIT).map((h) => h.path),
         all: r.hits.map((h) => h.path),
       })
     }
