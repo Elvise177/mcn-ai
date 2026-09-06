@@ -424,8 +424,12 @@ cd desktop && npm run verify
 ### 3. 构建 + 签名 + 公证（一条命令）
 
 ```bash
-source ~/.notarize.env && cd desktop && npm run dist
+cd desktop && node scripts/fetch-models.mjs && source ~/.notarize.env && npm run dist
 ```
+
+**`fetch-models.mjs` 那半截也不能省**（2026-09-06 起）：本地 embedding 模型 `resources/models/bge-small-zh-v1.5/`
+是 gitignored 的，不在包里就成了「语义索引：不可用：模型文件缺失」——构建不会红，`verify-signing` 也看不出来，
+只有 `smoke:embed`（在 `npm run verify` 的 L1 里）会抓到。已存在且 sha256 校验过的秒过。
 
 **`source` 那半截不能省**——三个环境变量都没设时 electron-builder **不报错、静默跳过公证**，
 你会拿到一个签了名但没公证的 dmg，客户双击照样被 Gatekeeper 拦。
