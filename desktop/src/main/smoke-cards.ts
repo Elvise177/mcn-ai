@@ -3,6 +3,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import fg from 'fast-glob'
 import { buildEntityCards, canon, prefixSame, stripNote } from './vault/entity-cards'
+import { groupTopics, renderAuto, topicIsSensitive, MIN_TAG, type WikiSource } from './vault/wiki-pages'
 import { hasSensitiveMark } from './lib/sensitive'
 
 /**
@@ -28,6 +29,48 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 const LIB = '80_资料库'
+
+console.log('\n【W】wiki 主题页：门槛 / 合并 / 敏感继承（检索优化第二单）')
+{
+  const src = (rel: string, o: Partial<WikiSource> = {}): WikiSource => ({
+    rel,
+    title: rel.split('/').pop()!.replace(/\.md$/, ''),
+    summary: o.summary ?? '',
+    docType: o.docType ?? '复盘',
+    tags: o.tags ?? [],
+    sensitive: o.sensitive ?? false,
+    dirs: o.dirs ?? rel.split('/').slice(1, -1),
+  })
+  const srcs: WikiSource[] = [
+    src('80_资料库/星母培训计划/数据复盘/总结.md', { summary: '第一期星母培训计划复盘，筛选14人', tags: ['星母计划', '复盘'] }),
+    src('80_资料库/星母培训计划/数据复盘/数据版.md', { summary: '星母计划第一期线上数据复盘', tags: ['星母计划', '数据复盘'] }),
+    src('80_资料库/星母培训计划/方案/第二期方案.md', { summary: '15天线上培训方案', tags: ['星母计划'] }),
+    src('80_资料库/人力资源类/绩效档案-某人.md', { summary: 'SECRET-绩效摘要', tags: ['星母计划', '绩效'], sensitive: true }),
+    src('80_资料库/人力资源类/薪资表.md', { summary: 'SECRET-薪资', tags: ['绩效', '薪酬'], sensitive: true }),
+    src('80_资料库/人力资源类/人才盘点.md', { summary: 'SECRET-盘点', tags: ['绩效'], sensitive: true }),
+    src('80_资料库/孤篇/只有一篇.md', { tags: ['1.0', '12345'] }),
+  ]
+  const topics = groupTopics(srcs)
+  const byName = new Map(topics.map((t) => [t.name, t]))
+  check('目录主题：星母培训计划（3 篇）成页', byName.get('星母培训计划')?.sources.length === 3)
+  check('目录主题：数据复盘（2 篇）成页，孤篇目录（1 篇）不成页', byName.has('数据复盘') && !byName.has('孤篇'))
+  check(`标签主题：星母计划（4 篇 ≥ ${MIN_TAG}）与目录主题同名 → 合并为 mixed`, byName.get('星母计划')?.kind === 'tag' || byName.get('星母培训计划')?.kind === 'dir')
+  check('标签主题：绩效（3 篇，全敏感）成页；薪酬（1 篇）不成页', byName.has('绩效') && !byName.has('薪酬'))
+  check('噪音标签（纯数字/版本号）不成页', !byName.has('1.0') && !byName.has('12345'))
+  const xm = byName.get('星母计划')!
+  check('星母计划：3 篇普通 + 1 篇敏感 → 普通页', !topicIsSensitive(xm))
+  const auto = renderAuto(xm, false)
+  check('普通页：不出现敏感文档的文件名', !auto.includes('绩效档案'), auto)
+  check('普通页：不出现敏感文档的摘要', !auto.includes('SECRET'), auto)
+  check('普通页：敏感文档只报数', /另有 1 份敏感文档/.test(auto))
+  check('普通页：列了非敏感三篇的标题与摘要', auto.includes('[[80_资料库/星母培训计划/数据复盘/总结|总结]] — 第一期星母培训计划复盘') && auto.includes('第二期方案'))
+  check('普通页：关键词行是非敏感文档 tags 的并集，不含敏感文档独有的 tag', /关键词：.*星母计划/.test(auto) && !/关键词：.*绩效/.test(auto))
+  const jx = byName.get('绩效')!
+  check('绩效：只由敏感文档支撑 → 敏感页', topicIsSensitive(jx))
+  const autoS = renderAuto(jx, true)
+  check('敏感页：可以列全链接与摘要（它本身不上云）', autoS.includes('绩效档案-某人') && autoS.includes('SECRET-薪资'))
+  check('两次渲染逐字相同（幂等的前提）', renderAuto(xm, false) === auto)
+}
 
 /** 造一篇库内笔记 */
 async function note(

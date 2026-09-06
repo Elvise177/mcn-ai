@@ -1,5 +1,5 @@
 import { Worker } from 'worker_threads'
-import { join } from 'path'
+import { join, dirname } from 'path'
 import { existsSync } from 'fs'
 import type { VaultNote, SearchHit, SearchResult } from './types'
 
@@ -15,6 +15,13 @@ function workerPath(): string {
   throw new Error('search-worker.js 未找到')
 }
 
+/** 目录段字段：`80_Library/工作-执行类/…/星母培训计划/数据复盘/总结.md` → 各级目录名空格分开（不含文件名、不含库根前缀数字） */
+export function dirField(relPath: string): string {
+  const d = dirname(relPath)
+  if (!d || d === '.') return ''
+  return d.split(/[/\\]/).map((seg) => seg.replace(/^\d+_/, '')).join(' ')
+}
+
 /** 主进程侧代理：真正的索引/检索在 search-worker 线程，主进程事件循环零阻塞 */
 export class VaultSearcher {
   private worker: Worker
@@ -27,7 +34,15 @@ export class VaultSearcher {
    * 此后每一次检索都秒回 0 条，界面按三态规则画成「没找到「X」」。
    * 那正是产品说谎，比"检索报错"坏得多。
    */
-  private lastDocs: Array<{ path: string; title: string; tags: string; body: string }> = []
+  private lastDocs: Array<{ path: string; title: string; tags: string; body: string; dir: string }> = []
+  /** 调参脚本设的查询期排名参数；null = worker 出厂值 */
+  private rankParams: Record<string, number> | null = null
+
+  /** 只改查询期参数（boost / BM25 b），不重建索引。`retrieval-tune` 用，产品自己不调 */
+  configure(params: Record<string, number> | null): void {
+    this.rankParams = params
+    this.worker.postMessage({ type: 'configure', params: params ?? {} })
+  }
   /**
    * 已经重建过几次。**必须封顶**：worker 一起来就崩（依赖缺失、内存不够）时，
    * 无上限重建就是一个每秒几十次的 spawn 循环，把主进程一起拖垮。
@@ -41,12 +56,14 @@ export class VaultSearcher {
 
   private spawn(): Worker {
     const w = new Worker(workerPath())
-    w.on('message', (m: { type: string; id?: number; hits?: SearchHit[]; total?: number; fuzzy?: boolean }) => {
+    w.on('message', (m: { type: string; id?: number; hits?: SearchHit[]; total?: number; fuzzy?: boolean; dropped?: string }) => {
       if (m.type === 'results' && m.id != null) {
-        this.pending.get(m.id)?.({ hits: m.hits ?? [], total: m.total ?? m.hits?.length ?? 0, fuzzy: m.fuzzy })
+        this.pending.get(m.id)?.({ hits: m.hits ?? [], total: m.total ?? m.hits?.length ?? 0, fuzzy: m.fuzzy, dropped: m.dropped })
         this.pending.delete(m.id)
       }
     })
+    // 重建出来的 worker 要带上当前的排名参数（调参脚本设过的话），否则崩一次就回出厂值
+    if (this.rankParams) w.postMessage({ type: 'configure', params: this.rankParams })
     w.on('error', (err) => {
       console.error('[search-worker]', err)
       this.restart(`error: ${err instanceof Error ? err.message : String(err)}`)
@@ -133,6 +150,7 @@ export class VaultSearcher {
       title: n.title,
       tags: n.tags.join(' '),
       body: bodies.get(n.path) ?? '',
+      dir: dirField(n.path),
     }))
     this.lastDocs = docs // worker 崩了要靠它重灌（R16）
     this.worker.postMessage({ type: 'rebuild', docs })
@@ -144,7 +162,7 @@ export class VaultSearcher {
   upsert(note: VaultNote, raw: string): void {
     this.worker.postMessage({
       type: 'upsert',
-      doc: { path: note.path, title: note.title, tags: note.tags.join(' '), body: raw },
+      doc: { path: note.path, title: note.title, tags: note.tags.join(' '), body: raw, dir: dirField(note.path) },
     })
   }
 

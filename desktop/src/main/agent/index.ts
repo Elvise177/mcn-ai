@@ -591,7 +591,7 @@ export class AgentManager {
                   .join('\n')
                 return { content: [{ type: 'text', text }] }
               }
-              const { hits, fuzzy, total } = await vaultManager.search(q)
+              const { hits, fuzzy, total, dropped } = await vaultManager.search(q)
               // 同一篇只给一次（索引按笔记建，理论上不重复；守一道，放宽条数后重复更显眼）
               const seen = new Set<string>()
               const unique = hits.filter((h) => {
@@ -609,10 +609,15 @@ export class AgentManager {
               // 会把相近的当成答案讲出去——陷阱题就是这么从假阴性变成假阳性的。
               // 基线（2026-09-05）语义题引用正确率 41%：相近结果被当成来源直接引。所以这里把规矩一起说：
               // 相近结果**先验证再引**——Read 或 Grep 确认它真含问题里的关键词，否则只能作为"推断"。
+              // 第二单的"去掉一个词"档：命中是真命中，但**不含被去掉的那个词**——必须说出来，
+              // 否则「珀莱雅 年框 结案」去掉"珀莱雅"后的向日花年框会被当成珀莱雅的答案
               const text = fuzzy
                 ? `（精确检索无命中，以下是**相近结果**，可能与问题无关；不要据此断定库里有这份资料。` +
                   `引用其中任何一篇之前，必须先 Read 它或用 Grep 确认它真的包含问题里的关键词；确认不了的只能写成「推断」，不加 [[引用]]）\n${list}${more}`
-                : list + more
+                : dropped
+                  ? `（全部词同时命中的笔记为 0；以下是**去掉「${dropped}」之后**的命中——它们不含「${dropped}」，` +
+                    `不能据此断定库里有与「${dropped}」相关的资料。要确认「${dropped}」是否存在，请单独检索或 Grep 它）\n${list}${more}`
+                  : list + more
               return { content: [{ type: 'text', text }] }
             }
           ),

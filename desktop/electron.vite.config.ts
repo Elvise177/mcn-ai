@@ -23,6 +23,8 @@ export default defineConfig({
           'smoke-usage': resolve(__dirname, 'src/main/smoke-usage.ts'),
           // 检索准确率基准的无头驱动（scripts/retrieval-bench.mjs 调），与 smoke-* 同一类：不被应用引用
           'retrieval-bench': resolve(__dirname, 'src/main/retrieval-bench.ts'),
+          // 检索排名参数的离线回归（零 LLM），同上
+          'retrieval-tune': resolve(__dirname, 'src/main/retrieval-tune.ts'),
         },
       },
     },

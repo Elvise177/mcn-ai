@@ -11,6 +11,7 @@
  *   npm run bench:retrieval                        # 全量：建库副本 → 跑 45 题 → 判分 → 汇总
  *   npm run bench:retrieval -- --only M-K1,T-1     # 只跑几题（调试）
  *   npm run bench:retrieval -- --type trap         # 只跑一类
+ *   npm run bench:retrieval -- --split validate    # 只看验证集（15 题）；调参只许看 --split tune（30 题）
  *   npm run bench:retrieval -- --from <results.jsonl> [--json]   # 只重新汇总一份已有结果
  *   npm run bench:retrieval -- [--from …] --baseline <基线 results.jsonl>  # 附对照基线的 diff 表（每格 本轮 (Δpp)）
  *   npm run bench:retrieval -- --rejudge <results.jsonl>         # 用同一份回答重新判分（不再跑对话）
@@ -51,6 +52,11 @@ const NO_JUDGE = flag('no-judge')
 const JSON_OUT = flag('json')
 const ONLY = (opt('only', '') || '').split(',').map((s) => s.trim()).filter(Boolean)
 const TYPE = opt('type', '')
+/**
+ * 调参集 / 验证集（用户拍板，2026-09-05）：bench.jsonl 每题带 `split: tune|validate`（30/15，按题型分层）。
+ * 引擎参数只在 tune 上调，对外报的数字只看 validate——同一套题上调参又报分是自己骗自己。
+ */
+const SPLIT = opt('split', '')
 const FROM = opt('from', '')
 const BASELINE = opt('baseline', '') // 另一份 results.jsonl：汇总时并排给出每项指标的变化（对照基线出 diff 表）
 const REJUDGE = opt('rejudge', '')
@@ -105,6 +111,7 @@ function filterQuestions(all) {
   let qs = all.filter((q) => !q.retired)
   if (ONLY.length) qs = qs.filter((q) => ONLY.includes(q.id))
   if (TYPE) qs = qs.filter((q) => q.type === TYPE)
+  if (SPLIT) qs = qs.filter((q) => (q.split ?? 'tune') === SPLIT)
   return qs
 }
 
@@ -442,7 +449,9 @@ async function run() {
   for (const q of qs) byType[q.type] = (byType[q.type] ?? 0) + 1
 
   if (FROM) {
-    const rows = readFileSync(FROM, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    const ids = new Set(qs.map((q) => q.id))
+    const rows = readFileSync(FROM, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => ids.has(r.id))
+    if (SPLIT) console.log(`（只汇总 ${SPLIT} 集：${rows.length} 题）`)
     const metaPath = FROM.replace(/\.jsonl$/, '') + '.meta.json'
     const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, 'utf-8')) : null
     const agg = aggregate(rows)
@@ -515,7 +524,8 @@ async function run() {
 function emit(agg, meta, dir) {
   let md = renderMarkdown(agg, meta)
   if (BASELINE) {
-    const baseRows = readFileSync(BASELINE, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    const ids = new Set(agg.scored.map((s) => s.id))
+    const baseRows = readFileSync(BASELINE, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((r) => ids.has(r.id))
     md += '\n\n' + renderDiff(agg, aggregate(baseRows), BASELINE)
   }
   const details = renderDetails(agg)

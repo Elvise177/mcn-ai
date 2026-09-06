@@ -202,6 +202,11 @@ export class VaultManager {
     return buildGraph(this.notes)
   }
 
+  /** 调参脚本用：改检索排名参数（见 searcher.configure） */
+  configureSearch(params: Record<string, number> | null): void {
+    this.searcher.configure(params)
+  }
+
   search(q: string): Promise<SearchResult> {
     // 没开库就没什么可等的，直接回空（否则会在 searcher 的就绪闸门上白等）
     if (!this.root) return Promise.resolve({ hits: [], total: 0 })

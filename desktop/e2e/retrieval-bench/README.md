@@ -10,6 +10,9 @@
 | `../../scripts/retrieval-bench.mjs` | 编排 + 汇总：建库副本 → 起无头执行端 → 判分 → 出表（`npm run bench:retrieval`） |
 | `../../src/main/retrieval-bench.ts` | 执行端：跑在 Electron 主进程里，用**产品自己的对话链路**（`agentManager.send`）逐题作答；构建入口 `out/main/retrieval-bench.js`，与 `smoke-*` 同类，不被应用引用 |
 | `runs/<时间戳>/` | 每次运行的产物（gitignored）：`job.json` / `results.jsonl` / `results.meta.json` / `summary.md`（含逐题判分理由）/ `summary.json` |
+| `../../src/main/retrieval-tune.ts` | 引擎排名参数的离线回归：重放一份 results.jsonl 里模型真实用过的检索词，看应命中文件进不进前 N，多组参数并排；零 LLM。`out/main/retrieval-tune.js <job.json>`，job 见文件头 |
+
+执行端开库前会先跑 `buildWikiPages`（检索优化第二单）：库副本上没经过入库 run-end，主题页要在这里补出来，与产品真实入库后的形态一致。
 
 ## 题目字段
 
@@ -22,6 +25,7 @@
 - `gold_points`：2-4 条事实要点，**由人读原文档写**，不许模型生成；不含个人字段（姓名/身份证/联系方式/个人薪资）
 - `expected_files`：应命中的 1-5 个文件，运行前会逐个检查在库里存在，写错路径直接报错不跑
 - `sensitive`：题型不是 `sensitive` 但答案文件带敏感标记时标出来（如 J-S3 报销制度在 Jerry 库里是敏感文件）
+- `split`：`tune`（30 题）/ `validate`（15 题，按题型分层：关键词 3 / 语义 3 / 跨文档 3 / 敏感 4 / 陷阱 2）。**引擎参数只在 tune 上调**（`retrieval-tune.ts` 零花费重放），**对外报的数字只看 validate**（`--split validate`）——同一套题上调参又报分是自己骗自己（用户拍板，2026-09-05）。T-1 在 tune 集里当 n−1 AND 档的守门题，报分时单独点名
 
 题目怎么来的：Maggie 库取她的课程、作业评改、孵化方案、资源包 SOP 等真实文档；Jerry 库取复盘、目标、年框结案、职能制度等真实文档。
 **Maggie 复刻库（`/tmp/mcnai-qa-vault`）已清**，用 `~/Documents/AI/maggie-vault`（同一批源数据、完整派生层）替代；Jerry 预检库也已清，按单子用 `Downloads/我的知识库`。

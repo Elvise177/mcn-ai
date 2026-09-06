@@ -5,6 +5,7 @@ import { shell } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
 import { buildEntityCards } from '../vault/entity-cards'
+import { buildWikiPages, WIKI_PAGES_ENABLED } from '../vault/wiki-pages'
 import { readVaultConfig } from '../vault/taxonomy'
 import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
@@ -891,8 +892,21 @@ export class InboxOrchestrator {
       if (st.sensitiveCards) bits.push(`${st.sensitiveCards} 张敏感卡仅存本地`)
       // 冲突必须**说出来**：静默覆盖用户手工编辑过的卡是不可接受的（同 M-27 的原则）
       if (st.conflicted) bits.push(`${st.conflicted} 张你改过的卡未覆盖，新内容放在「待合并」里`)
+      /**
+       * wiki 主题页（检索优化第二单）：与建卡同一时机、同一套敏感继承。敏感页与敏感卡一样不上云，
+       * 所以路径并进同一个返回值。生成器失败不拖垮建卡——它是检索的加速层，不是数据的一部分
+       */
+      let wikiPaths: string[] = []
+      if (WIKI_PAGES_ENABLED) try {
+        const w = await buildWikiPages(root, libName)
+        bits.push(`主题页 ${w.topics}（新建 ${w.created}${w.updated ? `，更新 ${w.updated}` : ''}${w.sensitivePages ? `，${w.sensitivePages} 页敏感仅本地` : ''}）`)
+        if (w.conflicted) bits.push(`${w.conflicted} 页主题页你改过未覆盖，新内容放在「待合并」里`)
+        wikiPaths = w.sensitivePaths
+      } catch (e) {
+        bits.push(`主题页生成失败：${String(e).slice(0, 120)}`)
+      }
       this.send({ type: 'stage', stage: 'build_cards', status: st.conflicted ? 'warn' : 'ok', message: bits.join('，') }, taskId)
-      return st.sensitivePaths
+      return [...st.sensitivePaths, ...wikiPaths]
     } catch (e) {
       this.send({ type: 'stage', stage: 'build_cards', status: 'error', message: String(e) }, taskId)
       return []

@@ -10,7 +10,40 @@ interface Doc {
   title: string
   tags: string
   body: string
+  /**
+   * 目录段（不含文件名），空格分开（检索优化第二单）。基线 M-K1/M-X1/M-X4 的《总结.md》正文没有
+   * "星母计划"四个字，身份全在路径 `…/星母培训计划/数据复盘/` 里——不索引路径就永远搜不到它
+   */
+  dir?: string
 }
+
+/**
+ * 排名参数（第二单）。出厂值由 bench **调参集**（30 题）上重放模型真实检索词逐题回归定
+ * （`retrieval-tune.ts`，2026-09-05）：
+ *  - title 3 → 6、dir 2：标题/目录名含词的文档往前挪。实测对前 10 名次影响很小
+ *    （《2026年中复盘会议纪要》对「中台 复盘」15 → 11 位，仍在 10 名外），但方向对、无副作用，留下
+ *  - BM25 `b` **保持库默认 0.7**：0.1 / 0.3 / 0.9 / 1.0 全试过，30 题的召回与全命中一格没动，
+ *    没有证据就不改。想压长表靠参数是走不通的，这一类靠 wiki 主题页（vault/wiki-pages.ts）
+ * 可由主进程 `configure` 消息覆盖（调参脚本用），不重建索引——boost/bm25 都是查询期参数。
+ */
+export interface RankParams {
+  title: number
+  dir: number
+  tags: number
+  b: number
+  /**
+   * 「去掉一个词」档开关（1 开 / 0 关）。**默认关**（2026-09-05 第二单试跑）：它抢在模糊 OR 之前返回，
+   * 常常只回 1-2 条就让模型停手——M-S3「素材 交接 传输」放松后只剩《剪辑标准化操作手册》，
+   * 而原来的模糊档能回 39 条含正确文件；原有的二元组覆盖率闸门（≥0.6）本就近似"少一个词"。留开关给调参脚本
+   */
+  relaxed: number
+}
+export const RANK_DEFAULTS: RankParams = { title: 6, dir: 2, tags: 2, b: 0.7, relaxed: 0 }
+let rank: RankParams = { ...RANK_DEFAULTS }
+const searchOpts = (): { boost: Record<string, number>; bm25: { k: number; b: number; d: number } } => ({
+  boost: { title: rank.title, dir: rank.dir, tags: rank.tags },
+  bm25: { k: 1.2, b: rank.b, d: 0.5 },
+})
 
 function tokenize(text: string): string[] {
   const tokens: string[] = []
@@ -54,10 +87,10 @@ const bodies = new Map<string, string>()
 
 function newIndex(): MiniSearch {
   return new MiniSearch({
-    fields: ['title', 'body', 'tags'],
+    fields: ['title', 'dir', 'body', 'tags'],
     storeFields: ['title'],
     tokenize,
-    searchOptions: { boost: { title: 3, tags: 2 }, combineWith: 'AND' },
+    searchOptions: { ...searchOpts(), combineWith: 'AND' },
   })
 }
 
@@ -158,10 +191,36 @@ function df(term: string): number {
   return v
 }
 
-function runSearch(raw: string): { results: ReturnType<MiniSearch['search']>; fuzzy: boolean } {
+type Results = ReturnType<MiniSearch['search']>
+
+/**
+ * 第二档：**去掉一个词**的 AND（第二单，针对 B 形状「AND 匹配失败」）。
+ *
+ * 「孵化 培训 项目」全 AND 为 0——《金字塔达人孵化方案》没有"项目"。去掉任一词再 AND，
+ * 命中的仍是"其余词都有"的真命中，不该混进模糊 OR 那一档去当"相近结果"。
+ * 只在 ≥3 个词时启用（2 个词去一个就成了单词检索，噪音太大），去哪个词都试，
+ * 结果按分值合并；**告知上层去掉了什么**——「珀莱雅 年框 结案」去掉"珀莱雅"后命中的是
+ * 向日花/霞飞的年框，不说出来就是把"没有"答成"有"（bench T-1 守的正是这条）。
+ * 多个词都能去时，报导致命中最多的那个；分数并列取第一个。
+ */
+function relaxedSearch(q: string): { results: Results; dropped: string } | null {
+  const segs = q.split(' ').filter(Boolean)
+  if (segs.length < 3) return null
+  let best: { results: Results; dropped: string } | null = null
+  for (let i = 0; i < segs.length; i++) {
+    const sub = segs.filter((_, j) => j !== i).join(' ')
+    const r = mini.search(sub, searchOpts())
+    if (r.length && (!best || r.length > best.results.length)) best = { results: r, dropped: segs[i] }
+  }
+  return best
+}
+
+function runSearch(raw: string): { results: Results; fuzzy: boolean; dropped?: string } {
   const q = cleanQuery(raw)
-  const strict = mini.search(q)
+  const strict = mini.search(q, searchOpts())
   if (strict.length) return { results: strict, fuzzy: false }
+  const relaxed = rank.relaxed ? relaxedSearch(q) : null
+  if (relaxed) return { results: relaxed.results, fuzzy: false, dropped: relaxed.dropped }
 
   const terms = [...new Set(tokenize(q))]
   const alive = terms.filter((t) => df(t) > 0)
@@ -171,7 +230,7 @@ function runSearch(raw: string): { results: ReturnType<MiniSearch['search']>; fu
   const need = Math.max(2, Math.ceil(grams.length * MIN_COVERAGE))
   const frags = queryFragments(q)
   const loose = mini
-    .search({ queries: alive, combineWith: 'OR', ...EXACT })
+    .search({ queries: alive, combineWith: 'OR', ...EXACT, ...searchOpts() })
     .filter((r) => r.terms.filter((t) => gramSet.has(t)).length >= need)
     // 第 3 道闸：连续性
     .filter((r) => hasFragment(String(r.id), String(r.title), frags))
@@ -182,7 +241,7 @@ function add(doc: Doc): void {
   dfCache.clear() // 索引一变，DF 就不作数了
   if (mini.has(doc.path)) mini.discard(doc.path)
   bodies.set(doc.path, plain(doc.body)) // bodies 只用于出摘要，存清洗后的纯文本
-  mini.add({ id: doc.path, title: doc.title, body: doc.body, tags: doc.tags })
+  mini.add({ id: doc.path, title: doc.title, dir: doc.dir ?? '', body: doc.body, tags: doc.tags })
 }
 
 mini = newIndex()
@@ -207,10 +266,17 @@ parentPort!.on('message', (msg: { type: string; [k: string]: unknown }) => {
       bodies.delete(p)
       break
     }
+    case 'configure': {
+      // 调参脚本用：只改查询期参数，不重建索引。缺的字段落回出厂值
+      const p = (msg.params ?? {}) as Partial<RankParams>
+      rank = { ...RANK_DEFAULTS, ...Object.fromEntries(Object.entries(p).filter(([, v]) => typeof v === 'number')) }
+      parentPort!.postMessage({ type: 'configured', params: rank })
+      break
+    }
     case 'search': {
       const q = msg.q as string
       // 总数取截断前的命中数：UI 要显示「20 / 共 137 条」，否则截断是静默的（M-13）
-      const { results: all, fuzzy } = runSearch(q)
+      const { results: all, fuzzy, dropped } = runSearch(q)
       const hits = all.slice(0, 20).map((r) => {
         const body = bodies.get(String(r.id)) ?? ''
         // 摘要定位：先按原串找，找不到再拿最长的查询词去找。
@@ -231,7 +297,7 @@ parentPort!.on('message', (msg: { type: string; [k: string]: unknown }) => {
           snippet: (from > 0 ? '…' : '') + body.slice(from, to).trim() + (to < body.length ? '…' : ''),
         }
       })
-      parentPort!.postMessage({ type: 'results', id: msg.id, hits, total: all.length, fuzzy })
+      parentPort!.postMessage({ type: 'results', id: msg.id, hits, total: all.length, fuzzy, dropped })
       break
     }
   }

@@ -290,6 +290,8 @@ async function main(): Promise<void> {
   const progress = (m: string): void => console.log(`[bench] ${m}`)
 
   const { vaultManager } = await import('./vault')
+  const { buildWikiPages, WIKI_PAGES_ENABLED } = await import('./vault/wiki-pages')
+  const { readVaultConfig } = await import('./vault/taxonomy')
   // 账本目录必须在 store 初始化（env-hooks 生效）之后取，并与 usage/index.ts 的 usageDir() 同源
   const userData = app.getPath('userData')
   const { agentManager, SEARCH_SHOWN_LIMIT } = await import('./agent')
@@ -356,6 +358,13 @@ async function main(): Promise<void> {
     const root = job.vaults[q.vault]
     if (!root) throw new Error(`题 ${q.id} 的库 "${q.vault}" 没有在 job.vaults 里给路径`)
     if (root !== openRoot) {
+      // 第二单：先建 wiki 主题页再开库——库副本上没跑过入库 run-end，主题页得在这里补出来，
+      // 与产品在真实入库后的形态一致；开库之后再建会撞 watcher 的写入去抖
+      if (WIKI_PAGES_ENABLED) {
+        const cfg0 = await readVaultConfig(root)
+        const w = await buildWikiPages(root, cfg0.library)
+        progress(`主题页：${w.topics} 个（新建 ${w.created}，敏感 ${w.sensitivePages}）→ ${w.dir}`)
+      }
       const { noteCount } = await vaultManager.open(root)
       openRoot = root
       progress(`打开库 ${q.vault}（${noteCount} 篇）：${root}`)
