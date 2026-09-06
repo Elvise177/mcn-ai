@@ -135,3 +135,11 @@ q8 权重 24 MB + tokenizer 1 MB，放 `resources/models/bge-small-zh-v1.5/`，�
 
 **合并方式定 channel（7+3）**：同 18 题 channel 召回 98% / 全命中 94%，rrf 89% / 69%；§4 里"RRF 会让语义噪音与精确命中同台"在 M-X4「班委」一题被现场抓到（4 份绩效档案挤掉真命中）。6+4 没试。
 **尺子修正**：bench 重放原只走关键词通道 → 合并抽成 `agent/merge.ts` 纯函数两侧共用，`--rereplay` 零花费重算。完整记录 `docs/RETRIEVAL-BENCH.md` §7、HANDOFF §0-新m。
+
+**第四单接着做的（2026-09-06，HANDOFF §0-新n）**：本方案 §7 里"索引"那一格当时只接到 vault watcher 上——
+入库落完文件靠 watcher 逐篇 upsert 补，进度条对它一无所知。第四单把它变成入库流程里可见的一格
+（`embed_index`，建卡之后、上云之前，`INBOX_STAGES` 8 → 9 格），并把"删除/重命名/换库时索引跟着变"
+与"索引文件不上云"全部落成断言。**本方案 §7 表里那条 `smoke:vault` 语义命中断言最终落在 `smoke:embed`**
+（它已经把模型加载起来了，而 `smoke:vault` 要外部真实库当参数）。
+§7 里挂着的"摘要增强"也在第四单里以最便宜的形式做了一半：不额外花打标钱，
+直接改 `03_tag_llm` 的 summary 口径（"这份文档能回答什么问题"），**只对以后入库的文档生效**。
