@@ -41,6 +41,22 @@ export interface SemanticHit {
   score: number
 }
 
+/** 一次增量/全量同步的结果（入库尾部那一格与设置页「重建」按钮都拿它说话） */
+export interface EmbedSyncResult {
+  ok: boolean
+  /** 本次重算的篇数（新增 + 内容变了的） */
+  added: number
+  /** 本次从索引里剔掉的篇数（删除 / 移出库 / 重命名的旧名） */
+  removed: number
+  /** 同步后索引里一共有多少篇 */
+  count: number
+  ms: number
+  /** ok=false 时的人话原因；skipped 时说明为什么没跑 */
+  reason?: string
+  /** 'disabled' | 'no-vault'：压根没跑，不算失败 */
+  skipped?: 'disabled' | 'no-vault'
+}
+
 /** 语料文本：标题 + 摘要；无摘要（老库 / 实体卡 / MOC）补正文前 200 字。≤400 字 */
 export function corpusText(note: VaultNote, raw: string): string {
   const fm = note.frontmatter ?? {}
@@ -80,6 +96,14 @@ export class EmbedIndex {
   /** 建完之后要处理的增量（watcher 在建索引期间来的 upsert/remove 排队） */
   private pendingUpserts = new Map<string, { note: VaultNote; raw: string } | null>()
   private unloadTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * 换库代号（第四单）。**没有它，换库时上一个库的向量会落进新库的索引里**：
+   * `open()` 是"立即返回、后台接着算"的，换库时旧库那一轮 build 还在 batch 循环里，
+   * 而 `setEntry` 写的是 `this.meta`——那时 `this.meta` 已经是新库的了。
+   * 于是新库的 `.mcnai/embeddings` 里混进上一个库的笔记路径，检索会摆出根本不存在的文件。
+   * 每次 open/close 都 +1，跑着的那一轮每批检查一次，代号变了立刻收手（不落盘、不改状态）。
+   */
+  private gen = 0
   /** 用户在设置页关掉语义通道 */
   enabled = true
 
@@ -102,6 +126,7 @@ export class EmbedIndex {
    * `notes`/`bodies` 与 searcher.rebuild 用的是同一份快照。
    */
   open(root: string, notes: Map<string, VaultNote>, bodies: Map<string, string>): void {
+    this.gen++
     this.root = root
     this.meta = { model: MODEL_ID, dim: EMBED_DIM, entries: [] }
     this.vectors = []
@@ -114,6 +139,7 @@ export class EmbedIndex {
     this.state = 'building'
     this.reason = undefined
     this.building = this.build(notes, bodies)
+      .then(() => undefined)
       .catch((e) => {
         this.state = 'unavailable'
         this.reason = e instanceof Error ? e.message : String(e)
@@ -142,7 +168,34 @@ export class EmbedIndex {
     }
   }
 
-  private async persist(): Promise<void> {
+  /**
+   * 落盘串行队列（第四单 2026-09-06 被 smoke 逮到的真 bug）。
+   *
+   * `persist()` 是 write-tmp → rename 两步，而调用它的路有三条：建索引末尾、单篇 upsert、
+   * 单篇 remove（后两条还是 `void` 出去的）。三条路并发时**两个 persist 会抢同一个 `.tmp`**：
+   * 先跑完的那个把 tmp 改名走了，后一个的 rename 直接 `ENOENT`。
+   * 现场是删一篇（remove 的 `void persist()`）紧接着一次批量 sync——索引同步整个报失败，
+   * 而在此之前那条 `void` 会把它变成一次静默的 unhandled rejection。
+   *
+   * 两道措施都要：**队列**保证同一时刻只有一个 persist 在跑；**tmp 名带序号**保证
+   * 万一还有别的进程/实例在写同一个库，也不会互相抢（同一份库被两个实例打开是真发生过的事）。
+   */
+  private persistChain: Promise<void> = Promise.resolve()
+  private persistSeq = 0
+
+  /** 把一件"要动索引目录的活"排进队列，保证同一时刻只有一个在跑 */
+  private queue(job: () => Promise<void>): Promise<void> {
+    const next = this.persistChain.catch(() => undefined).then(job)
+    // 链上不留失败态：下一次该照常跑（这一次的失败由它自己的调用方处理）
+    this.persistChain = next.catch(() => undefined)
+    return next
+  }
+
+  private persist(): Promise<void> {
+    return this.queue(() => this.writeIndexFiles())
+  }
+
+  private async writeIndexFiles(): Promise<void> {
     if (!this.root) return
     await fs.mkdir(this.dir(), { recursive: true })
     const all = new Float32Array(this.vectors.length * EMBED_DIM)
@@ -150,10 +203,36 @@ export class EmbedIndex {
     // 先写临时文件再改名：建索引中途被关机不能留半个 .bin 配一个完整的 .json
     const bin = join(this.dir(), `${MODEL_ID}.bin`)
     const metaPath = join(this.dir(), `${MODEL_ID}.json`)
-    await fs.writeFile(bin + '.tmp', Buffer.from(all.buffer, all.byteOffset, all.byteLength))
-    await fs.writeFile(metaPath + '.tmp', JSON.stringify(this.meta))
-    await fs.rename(bin + '.tmp', bin)
-    await fs.rename(metaPath + '.tmp', metaPath)
+    const tmp = `.tmp-${process.pid}-${++this.persistSeq}`
+    await fs.writeFile(bin + tmp, Buffer.from(all.buffer, all.byteOffset, all.byteLength))
+    await fs.writeFile(metaPath + tmp, JSON.stringify(this.meta))
+    await fs.rename(bin + tmp, bin)
+    await fs.rename(metaPath + tmp, metaPath)
+  }
+
+  /**
+   * 换模型之后把上一个模型的索引文件删掉。
+   *
+   * 换模型走的是"整体重建"（`loadStored` 认出 `meta.model` 不一致就当没有旧索引），
+   * 但旧的 `<老模型>.bin/.json` **会永远躺在用户库里**——每换一次模型多一份，
+   * 谁都不会去看那个隐藏目录。文件名里带模型 id 正是为了能这样识别，
+   * 所以顺手清掉：只删这个目录里我们自己写的、模型 id 不是当前这个的那几个。
+   */
+  private async pruneOtherModels(): Promise<void> {
+    try {
+      for (const name of await fs.readdir(this.dir())) {
+        // 上次写到一半被关机留下的临时文件也一起收掉（正常路径写完就 rename 走了）
+        const stale = /\.tmp-\d+-\d+$/.test(name)
+        if (!stale) {
+          if (name.startsWith(MODEL_ID)) continue
+          if (!name.endsWith('.bin') && !name.endsWith('.json')) continue
+        }
+        await fs.rm(join(this.dir(), name), { force: true })
+        log('info', 'embed', `清掉${stale ? '残留的临时' : '上一个模型的'}索引文件：${name}`)
+      }
+    } catch {
+      /* 目录读不了就算了：这只是清理，不该拖垮建索引 */
+    }
   }
 
   private async ensureEmbedder(): Promise<Embedder> {
@@ -199,36 +278,73 @@ export class EmbedIndex {
     this.byPath = new Map(this.meta.entries.map((e, k) => [e.path, k]))
   }
 
-  private async build(notes: Map<string, VaultNote>, bodies: Map<string, string>): Promise<void> {
+  /**
+   * 索引与「当前这份笔记集合」对齐。
+   *
+   * **判据是集合差 + 语料内容哈希，不是 mtime**（第四单，2026-09-06）：
+   * pipeline 落文件、实体建卡、上云回写都会动 mtime，而其中大多数动的是与语料无关的部分
+   * （正文改了但标题/摘要没改）；反过来 rsync 拷进来的库 mtime 全是新的，按 mtime 判就是整库重算。
+   * 集合差还顺带把**删除/移出库/重命名的旧名**一次清干净——那是 mtime 永远给不出的信息。
+   *
+   * @param load  true = 先从盘上读回旧索引（开库时）；false = 拿内存里这份接着增量（入库尾段/手动重建）
+   */
+  private async build(
+    notes: Map<string, VaultNote>,
+    bodies: Map<string, string>,
+    opts: { load: boolean; onProgress?: (done: number, total: number) => void } = { load: true }
+  ): Promise<EmbedSyncResult> {
     const t0 = Date.now()
-    await this.loadStored()
+    const gen = this.gen
+    if (opts.load) await this.loadStored()
+    if (gen !== this.gen) return { ok: true, added: 0, removed: 0, count: 0, ms: 0, skipped: 'no-vault', reason: '已换库' }
     // 目标集合：当前笔记；旧索引里已经不存在的路径剔掉
     const want = new Map<string, { hash: string; text: string }>()
     for (const [path, note] of notes) {
       const text = corpusText(note, bodies.get(path) ?? '')
       want.set(path, { hash: sha1(text), text })
     }
-    for (const e of [...this.meta.entries]) if (!want.has(e.path)) this.removeEntry(e.path)
+    let removed = 0
+    for (const e of [...this.meta.entries]) {
+      if (!want.has(e.path)) {
+        this.removeEntry(e.path)
+        removed++
+      }
+    }
     const todo = [...want].filter(([path, w]) => this.meta.entries[this.byPath.get(path) ?? -1]?.hash !== w.hash)
     this.total = want.size
     if (!todo.length) {
+      // 只有剔除、没有新算：也要落盘，否则删掉的文件重启后又从 .bin 里冒回来
+      if (removed) await this.persist()
       this.state = this.meta.entries.length ? 'ready' : 'empty'
       this.lastBuildMs = Date.now() - t0
-      return
+      opts.onProgress?.(0, 0)
+      return { ok: true, added: 0, removed, count: this.meta.entries.length, ms: this.lastBuildMs }
     }
+    opts.onProgress?.(0, todo.length)
     const embedder = await this.ensureEmbedder()
     const BATCH = 16
     for (let i = 0; i < todo.length; i += BATCH) {
+      // 换库了就立刻收手：这一轮的向量属于上一个库，写进去就是污染（见 gen 的注释）
+      if (gen !== this.gen) {
+        log('info', 'embed', `建索引中途换库，本轮丢弃（已算 ${i} 篇）`)
+        return { ok: true, added: 0, removed: 0, count: 0, ms: Date.now() - t0, skipped: 'no-vault', reason: '已换库' }
+      }
       const batch = todo.slice(i, i + BATCH)
       const vecs = await embedder.embed(batch.map(([, w]) => w.text))
+      // 推理这一下也是个 await：换库可能正好落在里面，写之前再验一次代号
+      if (gen !== this.gen) continue
       batch.forEach(([path, w], k) => this.setEntry(path, w.hash, vecs[k]))
+      opts.onProgress?.(Math.min(i + BATCH, todo.length), todo.length)
       // 每批让出事件循环：建索引与入库、检索、界面同时跑，不许独占
       await new Promise((r) => setImmediate(r))
     }
+    if (gen !== this.gen) return { ok: true, added: 0, removed: 0, count: 0, ms: Date.now() - t0, skipped: 'no-vault', reason: '已换库' }
     await this.persist()
+    // 清理也排进落盘队列：它会删 `.tmp-*`，而并发的 persist 正指望自己那个 tmp 还在
+    await this.queue(() => this.pruneOtherModels())
     this.lastBuildMs = Date.now() - t0
     this.state = 'ready'
-    log('info', 'embed', `语义索引就绪：${this.meta.entries.length} 篇（本次补算 ${todo.length}，${this.lastBuildMs} ms）`)
+    log('info', 'embed', `语义索引就绪：${this.meta.entries.length} 篇（本次补算 ${todo.length}，剔除 ${removed}，${this.lastBuildMs} ms）`)
     this.scheduleUnload()
     // 建索引期间排队的增量
     const pend = [...this.pendingUpserts]
@@ -237,6 +353,57 @@ export class EmbedIndex {
       if (v) await this.upsert(v.note, v.raw)
       else this.remove(path)
     }
+    return { ok: true, added: todo.length, removed, count: this.meta.entries.length, ms: this.lastBuildMs }
+  }
+
+  /**
+   * 入库尾段那一格（`embed_index`）与设置页「重建」按钮的入口：**等得到结果**的同步。
+   *
+   * 与 `open()` 的区别只有两点：等（调用方要报进度、要把结果写进阶段事件）、
+   * 不重读盘上的旧索引（内存里那份就是最新的）。模型加载失败时**不吞**——
+   * 回一条 `ok:false` + 人话原因，由调用方响亮地说出来（Q13 的教训：不许无条件报成功）。
+   */
+  async sync(
+    notes: Map<string, VaultNote>,
+    bodies: Map<string, string>,
+    onProgress?: (done: number, total: number) => void,
+    /** true = 设置页那颗「重建索引」：先把旧向量整个丢掉，全部重算（索引坏了/口径变了的出口） */
+    full = false
+  ): Promise<EmbedSyncResult> {
+    const empty = { added: 0, removed: 0, count: this.meta.entries.length, ms: 0 }
+    if (!this.enabled) return { ok: true, ...empty, skipped: 'disabled', reason: '语义检索已在设置里关闭' }
+    if (!this.root) return { ok: true, ...empty, skipped: 'no-vault', reason: '还没有打开知识库' }
+    // 开库那一轮可能还在跑（400 篇约 2 秒）：等它，别两个 build 同时改同一份 meta
+    if (this.building) await this.building.catch(() => undefined)
+    if (full) {
+      this.meta = { model: MODEL_ID, dim: EMBED_DIM, entries: [] }
+      this.vectors = []
+      this.byPath.clear()
+    }
+    this.state = 'building'
+    this.reason = undefined
+    let out: EmbedSyncResult = { ok: false, ...empty }
+    this.building = this.build(notes, bodies, { load: false, onProgress })
+      .then((r) => {
+        out = r
+      })
+      .catch((e) => {
+        const reason = e instanceof Error ? e.message : String(e)
+        this.state = 'unavailable'
+        this.reason = reason
+        out = { ok: false, ...empty, count: this.meta.entries.length, reason }
+        log('error', 'embed', `语义索引同步失败：${reason}`)
+      })
+      .finally(() => {
+        this.building = null
+      })
+    await this.building
+    return out
+  }
+
+  /** 后台还在建的那一半：入库尾段超时放行后，调用方拿它接着等（不 await 也不会漏落盘） */
+  get inFlight(): Promise<void> | null {
+    return this.building
   }
 
   async upsert(note: VaultNote, raw: string): Promise<void> {
@@ -248,8 +415,11 @@ export class EmbedIndex {
     const text = corpusText(note, raw)
     const hash = sha1(text)
     if (this.meta.entries[this.byPath.get(note.path) ?? -1]?.hash === hash) return
+    const gen = this.gen
     try {
       const [vec] = await (await this.ensureEmbedder()).embed([text])
+      // 加载模型 + 推理之间可能已经换库了（同 build 里那道闸门）
+      if (gen !== this.gen) return
       this.setEntry(note.path, hash, vec)
       await this.persist()
       this.state = 'ready'
@@ -267,7 +437,11 @@ export class EmbedIndex {
     }
     if (this.byPath.has(path)) {
       this.removeEntry(path)
-      void this.persist()
+      // 落盘失败要**说出来**：这条路原来是裸 `void`，失败时只有一次静默的 unhandled rejection，
+      // 而后果是删掉的文件重启后从 .bin 里复活、继续被摆到模型面前
+      this.persist().catch((e) =>
+        log('warn', 'embed', `剔除《${path}》后落盘失败（重启后可能复活）：${e instanceof Error ? e.message : String(e)}`)
+      )
     }
   }
 
@@ -287,6 +461,7 @@ export class EmbedIndex {
   }
 
   async close(): Promise<void> {
+    this.gen++ // 跑着的那一轮 build 从这一刻起作废，别让它把向量写进下一个库
     if (this.unloadTimer) clearTimeout(this.unloadTimer)
     this.unloadTimer = null
     await this.embedder?.unload()

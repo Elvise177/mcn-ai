@@ -11,6 +11,17 @@ interface EmbedStatus {
   lastBuildMs?: number
 }
 
+/** 一次索引同步的结果（第四单；与主进程 vault/embed-index.ts 的 EmbedSyncResult 同形） */
+interface EmbedSyncResult {
+  ok: boolean
+  added: number
+  removed: number
+  count: number
+  ms: number
+  reason?: string
+  skipped?: 'disabled' | 'no-vault'
+}
+
 interface AiTier {
   id: TierId
   /** 「标准（推荐）」/「增强」 */
@@ -442,6 +453,8 @@ interface Window {
       graph: () => Promise<GraphData>
       search: (q: string) => Promise<SearchResult>
       embedStatus: () => Promise<EmbedStatus>
+      /** 设置页「重建索引」：整个丢掉重算（第四单） */
+      rebuildEmbedIndex: () => Promise<EmbedSyncResult>
       read: (relPath: string) => Promise<NoteContent>
       resolveLink: (target: string) => Promise<string | null>
       readRaw: (relPath: string) => Promise<string>

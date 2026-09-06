@@ -6080,7 +6080,36 @@ try {
         on = await win.evaluate(() => window.api.vault.embedStatus())
       }
       if (on.state !== 'ready') throw new Error(`重新打开后状态是 ${on.state}（${on.reason ?? ''}），索引没回来`)
-      console.log('第三单 语义检索区 ✓', JSON.stringify({ count: ipc.count, lastBuildMs: ipc.lastBuildMs }))
+
+      /**
+       * 第四单（2026-09-06）：「重建索引」按钮。**真点一次并验结果状态**，不是看它长在那儿——
+       * 它整个丢掉重算，所以跑完 count 必须回到同一个数（少了 = 有笔记没被重新收进来），
+       * 且 toast 必须报出来（Q13：不许无条件报成功，更不许静默）。先做命中测试
+       * （「看得见」≠「点得到」——它跟状态行同一行，很容易被挤出去）。
+       */
+      const rebuild = win.locator('[data-testid="semantic-rebuild"]')
+      if (!(await rebuild.count())) throw new Error('语义检索区没有「重建索引」按钮')
+      const rHit = await rebuild.evaluate((el) => {
+        const r = el.getBoundingClientRect()
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+        return el.contains(top) || top === el ? '' : top?.className || 'null'
+      })
+      if (rHit) throw new Error(`「重建索引」被挡住/裁掉，命中的是 ${rHit}`)
+      const before = await win.evaluate(() => window.api.vault.embedStatus())
+      await rebuild.click()
+      const toastText = await win
+        .locator('[data-testid="toast"]', { hasText: '语义索引' })
+        .first()
+        .innerText({ timeout: 120_000 })
+      if (!/已重建/.test(toastText)) throw new Error(`重建索引没报成功：「${toastText.replace(/\s+/g, '')}」`)
+      const afterRebuild = await win.evaluate(() => window.api.vault.embedStatus())
+      if (afterRebuild.state !== 'ready' || afterRebuild.count !== before.count)
+        throw new Error(`重建后对不上：${before.count} → ${afterRebuild.count}（state=${afterRebuild.state} ${afterRebuild.reason ?? ''}）`)
+      await snap('71b-语义检索-重建索引完成', 200)
+      console.log(
+        '第三/四单 语义检索区 ✓',
+        JSON.stringify({ count: ipc.count, lastBuildMs: ipc.lastBuildMs, 重建后: afterRebuild.count, toast: toastText.replace(/\s+/g, '') })
+      )
     }
 
     /**

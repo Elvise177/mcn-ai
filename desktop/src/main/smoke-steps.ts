@@ -298,6 +298,30 @@ console.log('\n【10】上游标识符不许被当成文件名（走查现场抓
   // ④ 一个文件都没有时不许出现「第 1/0 篇」这种话
   const zero = computeInboxProgress([stage('pii_guard')], { done: 0, total: 0 })
   check('总数为 0 时不显示荒唐篇数', !/\/0 篇/.test(zero.label), zero.label)
+
+  /**
+   * ⑤ 语义索引那一格（第四单，2026-09-06）。
+   *
+   * **分母从阶段表取，不在断言里抄一个数**——走查那条完成态判据就是栽在写死 `/6\/6/` 上的
+   * （6→7→8→9 一路踩过来，见 walkthrough.mjs 里那段注释）。这里验的是三件事：
+   * 它真的在流程里、位置对（建卡之后 / 上云之前）、走到它的时候标签与序号都对得上。
+   */
+  const iEmbed = INBOX_STAGES.indexOf('embed_index')
+  check('embed_index 在主流程里', iEmbed >= 0)
+  check(
+    'embed_index 排在建卡之后、上云之前',
+    iEmbed > INBOX_STAGES.indexOf('build_cards') && iEmbed < INBOX_STAGES.indexOf('cloud_sync'),
+    INBOX_STAGES.join(' → ')
+  )
+  const atEmbed = computeInboxProgress(
+    INBOX_STAGES.slice(0, iEmbed + 1).map((s) => stage(s)),
+    null
+  )
+  check('走到语义索引这一格：标签是它的用户词', atEmbed.label === stageLabel('embed_index'), atEmbed.label)
+  check('走到语义索引这一格：序号与分母都从阶段表来', atEmbed.done === iEmbed + 1 && atEmbed.total === INBOX_STAGES.length, `${atEmbed.done}/${atEmbed.total}`)
+  // 它失败/跳过时**不许**把整轮拖成"没跑完"：上云仍然是最后一格，分母不变
+  const full = computeInboxProgress(INBOX_STAGES.map((s) => stage(s)), null)
+  check('跑满全部阶段 = done 等于分母', full.done === full.total && full.total === INBOX_STAGES.length, `${full.done}/${full.total}`)
 }
 
 

@@ -5,6 +5,7 @@ import { shell } from 'electron'
 import chokidar, { FSWatcher } from 'chokidar'
 import { store, getLlmKey } from '../store'
 import { buildEntityCards } from '../vault/entity-cards'
+import { vaultManager } from '../vault'
 import { buildWikiPages, WIKI_PAGES_ENABLED } from '../vault/wiki-pages'
 import { readVaultConfig } from '../vault/taxonomy'
 import { ingestNote } from '../knowledge/client'
@@ -64,6 +65,15 @@ const JUNK_DIRS = new Set(['node_modules', 'venv', '.venv', '.git', '__MACOSX', 
  */
 const MAX_DEPTH = 10
 const MAX_FILES = 500
+
+/**
+ * 语义索引那一格的墙钟预算（第四单）。超了就报"剩余在后台继续"往下走。
+ *
+ * 60 秒的来历：方案 §1 的三档机器估算里，Intel 8G 首建 1000 篇是 15–30 s，
+ * 而"慢于 60 s 就改成分片续建"本来就是那张表里写好的闸门。这里把它落成代码——
+ * 真有机器超了，日志里会有一行，那就是该动工分片的信号。
+ */
+const EMBED_STAGE_BUDGET_MS = 60_000
 
 /** `enqueue` 的结果。**不能只回一个数字**——「0 个」和「跳过了 20 个不支持的格式」得分得开 */
 export interface EnqueueResult {
@@ -913,6 +923,84 @@ export class InboxOrchestrator {
     }
   }
 
+  /**
+   * 语义索引（第四单，2026-09-06）：入库尾段的一格，跑在建卡之后、上云之前。
+   *
+   * **为什么要有这一格**：在这之前它完全靠 vault watcher 的 upsert 逐篇补——
+   * 一批 100 篇就是 100 次单篇推理 + 100 次全量落盘（`persist()` 每次重写整个 .bin），
+   * 而进度条对它一无所知：界面写着"投递箱处理完成"，索引其实还在后台慢慢补，
+   * 用户这时候提问拿到的是关键词档。现在整批一次算完、进度看得见。
+   *
+   * **本批判定用集合差 + 语料哈希，不用 mtime**：判据在 `EmbedIndex.build` 里，理由见那边的注释。
+   *
+   * **超时放行**：给 `EMBED_STAGE_BUDGET_MS` 的墙钟预算，超了就把这一格报成"剩余在后台继续"
+   * 然后往下走。索引是检索的加速层，不该把上云和"处理完成"卡在它后面
+   * （Intel 旧机首建估 15–30 s，这条是给那台机器留的出口）。
+   *
+   * **失败必须响亮**（Q13 的教训：不许无条件报成功）：模型加载不起来时这一格是 warn +
+   * 原样的原因，日志落 error，设置页状态行同步变「不可用：原因——已退回关键词检索」。
+   * 用 warn 不用 error 是**故意的**：整轮入库并没有失败，把任务条画成红的会让用户
+   * 以为资料没进来（而它们都进来了，只是语义通道这一次没建成）。
+   */
+  private async embedIndexStage(root: string, taskId: string): Promise<void> {
+    const t0 = Date.now()
+    let last = 0
+    try {
+      const budget = new Promise<'timeout'>((r) => {
+        const t = setTimeout(() => r('timeout'), EMBED_STAGE_BUDGET_MS)
+        t.unref?.()
+      })
+      const job = vaultManager.syncEmbedIndex(root, (done, total) => {
+        // 分批进度也发阶段事件：面板把连续同阶段折成一行并显示 message（同上云分批那条路）
+        if (!total || done === last) return
+        last = done
+        this.send({ type: 'stage', stage: 'embed_index', status: 'ok', message: `${done}/${total} 篇` }, taskId)
+      })
+      const r = await Promise.race([job, budget])
+      if (r === 'timeout') {
+        this.send(
+          {
+            type: 'stage',
+            stage: 'embed_index',
+            status: 'ok',
+            message: `已建 ${last} 篇，剩余在后台继续（不挡后面的步骤）`,
+          },
+          taskId
+        )
+        log('info', 'inbox', `语义索引超过 ${EMBED_STAGE_BUDGET_MS / 1000}s 预算，转后台继续`)
+        return
+      }
+      if (r.skipped) {
+        this.send({ type: 'stage', stage: 'embed_index', status: 'skipped', message: r.reason ?? '未启用' }, taskId)
+        return
+      }
+      if (!r.ok) {
+        log('error', 'inbox', `语义索引没建成：${r.reason ?? '未知原因'}`)
+        this.send(
+          {
+            type: 'stage',
+            stage: 'embed_index',
+            status: 'warn',
+            message: `没建成：${r.reason ?? '未知原因'}——检索已退回关键词档，资料照常入库`,
+          },
+          taskId
+        )
+        return
+      }
+      const bits = [`共 ${r.count} 篇`]
+      if (r.added) bits.push(`本批新算 ${r.added}`)
+      if (r.removed) bits.push(`剔除已删 ${r.removed}`)
+      this.send(
+        { type: 'stage', stage: 'embed_index', status: 'ok', message: `${bits.join('，')}（${((Date.now() - t0) / 1000).toFixed(1)} 秒）` },
+        taskId
+      )
+    } catch (e) {
+      // 这一格塌了也不该拖垮入库：报出来，接着上云
+      log('error', 'inbox', `语义索引阶段异常：${e}`)
+      this.send({ type: 'stage', stage: 'embed_index', status: 'warn', message: `没建成：${String(e).slice(0, 120)}` }, taskId)
+    }
+  }
+
   /** 资料库目录名：与 pipeline 的 `cli.py` 同一套判据（配置 → 老库探测 → 出厂值） */
   private async libraryName(root: string): Promise<string> {
     return (await readVaultConfig(root)).library
@@ -1183,9 +1271,13 @@ export class InboxOrchestrator {
      */
     const usageEvents = [...this.runUsage]
 
-    // 建卡 → 上云。顺序不能反：新卡也要上云，而敏感继承卡必须在上云前就被识别出来。
+    // 建卡 → 语义索引 → 上云。顺序不能反：
+    //  · 新卡也要上云，而敏感继承卡必须在上云前就被识别出来
+    //  · 语义索引要吃到这一批新建的实体卡（卡是语料的一类），所以排在建卡之后
+    //  · 语义索引是本地检索的一部分，不该被"网不好的上云"挡在后面，所以排在上云之前
     // **只对快照的 root 做**：换库后 this.vaultRoot 已是新库，对新库跑建卡/上云就是 bug#10 的另一半
     const sensitiveCards = ok && !this.canceledBy ? await this.buildCards(root, taskId) : []
+    if (ok && !this.canceledBy) await this.embedIndexStage(root, taskId)
     // 被停掉的那一轮不再上云：半截结果没必要推到云端，也别让用户多等一次网络往返
     if (ok && !this.canceledBy) await this.cloudSync(root, runStart, sensitiveCards, taskId)
 

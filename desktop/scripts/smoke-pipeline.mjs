@@ -366,6 +366,45 @@ setTimeout(() => process.exit(0), 120000)
   }
 }
 
+/**
+ * 【8】**冻结产物里的打标提示词 = 黄金母本**（2026-09-06，检索第四单）。
+ *
+ * 在这之前"打标口径没漂"只有源码侧守着：`smoke:taxonomy` 跑的是 pkb-pipeline 仓库里的
+ * `python3 taxonomy.py --prompt`。而客户机上跑的是**这个冻结二进制**，`taxonomy.py`
+ * 打进 PYZ 之后从外面读不到——于是"改了源码但忘了重新冻结 / 冻结了但忘了拷进 resources"
+ * 这一整类事故对所有测试都是隐形的：源码侧全绿，客户拿到的还是上一版口径。
+ * 03b 漏进 `datas` 那次就是同一个形态（只有打包形态才炸、而且要真跑才炸）。
+ *
+ * 现在 cli.py 有 `--print-prompt`（只打印、不写盘、不调 LLM），这里拿它的输出比母本。
+ * **母本从磁盘读，不在这儿抄一份**；两边都变了才可能一起绿，那就是有人真的改了口径。
+ */
+console.log('\n【8】冻结产物的打标口径 = 黄金母本（源码绿不代表包里是新的）')
+{
+  const goldenPath = join(ROOT, 'e2e/golden/tag-prompt-mcn.txt')
+  const V3 = join(tmpdir(), `mcnai-pipe-prompt-${process.pid}`)
+  rmSync(V3, { recursive: true, force: true })
+  mkdirSync(V3, { recursive: true })
+  try {
+    const golden = readFileSync(goldenPath, 'utf8')
+    // 空库 = 没有 layout.json = MCN 预设，与母本同一个前提
+    const got = execFileSync(BIN, ['--vault', V3, '--print-prompt'], { encoding: 'utf8', timeout: 60_000 })
+    if (got === golden) ok(`逐字节相同（${golden.length} 字）`)
+    else {
+      const a = golden.split('\n')
+      const b = got.split('\n')
+      const i = a.findIndex((l, n) => l !== b[n])
+      fail(
+        '冻结产物的提示词与母本不一致——多半是改了 pkb-pipeline 却没重新冻结/没拷进 resources/pipeline',
+        `第 ${i + 1} 行\n        母本=${a[i]}\n        包里=${b[i]}`
+      )
+    }
+  } catch (e) {
+    fail('冻结产物不支持 --print-prompt（resources/pipeline 是旧的？）', String(e).slice(0, 200))
+  } finally {
+    rmSync(V3, { recursive: true, force: true })
+  }
+}
+
 rmSync(V, { recursive: true, force: true })
 console.log(bad === 0 ? '\n✅ pipeline 冒烟全部通过\n' : `\n❌ ${bad} 条不通过\n`)
 process.exit(bad === 0 ? 0 : 1)

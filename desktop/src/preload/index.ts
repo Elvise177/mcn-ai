@@ -65,6 +65,7 @@ const api = {
     graph: () => ipcRenderer.invoke('vault:graph'),
     search: (q: string) => ipcRenderer.invoke('vault:search', q),
     embedStatus: () => ipcRenderer.invoke('vault:embedStatus'),
+    rebuildEmbedIndex: () => ipcRenderer.invoke('vault:rebuildEmbedIndex'),
     read: (relPath: string) => ipcRenderer.invoke('vault:read', relPath),
     resolveLink: (target: string) => ipcRenderer.invoke('vault:resolveLink', target),
     readRaw: (relPath: string) => ipcRenderer.invoke('vault:readRaw', relPath),

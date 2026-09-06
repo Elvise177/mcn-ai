@@ -95,12 +95,24 @@ rmSync(USERDATA, { recursive: true, force: true })
 rmSync(VAULT, { recursive: true, force: true })
 mkdirSync(USERDATA, { recursive: true })
 
+/**
+ * `MCNAI_APP_BIN` 指过去就是**验打包形态**（与 `e2e/fresh-install.mjs` 同一个开关）。
+ *
+ * 为什么这条脚本也要能验包：入库尾段的「语义索引」那一格跑的是 onnxruntime-node
+ * 这个原生模块 —— 它在开发目录里从 node_modules 直接加载，在包里却要躺在
+ * `asar.unpacked` 且被签名。**开发形态跑通不能证明包里跑得起来**，
+ * 而这一整类事故（第 2 批的 `03b` 漏进 datas）只有打包形态才炸、还得真跑一轮才炸。
+ * 发版前照 RELEASE.md §B 第 4 步跑一次：
+ *   MCNAI_APP_BIN="$PWD/release/mac-arm64/SamePage.app/Contents/MacOS/SamePage" node e2e/a1-enqueue.mjs
+ */
+const APP_BIN = process.env.MCNAI_APP_BIN
 const app = await electron.launch({
-  executablePath: join(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'),
-  args: [root],
+  executablePath: APP_BIN || join(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'),
+  args: APP_BIN ? [] : [root],
   env: { ...process.env, MCNAI_USER_DATA: USERDATA, MCNAI_VAULT: VAULT, NODE_ENV: 'production' },
   timeout: 60000,
 })
+say(APP_BIN ? `形态：打包产物 ${APP_BIN}` : '形态：开发目录（发版前另用 MCNAI_APP_BIN 跑一次包）')
 const win = await app.firstWindow()
 await win.waitForLoadState('domcontentloaded')
 
@@ -294,6 +306,70 @@ const rate = hit + misses.length ? (hit / (hit + misses.length)) * 100 : 0
 say(`落位比对：命中 ${hit}　不一致 ${misses.length}　非源文件笔记 ${skipped}　→ 一致率 ${rate.toFixed(1)}%`)
 misses.slice(0, 8).forEach((m) => console.log('  ✗ ' + m))
 if (rate < 100) fail(`落位一致率 ${rate.toFixed(1)}%，低于 100%`)
+
+/**
+ * ---- ⑥ 语义索引这一格真的跑了，而且跑完索引与库是对得上的（第四单，2026-09-06）----
+ *
+ * 为什么在这条脚本里验：它是唯一一条**真跑完整入库链路**的零花费走查（`--skip-llm`），
+ * 而语义索引正是入库尾段新加的一格。第 2 批的 `03b` 漏项教训就是"某一格在开发形态跑得好好的、
+ * 打包形态压根没执行"——那一层由打包冒烟守；这一层守的是"它在流程里、跑完了、结果对"。
+ *
+ * 三条断言，都**从另一侧取真值**，不在这儿抄常量：
+ *   ① `embed_index` 出现在任务对象的 stages 里（阶段真的走到了，不是代码写了没接上）
+ *   ② 索引条数 == 文件树里的笔记数（两侧各走各的路：树来自 watcher 维护的内存索引，
+ *      索引来自尾段那次全库重扫。对不上就说明有笔记漏进索引，或索引里留着已经没有的文件）
+ *   ③ 状态是 ready 且不带失败原因（Q13：不许把"没建成"糊成"已就绪"）
+ */
+{
+  const stages = await win.evaluate(async () => {
+    const snap = await window.api.tasks.list()
+    const t = (snap.tasks ?? []).find((x) => x.kind === 'inbox')
+    return (t?.stages ?? []).map((e) => ({ stage: e.stage, status: e.status, message: e.message }))
+  })
+  const embedEvents = stages.filter((e) => e.stage === 'embed_index')
+  if (!embedEvents.length)
+    fail(`入库跑完了，却没有「语义索引」这一格的阶段事件——它没接进 run()。实得阶段：${[...new Set(stages.map((e) => e.stage))].join(' ')}`)
+  say(`语义索引阶段事件 ${embedEvents.length} 条，末条：${JSON.stringify(embedEvents[embedEvents.length - 1])}`)
+  const bad = embedEvents.find((e) => e.status === 'error' || e.status === 'warn')
+  if (bad) fail(`语义索引这一格没跑成：${bad.status} ${bad.message}`)
+
+  // 笔记数从文件树取（另一侧），索引数从 embedStatus 取；watcher 有 800ms 去抖，给它 30 秒收敛
+  const countTreeNotes = () =>
+    win.evaluate(async () => {
+      const walk = (ns) => ns.reduce((n, x) => n + (x.children ? walk(x.children) : x.path.endsWith('.md') ? 1 : 0), 0)
+      return walk(await window.api.vault.tree())
+    })
+  let treeNotes = 0
+  let st = null
+  for (let i = 0; i < 60; i++) {
+    treeNotes = await countTreeNotes()
+    st = await win.evaluate(() => window.api.vault.embedStatus())
+    if (st.state === 'ready' && st.count === treeNotes) break
+    await win.waitForTimeout(500)
+  }
+  if (st.state !== 'ready') fail(`语义索引状态是 ${st.state}（${st.reason ?? '无原因'}），不是 ready`)
+  if (st.count !== treeNotes)
+    fail(`索引条数与库里的笔记数对不上：索引 ${st.count}，文件树 ${treeNotes}（差 ${st.count - treeNotes}）`)
+  say(`语义索引 ✓ ${st.count} 条 == 文件树 ${treeNotes} 篇，state=${st.state}，上次耗时 ${(st.lastBuildMs ?? 0) / 1000}s`)
+
+  // 删一篇 → 向量同步剔除（GUI 那条路：deleteNote 显式 remove + watcher unlink 兜底）
+  const victim = await win.evaluate(async () => {
+    const walk = (ns) => ns.flatMap((x) => (x.children ? walk(x.children) : x.path.endsWith('.md') ? [x.path] : []))
+    const all = walk(await window.api.vault.tree())
+    const p = all[0]
+    await window.api.vault.deleteNote(p)
+    return p
+  })
+  let after = null
+  for (let i = 0; i < 40; i++) {
+    after = await win.evaluate(() => window.api.vault.embedStatus())
+    if (after.count === st.count - 1) break
+    await win.waitForTimeout(500)
+  }
+  if (after.count !== st.count - 1)
+    fail(`删了《${victim}》，索引条数没跟着掉：删前 ${st.count}，现在 ${after.count}`)
+  say(`删除同步 ✓ 删《${victim}》→ 索引 ${st.count} → ${after.count}`)
+}
 
 await Promise.race([app.close(), new Promise((res) => setTimeout(res, 15000))])
 say('投递链路验收通过 ✓')

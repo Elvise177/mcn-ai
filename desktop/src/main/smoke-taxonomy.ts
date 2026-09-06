@@ -261,10 +261,19 @@ async function main(): Promise<void> {
    * 第二个客户（管理咨询）的库里，每篇笔记的摘要都由一位"美妆带货MCN资料管理员"写出来。
    *
    * 改成从配置生成之后，**唯一能证明"老库打标口径没漂"的办法就是逐字节比对**：
-   * `e2e/golden/tag-prompt-mcn.txt` 是从 pkb-pipeline 改造前的源码里原样抠出来的 968 字节。
+   * `e2e/golden/tag-prompt-mcn.txt` 原本就是从 pkb-pipeline 改造前的源码里原样抠出来的 968 字节。
    * 这条红了不是测试坏了，是那条线被碰了。
    *
    * 跨仓库：黄金母本存在 mcn-ai，生成方在 pkb-pipeline。两边任何一侧动了模板都会被逮到。
+   *
+   * **母本被有意改过一次：2026-09-06（检索第四单）**，只动了 `summary` 那一行——
+   * 从「一句话摘要，30字内」改成「先说这是什么，再说这份文档能回答什么问题」。
+   * 现场依据在 `docs/RETRIEVAL-BENCH.md`：《公域营销行动指南》的摘要写的是
+   * "明确目标、分工与复盘标准"，用户的问法是「找博主 签约」，两边零共词——
+   * 摘要在回答"这是什么"，问句在问"能回答什么"，语义通道也够不着（全库 #99）。
+   * 生成方那边（`pkb-pipeline/taxonomy.py` 的 `build_system_prompt` 头注释）记着同一件事，
+   * 包括**为什么 `SCHEMA_REV` 没有 +1**（老库不重打标，改的是"以后写得更好"）。
+   * 母本文件本身必须保持逐字节形态（不许往里加说明行），所以改动记录只能落在这儿。
    */
   const pipe = process.env.PKB_PIPELINE || join(homedir(), 'Documents/AI/pkb-pipeline')
   const py = join(pipe, 'taxonomy.py')
@@ -276,7 +285,7 @@ async function main(): Promise<void> {
     /* 下面大声说明 */
   }
 
-  console.log('\n【A4】打标提示词：MCN 配置生成的结果 = 改造前原文')
+  console.log('\n【A4】打标提示词：MCN 配置生成的结果 = 黄金母本（逐字节）')
   if (hasPy) {
     const goldenPath = join(process.cwd(), 'e2e', 'golden', 'tag-prompt-mcn.txt')
     let golden = ''

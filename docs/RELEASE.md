@@ -487,6 +487,23 @@ spctl -a -vvv -t exec "$T"/*.app
 cd desktop && MCNAI_APP_BIN="$PWD/release/mac-arm64/mcn-ai.app/Contents/MacOS/mcn-ai" node e2e/fresh-install.mjs
 ```
 
+**再拿同一个包跑一次投递链路**（2026-09-06 起，检索第四单）。它验的是**入库尾段那两格在包里真的跑**——
+实体建卡与语义索引都跑在主进程里，而语义索引那一格加载的是 `onnxruntime-node`（原生 `.node` + dylib，
+在包里要躺在 `asar.unpacked` 且被签过名）。**开发目录里跑通不能证明包里跑得起来**，
+而这一整类事故（第 2 批 `03b` 漏进 PyInstaller 的 `datas`）只有打包形态才炸、还得真跑一轮才炸：
+
+```bash
+cd desktop && MCNAI_APP_BIN="$PWD/release/mac-arm64/mcn-ai.app/Contents/MacOS/mcn-ai" node e2e/a1-enqueue.mjs
+```
+
+跑完要看到 `语义索引 ✓ N 条 == 文件树 N 篇`（零 LLM，约 3–5 分钟）。
+包内还可以单独把 embedding 冒烟跑一遍（只验原生模块能不能起来，10 秒）：
+
+```bash
+ELECTRON_RUN_AS_NODE=1 desktop/release/mac-arm64/mcn-ai.app/Contents/MacOS/mcn-ai \
+  desktop/release/mac-arm64/mcn-ai.app/Contents/Resources/app.asar/out/main/smoke-embed.js
+```
+
 ### 5. 生成并上传更新源
 
 `npm run dist` 已经在 `desktop/release/` 里出好了这三样，**一个都不能少**。

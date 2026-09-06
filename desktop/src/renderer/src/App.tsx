@@ -924,6 +924,7 @@ function SensitiveSection() {
 function SemanticSection() {
   const [enabled, setEnabled] = useState(true)
   const [st, setSt] = useState<EmbedStatus | null>(null)
+  const [rebuilding, setRebuilding] = useState(false)
   const refreshStatus = async (): Promise<void> => {
     try {
       setSt(await window.api.vault.embedStatus())
@@ -940,6 +941,14 @@ function SemanticSection() {
     const t = setInterval(() => void refreshStatus(), 2000)
     return () => clearInterval(t)
   }, [st?.state])
+  /**
+   * building 那一档**要给百分比**（第四单）。原来只写「建索引中 N/M 篇」，
+   * 而 N 是"索引里现有多少篇"、M 是"这个库一共多少篇"——首建时 N 从 0 慢慢涨，
+   * 分母却是全库，看着像卡在个位数不动。数字照旧摆着（用户要的时候能对得上），
+   * 前面加一个百分比让"还要多久"一眼可读。total 为 0 时不算百分比（不做 0/0 这种荒唐话，
+   * 同 `computeInboxProgress` 里「第 1/0 篇」那条教训）。
+   */
+  const pct = st && st.total > 0 ? Math.min(100, Math.round((st.count / st.total) * 100)) : null
   const line = !st
     ? '…'
     : st.state === 'disabled'
@@ -947,7 +956,7 @@ function SemanticSection() {
       : st.state === 'ready'
         ? `已建 ${st.count} 篇${st.lastBuildMs != null ? `（${(st.lastBuildMs / 1000).toFixed(1)} 秒）` : ''}`
         : st.state === 'building'
-          ? `建索引中 ${st.count}/${st.total} 篇…`
+          ? `建索引中${pct != null ? ` ${pct}%` : ''}（${st.count}/${st.total} 篇）…`
           : st.state === 'empty'
             ? '暂无可索引的笔记'
             : `不可用：${st.reason ?? '未知原因'}——已退回关键词检索`
@@ -968,8 +977,39 @@ function SemanticSection() {
         />
         用本地模型按含义匹配笔记（问法与文档用词不同也能找到）
       </label>
-      <div className="text-sm leading-5 text-muted" data-testid="semantic-status" data-state={st?.state ?? 'loading'}>
-        语义索引：{line}
+      <div className="flex items-center gap-2">
+        <div className="text-sm leading-5 text-muted" data-testid="semantic-status" data-state={st?.state ?? 'loading'}>
+          语义索引：{line}
+        </div>
+        {/*
+          「重建索引」——**索引是一份能与库脱节的派生文件**：用别的工具批量改过笔记、
+          拷过库、或者 .mcnai/embeddings 自己坏了，用户此刻要的是"我现在就要它对"。
+          没有这颗按钮时唯一的办法是把开关关掉再打开，那既不明显、语义也不对
+          （那是"停用功能"，不是"修数据"）。跑完把结果**原样说出来**：
+          成功报篇数与耗时，失败报原因，不许无条件报成功（Q13）。
+        */}
+        <button
+          data-testid="semantic-rebuild"
+          disabled={rebuilding || !enabled}
+          onClick={() => {
+            setRebuilding(true)
+            void window.api.vault
+              .rebuildEmbedIndex()
+              .then((r) => {
+                if (r.skipped) ui.toast(r.reason ?? '没有可重建的索引', 'warn')
+                else if (r.ok) ui.toast(`语义索引已重建：${r.count} 篇（${(r.ms / 1000).toFixed(1)} 秒）`, 'ok')
+                else ui.toast(`重建失败：${r.reason ?? '未知原因'}`, 'error')
+              })
+              .catch((e) => ui.toast(`重建失败：${String(e)}`, 'error'))
+              .finally(() => {
+                setRebuilding(false)
+                void refreshStatus()
+              })
+          }}
+          className="rounded-full border border-line px-2 py-0.5 text-xs hover:bg-card disabled:opacity-60"
+        >
+          {rebuilding ? '重建中…' : '重建索引'}
+        </button>
       </div>
       <div className="text-sm leading-5 text-muted">模型与索引都在本机，文件内容不会因此离开电脑；关闭后只用关键词检索。</div>
     </div>

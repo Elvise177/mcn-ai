@@ -15,6 +15,27 @@ function redact(text: string): string {
     .replace(/eyJ[A-Za-z0-9._-]{20,}/g, 'eyJ***')
 }
 
+/**
+ * 语义索引一行（第四单）。**"不可用"必须带原因**——客户报"检索变差了"时，
+ * 这一行就是第一现场：模型没随包进来、原生模块起不来、还是用户自己关掉了，
+ * 三种情况的下一步动作完全不同，而在此之前诊断报告里对它只字不提。
+ */
+function describeEmbed(): string {
+  const s = vaultManager.embedStatus()
+  const zh: Record<string, string> = {
+    ready: '已就绪',
+    building: '建索引中',
+    unavailable: '不可用',
+    empty: '空（库里没有可索引的笔记）',
+    disabled: '已关闭',
+  }
+  const bits = [`${zh[s.state] ?? s.state}`, `${s.count}/${s.total} 篇`, `模型 ${s.model}`]
+  if (s.lastBuildMs != null) bits.push(`上次耗时 ${(s.lastBuildMs / 1000).toFixed(1)}s`)
+  if (s.reason) bits.push(`原因：${s.reason}`)
+  bits.push(`合并方式 ${store.get('semanticMerge')}`)
+  return bits.join(' ／ ')
+}
+
 /** 一键诊断报告 → 桌面（脱敏后的环境信息 + 配置状态 + 最近日志），用户直接发给客服 */
 export async function exportDiagnostics(): Promise<string> {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, '-')
@@ -40,6 +61,7 @@ export async function exportDiagnostics(): Promise<string> {
 - 对话线路: ${describeProvider().label} ${describeProvider().baseUrl}
   主模型 ${describeProvider().model} ／ 轻量 ${describeProvider().fastModel}（key ${describeProvider().hasKey ? '已配置' : '未配置'}${store.get('manualApiKey') ? '·手动' : '·下发'}）
 - 打标模型: ${store.get('llmBaseUrl')} ${store.get('llmModel')}（key ${hasLlmKey() ? '已配置' : '未配置'}）
+- 语义索引: ${describeEmbed()}
 
 最近日志（末 300 行，已脱敏）:
 --------------------------------------------------

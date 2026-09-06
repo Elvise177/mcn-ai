@@ -1,4 +1,4 @@
-import { join } from 'path'
+import { join, relative, sep } from 'path'
 import { homedir } from 'os'
 import { judgeTimeout, resolveTimeoutMs, humanDuration, DEFAULT_AGENT_TIMEOUT_MIN, WARN_RATIO } from './agent/timeout'
 import { TailBuffer } from './lib/tail-buffer'
@@ -8,6 +8,7 @@ import { judgeNotify, NOTIFY_MIN_MS } from './lib/notify'
 import { giveUpReason, judgeAttempts, parseAttempts, parseFailReasons, MAX_ATTEMPTS } from './inbox/attempts'
 import { judgeVaultBack, judgeVaultLost, resolveProbeMs, DEFAULT_PROBE_MS } from './vault/lost'
 import { isCloudSyncSkipped } from './lib/sensitive'
+import { embedIndexDir } from './vault/embed-index'
 
 /**
  * 批 1「架构止血」里那些**只在真实调用 / 真实故障下才走到**的判据，抽成纯函数后在这儿零花费验
@@ -248,10 +249,26 @@ console.log('\n【8】judgeVaultLost：库目录被拔掉/移走要顶一条，�
   check('垃圾值 / 负数 / 过小值一律回出厂', resolveProbeMs('x') === DEFAULT_PROBE_MS && resolveProbeMs('-5') === DEFAULT_PROBE_MS && resolveProbeMs('10') === DEFAULT_PROBE_MS)
 }
 
+/**
+ * 【9】索引文件永不进上传清单（第三单立的，2026-09-06 才发现它**从来没跑过**）。
+ *
+ * 这一块原来写在 `process.exit()` **后面**——三行断言是彻头彻尾的死代码，
+ * 一次都没执行过，而 smoke:guards 从头到尾报「✅ 全部通过」。
+ * 与 `computeProgress` 那条 `label === '智能打标'` 死判据是同一个病：
+ * **绿色不等于跑过**。挪回 exit 之前，并把"哪个目录"从另一侧（`embedIndexDir`）取，
+ * 不在断言里再抄一遍 `.mcnai` 这个常量（CLAUDE.md 三条规矩之一）。
+ */
+console.log('\n【9】isCloudSyncSkipped：语义索引所在的目录整个不进上传清单（第三单）')
+{
+  // 索引目录名从产品那一侧算出来，不写死：`<库>/.mcnai/embeddings` → 顶层那一段
+  const topSegment = relative('/v', embedIndexDir('/v')).split(sep)[0]
+  check(`索引目录「${topSegment}」跳过`, isCloudSyncSkipped(topSegment), topSegment)
+  check('.done / .failed / .obsidian / .git 跳过', ['.done', '.failed', '.obsidian', '.git'].every(isCloudSyncSkipped))
+  check('普通目录与笔记不跳', !isCloudSyncSkipped('80_资料库') && !isCloudSyncSkipped('总结.md'))
+  // 敏感文件的**摘要照常进索引**（向量不出门），所以这条边界只能由"目录不上传"来守——
+  // 一旦有人给索引换个不以点开头的目录名，上面第一条会立刻红
+  check('索引文件本身也在那个目录里', embedIndexDir('/v').startsWith(join('/v', topSegment) + sep))
+}
+
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')
 process.exit(failed ? 1 : 0)
-
-console.log('\n【9】isCloudSyncSkipped：语义索引所在的 .mcnai/ 整目录不进上传清单（第三单）')
-check('.mcnai 跳过', isCloudSyncSkipped('.mcnai'))
-check('.done / .failed / .obsidian / .git 跳过', ['.done', '.failed', '.obsidian', '.git'].every(isCloudSyncSkipped))
-check('普通目录与笔记不跳', !isCloudSyncSkipped('80_资料库') && !isCloudSyncSkipped('总结.md'))

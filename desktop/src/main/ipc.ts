@@ -126,6 +126,16 @@ export function registerIpc(): void {
     return { ok: true }
   })
   ipcMain.handle('vault:embedStatus', () => vaultManager.embedStatus())
+  /**
+   * 手动重建语义索引（第四单）。**整个丢掉重算**，不是增量——用户按它的时候，
+   * 想要的是"我现在就要它对"，而不是"再对一次账"。结果一路回到渲染层弹 toast：
+   * 成功报篇数与耗时，失败原样报原因（Q13：不许无条件报成功）。
+   */
+  ipcMain.handle('vault:rebuildEmbedIndex', async () => {
+    const r = await vaultManager.rebuildEmbedIndex()
+    log(r.ok ? 'info' : 'error', 'embed', `手动重建语义索引：${JSON.stringify(r)}`)
+    return r
+  })
   ipcMain.handle('settings:setAgentTimeout', (_e, minutes: number) => {
     const n = Number(minutes)
     const v = Number.isFinite(n) && n >= 0 ? Math.min(240, Math.round(n)) : 15

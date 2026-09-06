@@ -123,4 +123,15 @@ npm run build && node e2e/walkthrough.mjs   # 截图在 e2e/shots/，AI 必须 R
 ## 常用命令
 
 - 开发：`npm run dev`　类型检查：`npm run typecheck`　打包：`npm run dist`
-- pipeline 冻结（在 pkb-pipeline 仓库）：pyinstaller 命令见 git log；产物拷入 `resources/pipeline/`
+- pipeline 冻结（在 pkb-pipeline 仓库）：
+
+  ```bash
+  cd ~/Documents/AI/pkb-pipeline && .venv/bin/pyinstaller mcn-ingest.spec --noconfirm --clean
+  rm -rf ~/Documents/AI/mcn-ai/desktop/resources/pipeline
+  cp -R dist/mcn-ingest ~/Documents/AI/mcn-ai/desktop/resources/pipeline
+  cd ~/Documents/AI/mcn-ai/desktop && npm run smoke:pipeline
+  ```
+
+  **改了 pkb-pipeline 就必须重新冻结 + 重拷**，否则源码侧全绿、客户拿到的还是上一版
+  （`resources/pipeline/` 是 gitignored 的，git diff 也看不出来）。`smoke:pipeline` 第 8 节
+  拿冻结产物的 `--print-prompt` 去比黄金母本，专门守这一条（2026-09-06 加）

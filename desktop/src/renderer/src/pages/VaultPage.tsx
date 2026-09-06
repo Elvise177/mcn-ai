@@ -11,7 +11,7 @@ import { X, Inbox, MoveUpLeft, MoreHorizontal, Loader2, FileWarning, RotateCcw }
 import { pendingNote, inboxPanel, findRequest } from '../lib/bus'
 import { GRAPH_KIND_TOKEN, GRAPH_LEGEND, token, tokenPx } from '../theme'
 import { EMPTY_MARK, fmLabel, formatFrontmatterValue, formatNoteBody, splitFrontmatter } from '../lib/note-format'
-import { STAGE_LABEL } from '../config/stages'
+import { INBOX_STAGES, STAGE_LABEL } from '../config/stages'
 import { errText } from '../lib/err'
 import { enqueueMessage, pathOfDropped } from '../lib/enqueue'
 import { useTask } from '../hooks/useTasks'
@@ -248,7 +248,14 @@ function InboxPanel({ task, running, onClose }: { task?: InboxTask; running: boo
   }, [refreshFailed, running])
   const shownFailures = failures.length ? failures : diskFailures
 
-  const { done, total, label } = task?.progress ?? { done: 0, total: 6, label: '' }
+  /**
+   * 兜底分母**从阶段表取**，不许再写死一个数（第四单 2026-09-06 顺手修）。
+   * 这里原来是 `total: 6`——而主流程早就是 8 格、这一单起 9 格。它只在"任务还没带
+   * progress 上来"的那一帧生效，但那一帧画出来的百分比是按 /6 算的：done=3 时显示 50%，
+   * 下一帧任务对象一到就跳成 33%。分母是**系统侧的事实**，界面不该自己记一份
+   * （与走查那条"完成态判据不许写死阶段数"是同一条教训，6→7→8→9 一路踩过来）。
+   */
+  const { done, total, label } = task?.progress ?? { done: 0, total: INBOX_STAGES.length, label: '' }
   // 取消是用户主动的操作，不该看起来像出错：中性灰，不是红（设计 §5.1）
   const canceled = task?.status === 'canceled'
   const failed = !canceled && !!task?.error

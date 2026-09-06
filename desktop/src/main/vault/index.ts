@@ -2,7 +2,7 @@ import { promises as fs, existsSync, constants as fsConstants } from 'fs'
 import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
-import { EmbedIndex, type EmbedStatus, type SemanticHit } from './embed-index'
+import { EmbedIndex, type EmbedStatus, type EmbedSyncResult, type SemanticHit } from './embed-index'
 import { shell } from 'electron'
 import { scanVault, parseNote, readNoteBody, buildTree, IGNORE } from './reader'
 import { broadcast } from '../lib/windows'
@@ -242,6 +242,48 @@ export class VaultManager {
     return this.embedIndex.whenSettled()
   }
 
+  /**
+   * 把语义索引与磁盘上的现状对齐（入库尾段那一格 `embed_index`、设置页「重建」按钮）。
+   *
+   * **重新扫一遍库，而不是用内存里那份 `this.notes`**：watcher 的 `awaitWriteFinish` 是 800 ms，
+   * 而这一格紧跟在实体建卡后面——刚写完的卡与刚落位的笔记极可能还没进内存索引，
+   * 拿内存那份判集合差就会把这一批**整批漏掉**（同 `cloudSync` 判敏感必须读盘的那条教训）。
+   * 971 篇全扫约 1 秒，比漏一批便宜得多。
+   *
+   * @param root 这一轮开始时快照下来的库根；与当前库不一致（用户中途换库）直接不做
+   */
+  async syncEmbedIndex(
+    root: string,
+    onProgress?: (done: number, total: number) => void,
+    full = false
+  ): Promise<EmbedSyncResult> {
+    const empty = { added: 0, removed: 0, count: this.embedIndex.status().count, ms: 0 }
+    if (!this.root || this.root !== root)
+      return { ok: true, ...empty, skipped: 'no-vault', reason: '已换库，这一轮不建索引' }
+    const { notes, bodies } = await scanVault(root)
+    if (this.root !== root) return { ok: true, ...empty, skipped: 'no-vault', reason: '已换库，这一轮不建索引' }
+    return this.embedIndex.sync(notes, bodies, onProgress, full)
+  }
+
+  /**
+   * 设置页那颗「重建索引」：把旧向量整个丢掉重算。
+   *
+   * 为什么要给用户这个出口：语义索引是一份**在盘上、可以与库不同步**的派生文件——
+   * 用别的工具（Obsidian / 访达 / 同步盘）批量改过笔记、拷过库、或者索引文件本身坏了，
+   * 增量判据（集合差 + 内容哈希）虽然都能收敛，但用户此刻要的是"我现在就要它对"。
+   * 没有这颗按钮时唯一的办法是关掉开关再打开，那既不明显、语义也不对。
+   */
+  async rebuildEmbedIndex(): Promise<EmbedSyncResult> {
+    if (!this.root)
+      return { ok: true, added: 0, removed: 0, count: 0, ms: 0, skipped: 'no-vault', reason: '还没有打开知识库' }
+    return this.syncEmbedIndex(this.root, undefined, true)
+  }
+
+  /** 后台还没建完的那一半（入库尾段超时放行后由调用方决定要不要接着等） */
+  embedInFlight(): Promise<void> | null {
+    return this.embedIndex.inFlight
+  }
+
   /** 设置页开关。关：立刻停用并卸载模型；开：下次开库时建（当前库立刻补建） */
   setSemanticEnabled(on: boolean): void {
     this.embedIndex.enabled = on
@@ -401,6 +443,13 @@ export class VaultManager {
     await shell.trashItem(join(this.root, relPath))
     this.notes.delete(relPath)
     this.searcher.remove(relPath)
+    /**
+     * 语义索引也要同步剔除（第四单）。watcher 的 unlink 也会做这件事，
+     * 但那条路要等 `awaitWriteFinish` 的 800 ms，而删完立刻提问是很常见的动作——
+     * 中间那一下语义通道会把**已经不存在的文件**摆到模型面前，模型 Read 一下报"找不到"。
+     * 两条路都做是**故意的**：`remove` 幂等（`byPath` 里没有就直接返回）。
+     */
+    this.embedIndex.remove(relPath)
     this.notify(relPath)
   }
 
