@@ -79,6 +79,10 @@ export function registerIpc(): void {
     sensitiveAllowCloud: store.get('sensitiveAllowCloud'),
     /** 第一版检索口径（'local' | 'cloud'，出厂 local）。只读暴露，供走查断言与诊断报告 */
     searchBackend: store.get('searchBackend'),
+    // 第三单：语义索引状态（设置页「语义索引：已建 N 篇 / 建索引中 / 不可用（原因）」）
+    semanticEnabled: store.get('semanticEnabled'),
+    semanticMerge: store.get('semanticMerge'),
+    semantic: vaultManager.embedStatus(),
     /**
      * **真实应用版本**（`package.json` 的 version，打包时烧进 Info.plist）。
      *
@@ -116,6 +120,12 @@ export function registerIpc(): void {
   })
 
   // agent 一轮的墙钟上限（R3）。整数分钟、0 = 关、上限 240；非法值落回出厂 15，不静默吞
+  ipcMain.handle('settings:setSemantic', (_e, enabled: boolean) => {
+    store.set('semanticEnabled', !!enabled)
+    vaultManager.setSemanticEnabled(!!enabled)
+    return { ok: true }
+  })
+  ipcMain.handle('vault:embedStatus', () => vaultManager.embedStatus())
   ipcMain.handle('settings:setAgentTimeout', (_e, minutes: number) => {
     const n = Number(minutes)
     const v = Number.isFinite(n) && n >= 0 ? Math.min(240, Math.round(n)) : 15

@@ -14,6 +14,11 @@ afterAllArtifactBuild: scripts/notarize-dmg.cjs
 files:
   - out/**
   - package.json
+  # onnxruntime-node 自带全平台二进制（~200MB）：只带 darwin/arm64 那一份，其余不进包
+  #（第三单本地 embedding，2026-09-05；x64 那份等 Intel 目标真的要发 x64 包时再放开）
+  #（1.29 的目录是 bin/napi-v6/<平台>/<架构>，darwin 只有 arm64 一份 ~60MB；Intel 目标要发 x64 包时另议）
+  - "!node_modules/onnxruntime-node/bin/napi-v6/win32/**"
+  - "!node_modules/onnxruntime-node/bin/napi-v6/linux/**"
 extraResources:
   - from: resources/
     to: resources/
@@ -22,6 +27,9 @@ asarUnpack:
   - "node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**"
   - "node_modules/minisearch/**"
   - "out/main/search-worker.js"
+  # 原生模块不能从 asar 里加载：onnxruntime_binding.node + libonnxruntime.dylib 必须解包，
+  # 两个 Mach-O 都要进签名（verify-signing 的 Mach-O 计数从 110 → 112）
+  - "node_modules/onnxruntime-node/**"
 mac:
   icon: build/icon.icns
   target:

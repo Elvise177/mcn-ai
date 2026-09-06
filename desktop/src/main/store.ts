@@ -88,6 +88,10 @@ interface StoreSchema {
    *   ~/Library/Application Support/mcn-ai-desktop/config.json 里加 `"searchBackend": "cloud"`
    */
   searchBackend: 'local' | 'cloud'
+  /** 第三单：本地语义通道开关（设置页可关；8G 机器成本敏感时用） */
+  semanticEnabled: boolean
+  /** 语义结果与关键词结果的合并方式：channel = 关键词前 7 + 语义前 3；rrf = 倒数排名融合。bench 两种都跑后定 */
+  semanticMerge: 'channel' | 'rrf'
   /**
    * agent 一轮的墙钟上限（分钟；0 = 关）。出厂 15，管理员区可改（PLAN-v2 R3）。
    * 判据在 `agent/timeout.ts`：80% 软提醒、100% 硬中断（先落盘半截正文再 abort）
@@ -127,6 +131,8 @@ export const store = new Store<StoreSchema>({
     sensitiveAllowAi: false,
     sensitiveAllowCloud: false,
     searchBackend: 'local',
+    semanticEnabled: true,
+    semanticMerge: 'channel',
     agentTimeoutMin: 15,
   },
 })

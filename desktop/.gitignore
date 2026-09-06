@@ -26,3 +26,6 @@ build/icon.iconset/
 
 # 检索基准的运行产物（每次一目录，含回答全文）
 e2e/retrieval-bench/runs/
+
+# 本地 embedding 模型（24MB，bge-small-zh-v1.5 q8）：scripts/fetch-models.mjs 从 HF 拉，sha256 校验，见 docs/PLAN-retrieval-embedding.md
+resources/models/

@@ -22,6 +22,12 @@ export function dirField(relPath: string): string {
   return d.split(/[/\\]/).map((seg) => seg.replace(/^\d+_/, '')).join(' ')
 }
 
+/** frontmatter 摘要字段（第三单降级档）：不是字符串就当没有 */
+export function summaryField(n: VaultNote): string {
+  const v = n.frontmatter?.summary
+  return typeof v === 'string' ? v : ''
+}
+
 /** 主进程侧代理：真正的索引/检索在 search-worker 线程，主进程事件循环零阻塞 */
 export class VaultSearcher {
   private worker: Worker
@@ -34,7 +40,7 @@ export class VaultSearcher {
    * 此后每一次检索都秒回 0 条，界面按三态规则画成「没找到「X」」。
    * 那正是产品说谎，比"检索报错"坏得多。
    */
-  private lastDocs: Array<{ path: string; title: string; tags: string; body: string; dir: string }> = []
+  private lastDocs: Array<{ path: string; title: string; tags: string; body: string; dir: string; summary: string }> = []
   /** 调参脚本设的查询期排名参数；null = worker 出厂值 */
   private rankParams: Record<string, number> | null = null
 
@@ -151,6 +157,7 @@ export class VaultSearcher {
       tags: n.tags.join(' '),
       body: bodies.get(n.path) ?? '',
       dir: dirField(n.path),
+      summary: summaryField(n),
     }))
     this.lastDocs = docs // worker 崩了要靠它重灌（R16）
     this.worker.postMessage({ type: 'rebuild', docs })
@@ -162,7 +169,7 @@ export class VaultSearcher {
   upsert(note: VaultNote, raw: string): void {
     this.worker.postMessage({
       type: 'upsert',
-      doc: { path: note.path, title: note.title, tags: note.tags.join(' '), body: raw, dir: dirField(note.path) },
+      doc: { path: note.path, title: note.title, tags: note.tags.join(' '), body: raw, dir: dirField(note.path), summary: summaryField(note) },
     })
   }
 

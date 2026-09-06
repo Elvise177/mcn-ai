@@ -15,6 +15,11 @@ interface Doc {
    * "星母计划"四个字，身份全在路径 `…/星母培训计划/数据复盘/` 里——不索引路径就永远搜不到它
    */
   dir?: string
+  /**
+   * frontmatter `summary`（第三单降级档的底座）：语义通道不可用时，摘要里的词至少能把《总结.md》
+   * （摘要含"星母培训计划"）这类标题泛、正文无词的文档拉回关键词通道
+   */
+  summary?: string
 }
 
 /**
@@ -30,6 +35,7 @@ export interface RankParams {
   title: number
   dir: number
   tags: number
+  summary: number
   b: number
   /**
    * 「去掉一个词」档开关（1 开 / 0 关）。**默认关**（2026-09-05 第二单试跑）：它抢在模糊 OR 之前返回，
@@ -38,10 +44,10 @@ export interface RankParams {
    */
   relaxed: number
 }
-export const RANK_DEFAULTS: RankParams = { title: 6, dir: 2, tags: 2, b: 0.7, relaxed: 0 }
+export const RANK_DEFAULTS: RankParams = { title: 6, dir: 2, tags: 2, summary: 3, b: 0.7, relaxed: 0 }
 let rank: RankParams = { ...RANK_DEFAULTS }
 const searchOpts = (): { boost: Record<string, number>; bm25: { k: number; b: number; d: number } } => ({
-  boost: { title: rank.title, dir: rank.dir, tags: rank.tags },
+  boost: { title: rank.title, dir: rank.dir, tags: rank.tags, summary: rank.summary },
   bm25: { k: 1.2, b: rank.b, d: 0.5 },
 })
 
@@ -87,7 +93,7 @@ const bodies = new Map<string, string>()
 
 function newIndex(): MiniSearch {
   return new MiniSearch({
-    fields: ['title', 'dir', 'body', 'tags'],
+    fields: ['title', 'dir', 'summary', 'body', 'tags'],
     storeFields: ['title'],
     tokenize,
     searchOptions: { ...searchOpts(), combineWith: 'AND' },
@@ -241,7 +247,7 @@ function add(doc: Doc): void {
   dfCache.clear() // 索引一变，DF 就不作数了
   if (mini.has(doc.path)) mini.discard(doc.path)
   bodies.set(doc.path, plain(doc.body)) // bodies 只用于出摘要，存清洗后的纯文本
-  mini.add({ id: doc.path, title: doc.title, dir: doc.dir ?? '', body: doc.body, tags: doc.tags })
+  mini.add({ id: doc.path, title: doc.title, dir: doc.dir ?? '', summary: doc.summary ?? '', body: doc.body, tags: doc.tags })
 }
 
 mini = newIndex()

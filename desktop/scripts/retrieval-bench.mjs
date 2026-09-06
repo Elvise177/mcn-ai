@@ -12,10 +12,12 @@
  *   npm run bench:retrieval -- --only M-K1,T-1     # 只跑几题（调试）
  *   npm run bench:retrieval -- --type trap         # 只跑一类
  *   npm run bench:retrieval -- --split validate    # 只看验证集（15 题）；调参只许看 --split tune（30 题）
+ *   npm run bench:retrieval -- --merge rrf         # 第三单：语义合并方式 channel（默认）| rrf；--no-semantic 关掉语义通道跑对照
  *   npm run bench:retrieval -- --from <results.jsonl> [--json]   # 只重新汇总一份已有结果
  *   npm run bench:retrieval -- [--from …] --baseline <基线 results.jsonl>  # 附对照基线的 diff 表（每格 本轮 (Δpp)）
  *   npm run bench:retrieval -- --rejudge <results.jsonl>         # 用同一份回答重新判分（不再跑对话）
  *   npm run bench:retrieval -- --rejudge <results.jsonl> --rejudge-failed   # 只补判上次判分失败的题
+ *   npm run bench:retrieval -- --rereplay <results.jsonl> --merge <那轮的 merge>  # 零 LLM：重放双通道检索，重算「摆到面前」口径（回答与判分不动）
  *
  * key 来源（二选一）：
  *   默认用测试账号登录，服务端按契约 v2 下发标准档（与客户机同一条路，Supabase 必须醒着）
@@ -57,10 +59,14 @@ const TYPE = opt('type', '')
  * 引擎参数只在 tune 上调，对外报的数字只看 validate——同一套题上调参又报分是自己骗自己。
  */
 const SPLIT = opt('split', '')
+/** 第三单：语义通道合并方式（channel | rrf）与开关（--no-semantic 跑对照） */
+const MERGE = opt('merge', '')
+const NO_SEMANTIC = flag('no-semantic')
 const FROM = opt('from', '')
 const BASELINE = opt('baseline', '') // 另一份 results.jsonl：汇总时并排给出每项指标的变化（对照基线出 diff 表）
 const REJUDGE = opt('rejudge', '')
 const REJUDGE_FAILED = flag('rejudge-failed') // 与 --rejudge 同用：只补判上次判分失败的题
+const REREPLAY = opt('rereplay', '') // 零 LLM：按记录的检索词重放双通道检索，重算「摆到面前」；回答与判分原样保留（--merge 要与那轮一致）
 const TIMEOUT_MS = Number(opt('timeout', '420000'))
 const OUT_DIR = resolve(opt('out-dir', join(BENCH_DIR, 'runs', new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19))))
 const SRC_MAGGIE = opt('vault-maggie', join(homedir(), 'Documents', 'AI', 'maggie-vault'))
@@ -459,9 +465,10 @@ async function run() {
     return
   }
 
-  const est = qs.length * EST_PER_Q_CNY + (NO_JUDGE ? 0 : qs.length * EST_JUDGE_CNY)
+  const est = REREPLAY ? 0 : qs.length * EST_PER_Q_CNY + (NO_JUDGE ? 0 : qs.length * EST_JUDGE_CNY)
   console.log(`题目 ${qs.length} 道：${Object.entries(byType).map(([t, n]) => `${TYPE_LABEL[t]} ${n}`).join('、')}`)
-  console.log(`预算（估）：对话 ≈ ¥${(qs.length * EST_PER_Q_CNY).toFixed(2)} + 判分 ≈ ¥${(NO_JUDGE ? 0 : qs.length * EST_JUDGE_CNY).toFixed(2)} = ¥${est.toFixed(2)}（标准档 deepseek-v4-pro；实花以账本为准，跑完汇总里给）`)
+  if (REREPLAY) console.log(`（只重放检索：零 LLM 调用，合并方式 ${MERGE || 'channel'}）`)
+  else console.log(`预算（估）：对话 ≈ ¥${(qs.length * EST_PER_Q_CNY).toFixed(2)} + 判分 ≈ ¥${(NO_JUDGE ? 0 : qs.length * EST_JUDGE_CNY).toFixed(2)} = ¥${est.toFixed(2)}（标准档 deepseek-v4-pro；实花以账本为准，跑完汇总里给）`)
   if (DRY) {
     if (!NO_COPY) console.log(`（dry-run 不建库副本、不发请求）库源：maggie=${SRC_MAGGIE} jerry=${SRC_JERRY}`)
     return
@@ -487,10 +494,13 @@ async function run() {
     vaults: VAULTS,
     judge: !NO_JUDGE,
     perQuestionTimeoutMs: TIMEOUT_MS,
+    ...(MERGE ? { merge: MERGE } : {}),
+    semantic: !NO_SEMANTIC,
     ...(process.env.BENCH_API_KEY
       ? { apiKey: process.env.BENCH_API_KEY, baseUrl: process.env.BENCH_BASE_URL || 'https://api.deepseek.com/anthropic' }
       : { login: TEST_LOGIN }),
     ...(REJUDGE ? { rejudgeFrom: resolve(REJUDGE), rejudgeFailedOnly: REJUDGE_FAILED } : {}),
+    ...(REREPLAY ? { rereplayFrom: resolve(REREPLAY) } : {}),
   }
   writeFileSync(jobPath, JSON.stringify(job, null, 2))
   console.log(`[run] 结果目录 ${OUT_DIR}`)

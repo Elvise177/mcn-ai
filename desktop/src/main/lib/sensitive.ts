@@ -34,3 +34,14 @@ export function hasSensitiveMark(text: string): boolean {
   if (!end) return true // 开头像 frontmatter 却不闭合：解析不了，按敏感处理
   return /^sensitive:\s*true\s*$/m.test(body.slice(4, 4 + end.index))
 }
+
+
+/**
+ * cloudSync 的目录遍历要跳过的条目（第三单把它抽成判据）：
+ * 以 `.` 开头的一切——`.mcnai/`（库配置、**语义索引 .bin/.json**）、`.done/`、`.failed/`、`.obsidian/`、`.git/`。
+ * 索引里有敏感文档的向量，它不上云不是靠"扩展名不是 .md 所以没被选中"碰运气，而是整个目录不进遍历；
+ * `smoke:guards` 守着这条。
+ */
+export function isCloudSyncSkipped(entryName: string): boolean {
+  return entryName.startsWith('.')
+}

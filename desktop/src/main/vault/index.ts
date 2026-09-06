@@ -2,6 +2,7 @@ import { promises as fs, existsSync, constants as fsConstants } from 'fs'
 import { createHash } from 'crypto'
 import { join, dirname } from 'path'
 import chokidar, { FSWatcher } from 'chokidar'
+import { EmbedIndex, type EmbedStatus, type SemanticHit } from './embed-index'
 import { shell } from 'electron'
 import { scanVault, parseNote, readNoteBody, buildTree, IGNORE } from './reader'
 import { broadcast } from '../lib/windows'
@@ -40,6 +41,18 @@ export class VaultManager {
   async open(root: string): Promise<{ noteCount: number }> {
     // 同一库已打开则直接复用索引——切页面回来不再全量重扫
     if (this.root === root && this.notes.size > 0) {
+      // 同一库重开：语义索引若因开关刚打开而是空的，就拿内存里的笔记补建（不重扫全库）
+      if (this.embedIndex.enabled && this.embedIndex.status().state !== 'ready' && this.embedIndex.status().state !== 'building') {
+        const bodies = new Map<string, string>()
+        for (const [p] of this.notes) {
+          try {
+            bodies.set(p, await fs.readFile(join(root, p), 'utf-8'))
+          } catch {
+            /* 读不到就没有正文，corpusText 退回标题 */
+          }
+        }
+        this.embedIndex.open(root, this.notes, bodies)
+      }
       return { noteCount: this.notes.size }
     }
     await this.close()
@@ -49,6 +62,8 @@ export class VaultManager {
     this.dirs = dirs
     // 检索索引后台构建，不阻塞界面打开
     this.searcher.rebuild(notes, bodies)
+    // 语义索引（第三单）：同一份快照，后台分批 embed，不 await；就绪/失败看 embedStatus()
+    this.embedIndex.open(root, notes, bodies)
     this.startWatcher()
     // 换库/重开：把上一个库遗留的「不可访问」顶条撤掉，并给新库挂上心跳（R16）
     this.clearLost()
@@ -73,6 +88,7 @@ export class VaultManager {
       if (r) {
         this.notes.set(r.note.path, r.note)
         this.searcher.upsert(r.note, r.raw)
+        void this.embedIndex.upsert(r.note, r.raw)
         // 内容与我们刚写出去的一致 = 这条事件是我们自己触发的，不算"外部改动"
         const mine = this.selfWrites.get(rel) === hashOf(r.raw)
         if (mine) this.selfWrites.delete(rel)
@@ -82,6 +98,7 @@ export class VaultManager {
     this.watcher.on('add', onUpsert)
     this.watcher.on('change', onUpsert)
     this.watcher.on('unlink', (rel: string) => {
+      this.embedIndex.remove(rel)
       if (!isMd(rel)) return
       this.notes.delete(rel)
       this.searcher.remove(rel)
@@ -180,6 +197,7 @@ export class VaultManager {
 
   async close(): Promise<void> {
     this.stopProbe()
+    await this.embedIndex.close()
     await this.watcher?.close()
     this.watcher = null
     this.notes.clear()
@@ -205,6 +223,33 @@ export class VaultManager {
   /** 调参脚本用：改检索排名参数（见 searcher.configure） */
   configureSearch(params: Record<string, number> | null): void {
     this.searcher.configure(params)
+  }
+
+  // ---- 语义通道（第三单）----
+  private embedIndex = new EmbedIndex()
+
+  /** 语义 top-k；索引未就绪/关闭时回空，调用方按"没有语义结果"处理 */
+  semanticSearch(q: string, k = 10): Promise<SemanticHit[]> {
+    return this.embedIndex.search(q, k)
+  }
+
+  embedStatus(): EmbedStatus {
+    return this.embedIndex.status()
+  }
+
+  /** bench / 冒烟：等索引建完（或明确不可用）再提问 */
+  whenEmbedSettled(): Promise<EmbedStatus> {
+    return this.embedIndex.whenSettled()
+  }
+
+  /** 设置页开关。关：立刻停用并卸载模型；开：下次开库时建（当前库立刻补建） */
+  setSemanticEnabled(on: boolean): void {
+    this.embedIndex.enabled = on
+    if (!on) {
+      void this.embedIndex.close()
+    } else if (this.root) {
+      void this.open(this.root).catch(() => undefined)
+    }
   }
 
   search(q: string): Promise<SearchResult> {

@@ -11,7 +11,7 @@ import { ingestNote } from '../knowledge/client'
 import { getAccessToken } from '../auth'
 import { pipelineBin, pipelineArgs, pipelineEnv } from '../lib/pipeline'
 import { log } from '../lib/logger'
-import { hasSensitiveMark } from '../lib/sensitive'
+import { hasSensitiveMark, isCloudSyncSkipped } from '../lib/sensitive'
 import { notifyDingtalk } from '../lib/dingtalk'
 import { notify } from '../lib/notify'
 import { tasks } from '../tasks/registry'
@@ -930,7 +930,7 @@ export class InboxOrchestrator {
       const changed: string[] = []
       const walk = async (d: string): Promise<void> => {
         for (const e of await fsp.readdir(d, { withFileTypes: true })) {
-          if (e.name.startsWith('.')) continue
+          if (isCloudSyncSkipped(e.name)) continue // .mcnai/（含语义索引）、.done/ 等整目录不进上传清单
           const p = pjoin(d, e.name)
           if (e.isDirectory()) await walk(p)
           else if (e.name.endsWith('.md')) {

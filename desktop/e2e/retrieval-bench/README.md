@@ -59,7 +59,16 @@ npm run bench:retrieval -- --type sensitive      # 只跑一类
 npm run bench:retrieval -- --from e2e/retrieval-bench/runs/<ts>/results.jsonl   # 只重汇总
 npm run bench:retrieval -- --rejudge e2e/retrieval-bench/runs/<ts>/results.jsonl  # 同一份回答重判
 npm run bench:retrieval -- --rejudge <results.jsonl> --rejudge-failed              # 只补判上次判分失败的题
+npm run bench:retrieval -- --split validate      # 只跑/只汇总验证集（对外报数只看这个）
+npm run bench:retrieval -- --merge rrf           # 第三单：语义通道合并方式 channel（默认，关键词 7 + 语义 3）/ rrf（k=60）
+npm run bench:retrieval -- --no-semantic         # 第三单：关掉语义通道（回到第一单形态，做对照）
+npm run bench:retrieval -- --from <results.jsonl> --baseline <另一份 results.jsonl>   # 汇总时并排出差值表
+npm run bench:retrieval -- --rereplay <results.jsonl> --merge <那轮的 merge> --only <那轮的题号>   # 零 LLM：按记录的检索词重放双通道检索，重算「摆到面前」；回答与判分原样保留
 ```
+
+`--rereplay` 的由来：第三单之前重放只走关键词通道，语义通道摆到模型面前的条目不计入召回——两轮跑完才发现。现在重放与产品共用 `src/main/agent/merge.ts` 同一份合并函数；**改检索出口时先确认重放还与产品同一条路**。
+
+第三单起执行端开库后会等语义索引建完（`whenEmbedSettled`）再答题，否则头几题只走关键词、数字不可比。
 
 key：默认用测试账号登录（服务端按契约 v2 下发标准档，与客户机同一条路；Supabase 得醒着，见 `desktop/CLAUDE.md`）；
 或 `BENCH_API_KEY=… BENCH_BASE_URL=https://api.deepseek.com/anthropic` 直接注入（只进内存）。

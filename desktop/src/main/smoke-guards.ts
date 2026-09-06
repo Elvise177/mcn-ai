@@ -7,6 +7,7 @@ import { isSafeVaultRoot } from './vault/wizard'
 import { judgeNotify, NOTIFY_MIN_MS } from './lib/notify'
 import { giveUpReason, judgeAttempts, parseAttempts, parseFailReasons, MAX_ATTEMPTS } from './inbox/attempts'
 import { judgeVaultBack, judgeVaultLost, resolveProbeMs, DEFAULT_PROBE_MS } from './vault/lost'
+import { isCloudSyncSkipped } from './lib/sensitive'
 
 /**
  * 批 1「架构止血」里那些**只在真实调用 / 真实故障下才走到**的判据，抽成纯函数后在这儿零花费验
@@ -249,3 +250,8 @@ console.log('\n【8】judgeVaultLost：库目录被拔掉/移走要顶一条，�
 
 console.log(failed ? `\n❌ ${failed} 条不通过\n` : '\n✅ 全部通过\n')
 process.exit(failed ? 1 : 0)
+
+console.log('\n【9】isCloudSyncSkipped：语义索引所在的 .mcnai/ 整目录不进上传清单（第三单）')
+check('.mcnai 跳过', isCloudSyncSkipped('.mcnai'))
+check('.done / .failed / .obsidian / .git 跳过', ['.done', '.failed', '.obsidian', '.git'].every(isCloudSyncSkipped))
+check('普通目录与笔记不跳', !isCloudSyncSkipped('80_资料库') && !isCloudSyncSkipped('总结.md'))

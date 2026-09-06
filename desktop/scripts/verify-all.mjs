@@ -40,6 +40,7 @@ const JOBS = [
   { level: 'L1', name: 'smoke:taxonomy（库配置 · TS↔Py 契约）', cmd: ['npm', ['run', 'smoke:taxonomy']] },
   { level: 'L1', name: 'smoke:guards（超时判据 / stderr 尾缓冲 / argv 无 key / 建库护栏）', cmd: ['npm', ['run', 'smoke:guards']] },
   { level: 'L1', name: 'smoke:usage（账本 · 打标 token 入账 / 计价 / 与对账脚本比对）', cmd: ['npm', ['run', 'smoke:usage']] },
+  { level: 'L1', name: 'smoke:embed（本地 embedding：模型加载 / 分词与参考向量一致 / 960 篇耗时 / 退出不崩）', cmd: ['npm', ['run', 'smoke:embed']] },
   { level: 'L2', name: 'pipeline 冒烟（分流/转换/归档/convert-one）', cmd: ['npm', ['run', 'smoke:pipeline']] },
   { level: 'L3', name: '主走查（本地模式）', cmd: ['node', ['e2e/walkthrough.mjs']] },
   { level: 'L3', name: 'a1-enqueue（投递链路）', cmd: ['node', ['e2e/a1-enqueue.mjs']] },

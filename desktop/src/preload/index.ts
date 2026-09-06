@@ -41,6 +41,7 @@ const api = {
       ipcRenderer.invoke('settings:setSensitiveMode', allowAi, allowCloud),
     /** agent 一轮的墙钟上限（分钟，0 = 关）；管理员区专用（R3） */
     setAgentTimeout: (minutes: number) => ipcRenderer.invoke('settings:setAgentTimeout', minutes),
+    setSemantic: (enabled: boolean) => ipcRenderer.invoke('settings:setSemantic', enabled),
   },
   ai: {
     tiers: () => ipcRenderer.invoke('ai:tiers'),
@@ -63,6 +64,7 @@ const api = {
     tree: () => ipcRenderer.invoke('vault:tree'),
     graph: () => ipcRenderer.invoke('vault:graph'),
     search: (q: string) => ipcRenderer.invoke('vault:search', q),
+    embedStatus: () => ipcRenderer.invoke('vault:embedStatus'),
     read: (relPath: string) => ipcRenderer.invoke('vault:read', relPath),
     resolveLink: (target: string) => ipcRenderer.invoke('vault:resolveLink', target),
     readRaw: (relPath: string) => ipcRenderer.invoke('vault:readRaw', relPath),

@@ -6035,6 +6035,55 @@ try {
     }
 
     /**
+     * 第三单（2026-09-05）：设置页「语义检索」区——降级状态与索引进度**必须可见**（用户拍板），
+     * 不许把"模型加载失败"静默成"已就绪"。断言认 data-state，不认文案；
+     * 篇数从另一侧（vault:embedStatus IPC）取，不在断言里抄常数。
+     */
+    {
+      const sec = win.locator('[data-testid="settings-semantic"]')
+      if (!(await sec.count())) throw new Error('设置页缺少「语义检索」区')
+      const status = win.locator('[data-testid="semantic-status"]')
+      // 建索引跑在后台：走查库 400+ 篇约 2 秒，给 60 秒上限，超了就是"分片续建"该动工了
+      const t0 = Date.now()
+      let state = await status.getAttribute('data-state')
+      while ((state === 'building' || state === 'loading') && Date.now() - t0 < 60_000) {
+        await win.waitForTimeout(500)
+        state = await status.getAttribute('data-state')
+      }
+      const ipc = await win.evaluate(() => window.api.vault.embedStatus())
+      if (state !== ipc.state) throw new Error(`界面语义状态 ${state} ≠ 主进程 ${ipc.state}`)
+      if (state !== 'ready') throw new Error(`语义索引没就绪：${state}（${ipc.reason ?? ''}）——原生模块/模型在走查环境起不来`)
+      const text = await status.innerText()
+      if (!text.includes(`${ipc.count} 篇`)) throw new Error(`状态行没报对篇数：「${text}」，主进程说 ${ipc.count}`)
+      // 开关：真点一次并验两侧状态；先做命中测试（「看得见」≠「点得到」）
+      const toggle = win.locator('[data-testid="semantic-toggle"]')
+      const hit = await toggle.evaluate((el) => {
+        const r = el.getBoundingClientRect()
+        const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+        return el.contains(top) || (top instanceof HTMLLabelElement && top.contains(el)) ? '' : top?.className || 'null'
+      })
+      if (hit) throw new Error(`语义检索开关被挡住/裁掉，命中的是 ${hit}`)
+      await toggle.click()
+      await win.locator('[data-testid="toast"]', { hasText: '语义检索' }).waitFor({ timeout: 5000 })
+      await win.waitForTimeout(400)
+      const off = await win.evaluate(async () => ({ s: await window.api.settings.get(), e: await window.api.vault.embedStatus() }))
+      if (off.s.semanticEnabled !== false) throw new Error('关了开关，设置里 semanticEnabled 还是 true')
+      if (off.e.state !== 'disabled') throw new Error(`关了开关，主进程状态是 ${off.e.state} 而不是 disabled`)
+      if ((await status.getAttribute('data-state')) !== 'disabled') throw new Error('关了开关，状态行没变成「已关闭」')
+      await snap('71-语义检索-已关闭', 200)
+      await toggle.click()
+      // 重开 = 重开库（索引从 .mcnai/embeddings 直接读回，不用重算），给它和首建一样的 60 秒上限
+      const t1 = Date.now()
+      let on = await win.evaluate(() => window.api.vault.embedStatus())
+      while (on.state !== 'ready' && Date.now() - t1 < 60_000) {
+        await win.waitForTimeout(500)
+        on = await win.evaluate(() => window.api.vault.embedStatus())
+      }
+      if (on.state !== 'ready') throw new Error(`重新打开后状态是 ${on.state}（${on.reason ?? ''}），索引没回来`)
+      console.log('第三单 语义检索区 ✓', JSON.stringify({ count: ipc.count, lastBuildMs: ipc.lastBuildMs }))
+    }
+
+    /**
      * F7 昵称：**改完即存**（防抖）+ 一句轻 toast。
      * 原来只挂 `onBlur`——填完直接关窗口/切页面那次输入是静默丢掉的，
      * 而"填了没生效"和"我没填"在用户那里长得一模一样。

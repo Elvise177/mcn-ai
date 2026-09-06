@@ -31,6 +31,7 @@ import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } 
 import { join } from 'path'
 // 只引类型：类型导入编译后消失，不会把 store 提前到 MCNAI_USER_DATA 生效之前初始化
 import type { AgentStreamPayload } from './agent'
+import { mergeSearchRows, noteKey } from './agent/merge' // 纯函数，不带 store，可以静态引
 
 process.env.MCNAI_USER_DATA = process.env.MCNAI_USER_DATA || '/tmp/mcnai-bench-userdata'
 // 与 smoke-chat 一样**显式**改 userData：env-hooks 只在 store 被 import 时才生效，而本文件在动态 import
@@ -68,10 +69,20 @@ interface Job {
   baseUrl?: string
   judge: boolean
   perQuestionTimeoutMs: number
+  /** 第三单：语义结果与关键词结果的合并方式（写进隔离 userData 的 store，执行端与产品走同一条路） */
+  merge?: 'channel' | 'rrf'
+  /** 第三单：关掉语义通道跑对照（等价于第一单形态） */
+  semantic?: boolean
   /** 只判分不跑（重判一份已有结果）：给了就跳过对话，直接读这个 jsonl 重判 */
   rejudgeFrom?: string
   /** 配合 rejudgeFrom：只补判上次判分失败的题，判成功的原样保留（省钱，也别让同一题的分数无故漂移） */
   rejudgeFailedOnly?: boolean
+  /**
+   * 只重放检索不跑对话、不判分（零 LLM）：读这份 jsonl，按每题记录的检索词重放**双通道**检索，
+   * 重算 searches / surfacedShown / surfacedAll，回答与判分原样保留。
+   * 第三单两轮 bench 跑完才发现重放只走关键词通道（语义通道摆出来的条目不计入"摆到面前"），用它把口径补齐
+   */
+  rereplayFrom?: string
 }
 
 interface StepRec {
@@ -115,7 +126,6 @@ interface JudgeResult {
   costCny?: number
 }
 
-const noteKey = (p: string): string => p.replace(/\.md$/i, '').toLowerCase()
 
 /** 账本按月分文件；跑一题前后各数一次行数，差集就是这一题的记录 */
 function ledgerLines(userData: string): string[] {
@@ -296,7 +306,80 @@ async function main(): Promise<void> {
   const userData = app.getPath('userData')
   const { agentManager, SEARCH_SHOWN_LIMIT } = await import('./agent')
   const { resolveTierForRequest, describeTier, setTierConfig } = await import('./ai/tiers')
-  const { keyVault } = await import('./store')
+  const { keyVault, store } = await import('./store')
+  if (job.merge) store.set('semanticMerge', job.merge)
+  if (job.semantic === false) store.set('semanticEnabled', false)
+  else store.set('semanticEnabled', true)
+  vaultManager.setSemanticEnabled(job.semantic !== false)
+  progress(`语义通道：${job.semantic === false ? '关' : '开'}，合并方式 ${store.get('semanticMerge')}`)
+  /**
+   * 重放一次 search_knowledge，拿"模型看到的路径"。**与产品同一份合并函数**（agent/merge.ts）：
+   * 关键词通道 + 语义通道 → channel/rrf 合并 → 前 SEARCH_SHOWN_LIMIT 条。
+   * `all` 是关键词全部命中 ∪ 语义 top-N（surfacedAll 口径：模型翻页也翻不到语义通道以外的）
+   */
+  const replaySearch = async (query: string): Promise<{ query: string; total: number; fuzzy: boolean; semantic: number; shown: string[]; all: string[] }> => {
+    const r = await vaultManager.search(query)
+    const sem = await vaultManager.semanticSearch(query, SEARCH_SHOWN_LIMIT)
+    const rows = mergeSearchRows(r.hits, sem, store.get('semanticMerge') === 'rrf' ? 'rrf' : 'channel', SEARCH_SHOWN_LIMIT)
+    return {
+      query,
+      total: r.total,
+      fuzzy: !!r.fuzzy,
+      semantic: rows.filter((x) => x.sem != null).length,
+      shown: rows.map((x) => x.path),
+      all: [...new Set([...r.hits.map((h) => h.path), ...sem.map((h) => h.path)])],
+    }
+  }
+  const openVault = async (vault: string, root: string): Promise<void> => {
+    // 第二单：先建 wiki 主题页再开库——库副本上没跑过入库 run-end，主题页得在这里补出来，
+    // 与产品在真实入库后的形态一致；开库之后再建会撞 watcher 的写入去抖
+    if (WIKI_PAGES_ENABLED) {
+      const cfg0 = await readVaultConfig(root)
+      const w = await buildWikiPages(root, cfg0.library)
+      progress(`主题页：${w.topics} 个（新建 ${w.created}，敏感 ${w.sensitivePages}）→ ${w.dir}`)
+    }
+    const { noteCount } = await vaultManager.open(root)
+    progress(`打开库 ${vault}（${noteCount} 篇）：${root}`)
+    // 索引就绪闸门在 searcher 里；再用一次真实检索确认它真的回结果了，别拿空索引跑第一题
+    const warm = await vaultManager.search('复盘')
+    progress(`索引预热：「复盘」命中 ${warm.total} 条`)
+    // 第三单：等语义索引建完（或明确不可用）再提问——建到一半的索引会让前几题的语义通道形同虚设
+    const t0 = Date.now()
+    const es = await vaultManager.whenEmbedSettled()
+    progress(`语义索引：${es.state}（${es.count} 篇${es.reason ? `，${es.reason}` : ''}，等了 ${((Date.now() - t0) / 1000).toFixed(1)}s）`)
+  }
+
+  // ---- 只重放检索（零 LLM，不需要线路） ----
+  if (job.rereplayFrom) {
+    const rows = readFileSync(job.rereplayFrom, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+    writeFileSync(job.out, '')
+    let openRoot = ''
+    for (const row of rows) {
+      const q = job.questions.find((x) => x.id === row.id)
+      const root = job.vaults[row.vault as string]
+      if (!q || !root) {
+        appendFileSync(job.out, JSON.stringify(row) + '\n')
+        continue
+      }
+      if (root !== openRoot) {
+        await openVault(row.vault as string, root)
+        openRoot = root
+      }
+      const searches = []
+      for (const s of (row.searches as Array<{ query: string }>) ?? []) searches.push(await replaySearch(s.query))
+      const reads = (row.reads as string[]) ?? []
+      row.searches = searches
+      row.surfacedShown = [...new Set([...searches.flatMap((s) => s.shown), ...reads])]
+      row.surfacedAll = [...new Set([...searches.flatMap((s) => s.all), ...reads])]
+      row.rereplayedAt = new Date().toISOString()
+      appendFileSync(job.out, JSON.stringify(row) + '\n')
+      const hit = q.expected_files.filter((f) => (row.surfacedShown as string[]).some((p) => noteKey(p) === noteKey(f))).length
+      progress(`重放 ${row.id} ✓ 应命中 ${hit}/${q.expected_files.length}（语义通道条目 ${searches.reduce((a, s) => a + s.semantic, 0)}）`)
+    }
+    await vaultManager.close()
+    app.exit(0)
+    return
+  }
   const { tokensOf } = await import('./usage')
   const { costCny } = await import('./usage/pricing')
 
@@ -358,19 +441,8 @@ async function main(): Promise<void> {
     const root = job.vaults[q.vault]
     if (!root) throw new Error(`题 ${q.id} 的库 "${q.vault}" 没有在 job.vaults 里给路径`)
     if (root !== openRoot) {
-      // 第二单：先建 wiki 主题页再开库——库副本上没跑过入库 run-end，主题页得在这里补出来，
-      // 与产品在真实入库后的形态一致；开库之后再建会撞 watcher 的写入去抖
-      if (WIKI_PAGES_ENABLED) {
-        const cfg0 = await readVaultConfig(root)
-        const w = await buildWikiPages(root, cfg0.library)
-        progress(`主题页：${w.topics} 个（新建 ${w.created}，敏感 ${w.sensitivePages}）→ ${w.dir}`)
-      }
-      const { noteCount } = await vaultManager.open(root)
+      await openVault(q.vault, root)
       openRoot = root
-      progress(`打开库 ${q.vault}（${noteCount} 篇）：${root}`)
-      // 索引就绪闸门在 searcher 里；再用一次真实检索确认它真的回结果了，别拿空索引跑第一题
-      const warm = await vaultManager.search('复盘')
-      progress(`索引预热：「复盘」命中 ${warm.total} 条`)
     }
 
     const sessionId = `bench-${q.id}-${Date.now().toString(36)}`
@@ -422,17 +494,10 @@ async function main(): Promise<void> {
 
     // ---- 重放检索，拿到模型看到的路径 ----
     const stepList = [...steps.values()]
-    const searches: Array<{ query: string; total: number; fuzzy: boolean; shown: string[]; all: string[] }> = []
+    const searches: Array<{ query: string; total: number; fuzzy: boolean; semantic: number; shown: string[]; all: string[] }> = []
     for (const s of stepList) {
       if (s.tool !== 'search_knowledge' || !s.args?.query) continue
-      const r = await vaultManager.search(s.args.query)
-      searches.push({
-        query: s.args.query,
-        total: r.total,
-        fuzzy: !!r.fuzzy,
-        shown: r.hits.slice(0, SEARCH_SHOWN_LIMIT).map((h) => h.path),
-        all: r.hits.map((h) => h.path),
-      })
+      searches.push(await replaySearch(s.args.query))
     }
     const reads = stepList.filter((s) => s.tool === 'Read' && s.args?.file).map((s) => s.args!.file)
     const scans = stepList

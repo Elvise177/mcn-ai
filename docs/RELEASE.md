@@ -315,8 +315,12 @@ export APPLE_API_ISSUER="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 发版时：
 
 ```bash
-source ~/.notarize.env && cd desktop && npm run dist
+cd desktop && node scripts/fetch-models.mjs && source ~/.notarize.env && npm run dist
 ```
+
+> `fetch-models.mjs`（2026-09-05 起）：本地 embedding 模型 `resources/models/bge-small-zh-v1.5/` 是 gitignored 的，
+> 新机器 / 清过目录要先拉（24 MB，逐文件 sha256 校验，已在且校验过的秒过）。漏了不会构建失败，
+> 只会让客户机上「语义检索：不可用：模型文件缺失」——`smoke:embed` 与 `verify` 会抓到。
 
 > **不写进 `~/.zshrc`** 是有意的：这三个变量只在发版时该存在。常驻环境里挂着，
 > 万一哪天在别的项目里跑 electron-builder，会莫名其妙地去公证一个不该公证的东西。
@@ -446,7 +450,7 @@ cd desktop && node scripts/verify-signing.mjs
 **全绿才算数**：codesign 深度校验 / 签名主体是 Developer ID Application / Hardened Runtime 已开 /
 entitlements 就是那三条 / `.app` 的 `spctl` accepted 且 `source=Notarized Developer ID` /
 `stapler validate` 对 .app 与 .dmg 都过 / **`.dmg` 自己的 `spctl` 也 accepted** /
-**包内每一个 Mach-O 都签了**。
+**包内每一个 Mach-O 都签了**（2026-09-05 起 113 个：pipeline 的 89 MB onedir + onnxruntime-node 的 `.node`/dylib；数字变了要能说出加了哪片）。
 
 > **两条是踩出来的，别删**：
 > - **`.dmg` 的 spctl**（不能拿它的 `stapler validate` 顶替）。dmg 只公证不签名时

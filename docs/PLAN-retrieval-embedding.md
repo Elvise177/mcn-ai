@@ -1,6 +1,6 @@
 # 检索优化第三单方案：本地 embedding（摘要级语义通道）
 
-> 状态：**待批**（2026-09-05 出方案，批后动工）
+> 状态：**已批（2026-09-05）→ 已实现 → bench 达标（2026-09-06），合并方式定 channel 7+3**（数字见 `docs/RETRIEVAL-BENCH.md` §7）。批时用户加了三条：①onnxruntime-node 是本单最大工程风险，先做最小打包实测再写检索逻辑；②两种合并模式都跑，选定后写进 HANDOFF；配额 7+3 不理想再试 6+4，不多于两轮；③降级状态与索引进度进设置页可见，建索引后台跑不阻塞入库。实现与方案的出入见文末「§10 实现记录」。
 > 前情：第一单（策略层）把能拿的拿完；第二单（wiki 页 + 引擎参数）试跑未达标、默认关闭——关键词引擎的天花板已到（`docs/RETRIEVAL-BENCH.md` §5–6）。剩下的三种词汇鸿沟只有语义匹配能救。
 > 原则不变：不改题不改判分；每条改动对着 bench 里具体哪几题说话；敏感文件不出门。
 
@@ -113,3 +113,25 @@ q8 权重 24 MB + tokenizer 1 MB，放 `resources/models/bge-small-zh-v1.5/`，�
 | 关键词 / 敏感区召回 | 95% / 100% | 不许掉（语义通道只加 3 条，关键词前 7 不动） |
 | 陷阱拒答 | 5/5 | 5/5 |
 | 单题耗时 | 中位 45 s | +≤2 s（一次 embed 查询 5 ms，模型热加载 0.1 s） |
+
+## 10. 实现记录（2026-09-05，与上文方案的出入都在这）
+
+**打包实测先行（用户加的第①条）**——两次 `npm run dist` 都出了包：
+
+| 项 | 方案里写的 | 实测 |
+|---|---|---|
+| 运行时 | `@huggingface/transformers` | **改为直接 onnxruntime-node + 自写 BERT WordPiece 分词**（`vault/embedder.ts`）。transformers.js 3 硬依赖 sharp（libvips 16 MB 原生库），平白多一片要签的 Mach-O；自写分词与它逐 token 一致（`smoke:embed` 用 4 段文本比参考向量，前 3 维 \|Δ\|<0.005），直调快 5 倍（1.1 对 5.1 ms/篇） |
+| onnxruntime-node 版本 | 未指定 | **必须 ≥1.29**。1.21 在 Electron 43（Node 24）进程退出时静态析构撞锁 `mutex lock failed` → SIGABRT，与线程数 / release() / process.exit 都无关（五种组合全试）；1.29.0 消失。`package.json` 锁 `^1.29.0`，`smoke:embed` 的退出码守着 |
+| 分发 | extraResources | `resources/models/bge-small-zh-v1.5/` 随包（gitignored，`scripts/fetch-models.mjs` 拉取并逐文件 sha256 校验，打包前跑一次）；`electron-builder.yml` 把 onnxruntime-node 整包 asarUnpack，剔掉 win32/linux 二进制 |
+| Mach-O 计数 | "110 → 11x" | **113**（+2 onnxruntime dylib/.node +1）。顺手修了 `verify-signing.mjs` 的 find：原来只找可执行位文件，**不可执行的 .dylib/.node 一直没在数**——新 `.node` 没有 x 位，计数卡在 110 才发现 |
+| dmg 体积 | ~255 MB | **275 MB**（0.1.3 为 ~230；模型 24 MB + onnxruntime ~40 MB） |
+| 包内冒烟 | — | `ELECTRON_RUN_AS_NODE=1 <App>/Contents/MacOS/SamePage <App>/Contents/Resources/app.asar/out/main/smoke-embed.js` 全绿：加载、512 维、归一化、参考向量、语义序、960 篇 2.16 s、卸载。第一次在包里栽在 `require('electron')`（asar 里没有那个 npm 包）→ 改惰性 try/catch |
+| 建索引 | worker 线程 | **主进程分批**（每批 16、批间 setImmediate 让出事件循环）。960 篇 2.2 s（2 线程），实测不堵 IPC；真到 Intel 旧机超 60 s 再搬 worker |
+| 降级档 | 三档 | 五态 `ready / building / unavailable / empty / disabled`，设置页「知识库」卡里「语义检索」区：开关 + 状态行（`data-state` 供走查断言）；building 时每 2 s 轮询进度 |
+| 上云边界 | 跳过 `.mcnai/` | `isCloudSyncSkipped()`：cloudSync walk 跳过所有点开头目录，`smoke:guards` 【9】断言 |
+| 合并 | channel 为主，bench 两种都跑 | `store.semanticMerge: 'channel' \| 'rrf'`（默认 channel，7+3；关键词为 0 时语义 top5 顶上；RRF k=60），bench `--merge` 切 |
+
+公证：本单两次打包都**没 source `~/.notarize.env`**，公证按设计跳过（`verify-signing` 会红在 stapler 那两条）；发版前按 `docs/RELEASE.md` §B 走一遍。
+
+**合并方式定 channel（7+3）**：同 18 题 channel 召回 98% / 全命中 94%，rrf 89% / 69%；§4 里"RRF 会让语义噪音与精确命中同台"在 M-X4「班委」一题被现场抓到（4 份绩效档案挤掉真命中）。6+4 没试。
+**尺子修正**：bench 重放原只走关键词通道 → 合并抽成 `agent/merge.ts` 纯函数两侧共用，`--rereplay` 零花费重算。完整记录 `docs/RETRIEVAL-BENCH.md` §7、HANDOFF §0-新m。

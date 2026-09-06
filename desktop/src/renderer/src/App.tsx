@@ -916,6 +916,66 @@ function SensitiveSection() {
   )
 }
 
+/**
+ * 语义索引（检索优化第三单）：状态一行 + 开关。
+ * 三档文案对应 embed-index 的 state：ready「已建 N 篇」/ building「建索引中 M/N」/ unavailable「不可用（原因）」/
+ * empty「暂无可索引笔记」/ disabled「已关闭」。建索引中每 2 秒刷一次，就绪后停。**失败原因原样显示**，不许糊成"已就绪"。
+ */
+function SemanticSection() {
+  const [enabled, setEnabled] = useState(true)
+  const [st, setSt] = useState<EmbedStatus | null>(null)
+  const refreshStatus = async (): Promise<void> => {
+    try {
+      setSt(await window.api.vault.embedStatus())
+    } catch {
+      /* 没开库时主进程也会回一个 empty/disabled 状态；这里的 catch 只兜 IPC 本身的错 */
+    }
+  }
+  useEffect(() => {
+    void window.api.settings.get().then((s) => setEnabled(s.semanticEnabled !== false))
+    void refreshStatus()
+  }, [])
+  useEffect(() => {
+    if (st?.state !== 'building') return
+    const t = setInterval(() => void refreshStatus(), 2000)
+    return () => clearInterval(t)
+  }, [st?.state])
+  const line = !st
+    ? '…'
+    : st.state === 'disabled'
+      ? '已关闭'
+      : st.state === 'ready'
+        ? `已建 ${st.count} 篇${st.lastBuildMs != null ? `（${(st.lastBuildMs / 1000).toFixed(1)} 秒）` : ''}`
+        : st.state === 'building'
+          ? `建索引中 ${st.count}/${st.total} 篇…`
+          : st.state === 'empty'
+            ? '暂无可索引的笔记'
+            : `不可用：${st.reason ?? '未知原因'}——已退回关键词检索`
+  return (
+    <div className="space-y-2 border-t border-line pt-4" data-testid="settings-semantic">
+      <div className="text-md font-medium">语义检索</div>
+      <label className="flex cursor-pointer items-center gap-2 text-md">
+        <input
+          type="checkbox"
+          data-testid="semantic-toggle"
+          checked={enabled}
+          onChange={(e) => {
+            const v = e.target.checked
+            setEnabled(v)
+            void saveWithToast('语义检索', () => window.api.settings.setSemantic(v)).then(() => void refreshStatus())
+          }}
+          className="accent-accent"
+        />
+        用本地模型按含义匹配笔记（问法与文档用词不同也能找到）
+      </label>
+      <div className="text-sm leading-5 text-muted" data-testid="semantic-status" data-state={st?.state ?? 'loading'}>
+        语义索引：{line}
+      </div>
+      <div className="text-sm leading-5 text-muted">模型与索引都在本机，文件内容不会因此离开电脑；关闭后只用关键词检索。</div>
+    </div>
+  )
+}
+
 /** 投递箱分流：客户可自助配置「投递箱子文件夹 → 落位目录」规则，无需碰配置文件 */
 function RoutesSection() {
   const [routes, setRoutesState] = useState<Array<{ name: string; dest: string; builtin?: boolean }>>([])
@@ -1592,6 +1652,7 @@ function SettingsPage({
       <Card title="知识库" testId="settings-group-vault">
         <IngestSection />
         <SensitiveSection />
+        <SemanticSection />
         <RoutesSection />
       </Card>
 

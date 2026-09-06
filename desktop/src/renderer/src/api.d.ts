@@ -1,6 +1,16 @@
 /** 会话级模型档位：界面上只有这两个语义，供应商与模型名一律不出现在普通模式 */
 type TierId = 'standard' | 'enhanced'
 
+/** 语义索引状态（第三单；与主进程 vault/embed-index.ts 的 EmbedStatus 同形） */
+interface EmbedStatus {
+  state: 'disabled' | 'unavailable' | 'building' | 'ready' | 'empty'
+  count: number
+  total: number
+  reason?: string
+  model: string
+  lastBuildMs?: number
+}
+
 interface AiTier {
   id: TierId
   /** 「标准（推荐）」/「增强」 */
@@ -67,6 +77,10 @@ interface DesktopSettings {
   appVersion?: string
   /** agent 一轮的墙钟上限（分钟，0 = 关；出厂 15）。见 main/agent/timeout.ts */
   agentTimeoutMin?: number
+  /** 第三单：语义通道 */
+  semanticEnabled?: boolean
+  semanticMerge?: 'channel' | 'rrf'
+  semantic?: EmbedStatus
 }
 
 type TaskKind = 'inbox' | 'agent' | 'ingest' | 'sync' | 'secret'
@@ -393,6 +407,7 @@ interface Window {
       setSensitiveMode: (allowAi: boolean, allowCloud: boolean) => Promise<{ ok: boolean }>
       /** agent 一轮的墙钟上限（分钟，0 = 关）；管理员区专用 */
       setAgentTimeout: (minutes: number) => Promise<{ ok: boolean; minutes: number }>
+      setSemantic: (enabled: boolean) => Promise<{ ok: boolean }>
     }
     ai: {
       tiers: () => Promise<{ tiers: AiTier[] }>
@@ -426,6 +441,7 @@ interface Window {
       tree: () => Promise<VaultTreeNode[]>
       graph: () => Promise<GraphData>
       search: (q: string) => Promise<SearchResult>
+      embedStatus: () => Promise<EmbedStatus>
       read: (relPath: string) => Promise<NoteContent>
       resolveLink: (target: string) => Promise<string | null>
       readRaw: (relPath: string) => Promise<string>

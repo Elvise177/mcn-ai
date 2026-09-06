@@ -23,6 +23,7 @@ import { conversationMessages, type ChatMessage } from './conversations'
 import { buildRecoveryPrompt, isResumeLost } from './resume-recovery'
 import { approvalKey, judgeWrite } from './write-guard'
 import { buildSystemPrompt } from './system-prompt'
+import { mergeSearchRows, noteKey } from './merge'
 import { judgeTimeout, resolveTimeoutMs } from './timeout'
 import { readVaultConfig } from '../vault/taxonomy'
 import { backupBeforeWrite, takeUndoNotice } from './write-backup'
@@ -479,7 +480,6 @@ export class AgentManager {
      * 收尾时拿它校验回答里的每一条 `[[…]]`——引用了没看过的东西就是没有依据
      */
     const surfaced = new Set<string>()
-    const noteKey = (p: string): string => p.replace(/\.md$/i, '').toLowerCase()
     const startedAt = Date.now()
 
     /**
@@ -592,32 +592,47 @@ export class AgentManager {
                 return { content: [{ type: 'text', text }] }
               }
               const { hits, fuzzy, total, dropped } = await vaultManager.search(q)
-              // 同一篇只给一次（索引按笔记建，理论上不重复；守一道，放宽条数后重复更显眼）
-              const seen = new Set<string>()
-              const unique = hits.filter((h) => {
-                const k = noteKey(h.path)
-                if (seen.has(k)) return false
-                seen.add(k)
-                return true
+              /**
+               * 第三单：语义通道（本地 bge-small，摘要级）。索引没就绪 / 用户关了 → 回空数组，行为退回纯关键词。
+               * 合并逻辑在 `agent/merge.ts`（纯函数，bench 重放与这里共用一份，否则尺子量不到语义通道摆出来的条目）。
+               * 语义来的条目一律带〔语义相近 分值〕标记 + "先验证再引"的规矩——它们没有词面证据，与相近结果同一档位。
+               */
+              const sem = await vaultManager.semanticSearch(q, SEARCH_SHOWN_LIMIT)
+              const merged = mergeSearchRows(hits, sem, store.get('semanticMerge') === 'rrf' ? 'rrf' : 'channel', SEARCH_SHOWN_LIMIT)
+              const rows = merged.map((m) => {
+                if (m.kw) return { path: m.kw.path, title: m.kw.title, snippet: m.kw.snippet, sem: undefined as number | undefined }
+                const note = vaultManager.noteAt(m.path)
+                const summary = typeof note?.frontmatter?.summary === 'string' ? note.frontmatter.summary : ''
+                return { path: m.path, title: note?.title ?? m.path.split('/').pop()!.replace(/\.md$/, ''), snippet: summary, sem: m.sem }
               })
-              for (const h of unique) surfaced.add(noteKey(h.path))
-              if (!unique.length) return { content: [{ type: 'text', text: '（无命中）' }] }
-              const shown = unique.slice(0, SEARCH_SHOWN_LIMIT)
-              const list = shown.map((h, i) => `${i + 1}. [[${h.title}]] (${h.path})\n   ${h.snippet}`).join('\n')
-              const more = unique.length > shown.length ? `\n（共 ${total} 条命中，只列前 ${shown.length} 条；要看更多就换更具体的词再检索）` : ''
+              const uniqueKw = new Set(hits.map((h) => noteKey(h.path))).size
+              for (const r of rows) surfaced.add(noteKey(r.path))
+              if (!rows.length) return { content: [{ type: 'text', text: '（无命中）' }] }
+              const semCount = rows.filter((r) => r.sem != null).length
+              const list = rows
+                .map((r, i) => `${i + 1}. [[${r.title}]] (${r.path})${r.sem != null ? `〔语义相近 ${r.sem.toFixed(2)}〕` : ''}\n   ${r.snippet}`)
+                .join('\n')
+              const kwShown = rows.filter((r) => r.sem == null).length
+              const more = uniqueKw > kwShown ? `\n（关键词共 ${total} 条命中，只列前 ${kwShown} 条；要看更多就换更具体的词再检索）` : ''
+              const semNote = semCount
+                ? `\n（标〔语义相近〕的 ${semCount} 条是按**含义**匹配到的，不含问题里的原词。引用它们之前必须先 Read 或 Grep 确认真的包含问题要的内容；确认不了的只能写成「推断」，不加 [[引用]]）`
+                : ''
               // 模糊那一遍的结果必须**说出来**：模型分不清「精确命中」和「相近结果」时，
               // 会把相近的当成答案讲出去——陷阱题就是这么从假阴性变成假阳性的。
               // 基线（2026-09-05）语义题引用正确率 41%：相近结果被当成来源直接引。所以这里把规矩一起说：
               // 相近结果**先验证再引**——Read 或 Grep 确认它真含问题里的关键词，否则只能作为"推断"。
               // 第二单的"去掉一个词"档：命中是真命中，但**不含被去掉的那个词**——必须说出来，
               // 否则「珀莱雅 年框 结案」去掉"珀莱雅"后的向日花年框会被当成珀莱雅的答案
-              const text = fuzzy
-                ? `（精确检索无命中，以下是**相近结果**，可能与问题无关；不要据此断定库里有这份资料。` +
-                  `引用其中任何一篇之前，必须先 Read 它或用 Grep 确认它真的包含问题里的关键词；确认不了的只能写成「推断」，不加 [[引用]]）\n${list}${more}`
-                : dropped
-                  ? `（全部词同时命中的笔记为 0；以下是**去掉「${dropped}」之后**的命中——它们不含「${dropped}」，` +
-                    `不能据此断定库里有与「${dropped}」相关的资料。要确认「${dropped}」是否存在，请单独检索或 Grep 它）\n${list}${more}`
-                  : list + more
+              const text = !uniqueKw
+                ? `（关键词检索无命中，以下全部是按**含义**匹配的相近笔记，可能与问题无关；不要据此断定库里有这份资料。` +
+                  `引用其中任何一篇之前，必须先 Read 它或用 Grep 确认它真的包含问题里的关键词；确认不了的只能写成「推断」，不加 [[引用]]）\n${list}`
+                : fuzzy
+                  ? `（精确检索无命中，以下是**相近结果**，可能与问题无关；不要据此断定库里有这份资料。` +
+                    `引用其中任何一篇之前，必须先 Read 它或用 Grep 确认它真的包含问题里的关键词；确认不了的只能写成「推断」，不加 [[引用]]）\n${list}${more}${semNote}`
+                  : dropped
+                    ? `（全部词同时命中的笔记为 0；以下是**去掉「${dropped}」之后**的命中——它们不含「${dropped}」，` +
+                      `不能据此断定库里有与「${dropped}」相关的资料。要确认「${dropped}」是否存在，请单独检索或 Grep 它）\n${list}${more}${semNote}`
+                    : list + more + semNote
               return { content: [{ type: 'text', text }] }
             }
           ),

@@ -133,7 +133,9 @@ if (dmgPath && existsSync(dmgPath)) {
 // 7 包内每一个 Mach-O 都签了（PyInstaller 的 _internal 是最容易漏的一片）
 const machos = sh('bash', [
   '-c',
-  `find "${appPath}" -type f -perm +111 -print0 | xargs -0 file 2>/dev/null | grep "Mach-O" | cut -d: -f1`,
+  // **不能只找带执行位的**：npm 包里的 .dylib / .node 常常是 -rw-r--r--（onnxruntime-node 的三个二进制就是），
+  // 只按 -perm +111 找会整片漏掉——第三单第一次打包实测时 110 个的计数纹丝不动，其实包里多了 3 个没被数进去的
+  `find "${appPath}" -type f \\( -perm +111 -o -name "*.dylib" -o -name "*.node" -o -name "*.so" \\) -print0 | xargs -0 file 2>/dev/null | grep "Mach-O" | cut -d: -f1`,
 ]).out
   .split('\n')
   .map((x) => x.trim())
