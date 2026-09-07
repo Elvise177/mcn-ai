@@ -235,8 +235,34 @@ try {
   const ask = async (text, budgetS) => {
     const base = totalAssistant(await win.evaluate(() => window.api.chat.list()))
     const ta = win.locator('textarea').first()
+    /**
+     * **发之前先等上一轮真的终态**（2026-09-06 假红一次才补的）。
+     *
+     * 原来这里直接 fill + Enter，而上一次 `ask` 的返回判据是"消息数涨了且 `.streaming-body` 没了"。
+     * 那两件事**不等于"主进程已经可以接下一条"**：agent 任务还没落终态时主进程会**拒绝**这次发送
+     * （设计 §5.3：渲染层照发、主进程拒并回一条带「停止当前生成」的提示），
+     * 于是草稿原样留在输入框里、一个字都没发出去，而 `ask` 只会在 420 秒后回 null，
+     * 报成「产物生成了 ❌ null」——**方向完全指错**：看着像 AI 不会做 Word，
+     * 实际是第二个问题压根没发出去（截图里那句话还躺在输入框里）。同一台机器紧接着重跑就全绿。
+     *
+     * 判据改成从**另一侧**取（任务层的 agent 任务有没有还在 queued/running），
+     * 并且发完立刻验草稿清空——发没发出去必须当场知道，不能靠 420 秒后的空结果去猜。
+     */
+    for (let i = 0; i < 60; i++) {
+      const busy = await win.evaluate(async () => {
+        const snap = await window.api.tasks.list()
+        return (snap.tasks ?? []).some((t) => t.kind === 'agent' && (t.status === 'queued' || t.status === 'running'))
+      })
+      if (!busy) break
+      await win.waitForTimeout(1000)
+    }
     await ta.fill(text)
     await ta.press('Enter')
+    // 草稿没清空 = 这次发送被拒了（主进程认为上一轮还在生成），立刻说出来
+    await win.waitForTimeout(500)
+    const left = await ta.inputValue()
+    if (left.trim() === text.trim())
+      throw new Error(`这一句根本没发出去（主进程拒了，草稿还在输入框里）：「${text}」`)
     for (let i = 0; i < budgetS; i++) {
       const cs = await win.evaluate(() => window.api.chat.list())
       const streaming = await win.evaluate(() => !!document.querySelector('.streaming-body'))
