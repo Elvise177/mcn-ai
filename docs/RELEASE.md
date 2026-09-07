@@ -497,7 +497,18 @@ cd desktop && MCNAI_APP_BIN="$PWD/release/mac-arm64/mcn-ai.app/Contents/MacOS/mc
 ```
 
 跑完要看到 `语义索引 ✓ N 条 == 文件树 N 篇`（零 LLM，约 3–5 分钟）。
-包内还可以单独把 embedding 冒烟跑一遍（只验原生模块能不能起来，10 秒）：
+
+**包内 embedding 冒烟这一条不许省**（2026-09-06 第一次跑 0.1.4 的包就红在它上面）：
+`smoke-embed` 那一节新引了 `vault/embed-index` → 间接引到 `lib/logger`，而 logger 当时是
+`import { app } from 'electron'` **静态 import**——`ELECTRON_RUN_AS_NODE=1` 在 asar 里
+`require('electron')` 必然 MODULE_NOT_FOUND，于是整个包内冒烟起不来。
+**开发形态一切正常**（dev 下 electron 是真装着的），`npm run verify` 16/16 全绿，
+`verify-signing` 也全绿——只有这一条抓得到。已把 logger 改成惰性取 electron：
+
+```bash
+ELECTRON_RUN_AS_NODE=1 desktop/release/mac-arm64/SamePage.app/Contents/MacOS/SamePage \
+  desktop/release/mac-arm64/SamePage.app/Contents/Resources/app.asar/out/main/smoke-embed.js
+```
 
 ```bash
 ELECTRON_RUN_AS_NODE=1 desktop/release/mac-arm64/mcn-ai.app/Contents/MacOS/mcn-ai \
