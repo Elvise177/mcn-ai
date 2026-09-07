@@ -6,7 +6,20 @@
 
 ---
 
-## 0-新n. 入库链路 × 语义索引（第四单，2026-09-06）——代码已推，**未发版**（用户叫停打包）
+## 0-新n. 入库链路 × 语义索引（第四单，2026-09-06）——**0.1.4 已签名公证并上传更新源**
+
+> **0.1.4 发版记录（2026-09-07）**：dmg 出自 `cda9079`（其后的 `57c90e5` 只动 e2e 脚本，产品代码零改动）。
+> 公证 `Accepted`（submission `8359623b-148b-47dd-b41e-77fe885de75e`）、`stapler` 已订票；
+> `verify-signing` 10 项全绿（**包内 Mach-O 113 个全部已签**）；带 quarantine 的隔离实测
+> dmg 与 app **双 accepted / source=Notarized Developer ID**。
+> 包内冒烟：`smoke-embed` 全绿（含索引生命周期 15 条）；`MCNAI_APP_BIN` 形态的 `a1-enqueue`
+> **272 条索引 == 文件树 272 篇**、删一篇 → 271；`fresh-install` 全绿。
+> 更新源 `https://samepage-updates.oss-cn-chengdu.aliyuncs.com/mac/`：zip → blockmap → dmg → **yml 最后**，
+> `latest-mac.yml` 已设 `Cache-Control: max-age=60`；三个包 HTTP 200 且远端大小与本地逐一相等。
+> dmg **288.3 MB**（0.1.3 是 246.7 MB；模型 24 MB + onnxruntime + pipeline 重冻结）。
+>
+> **出包时逮到两件事，都记在下面**：`lib/logger` 的静态 `import electron` 让包内冒烟起不来（真 bug，已修）；
+> `fresh-install` 的 `ask` 时序假设假红一次（走查脚本，已硬化）。
 
 > 提交：mcn-ai `787f465`（代码）＋ pkb-pipeline `86bd7e4`（打标提示词与 `--print-prompt`，已 push）。
 > 这一单是 §0-新m 末尾用户拍板的那三条 + 两处 prompt。
@@ -128,7 +141,23 @@ J-S2 这次失手的主因是 **n 词 AND 一票返回 0**，摘要口径是缓�
 **这一单的另外两处 prompt 改动都留着**：打标 summary 新口径（门禁 ② 验过）、以及第一单起就在的规则 3c。
 教训：**单类型 10 题的一轮不足以判一条提示词有没有用**，至少两轮同向才敢写"有效"。
 
-**记账**：全 45 题 ¥13.90 + 打标探针 ¥0.1375 = ¥14.04。**累计 ¥71.20 → ¥85.24**。
+**记账**：全 45 题 ¥13.90 + 打标探针 ¥0.1375 + fresh-install 两轮真实调用 ≈¥0.8 = ¥14.84。
+**累计 ¥71.20 → 约 ¥86.0**。
+
+**出包时逮到的两件事（都不是这一单的功能引入的，是出包这一步才照出来的）**
+
+1. **真 bug：`lib/logger` 的静态 `import { app } from 'electron'`**。包内用 `ELECTRON_RUN_AS_NODE=1`
+   跑冒烟时 `require('electron')` 必然 MODULE_NOT_FOUND（asar 里没有那个 npm 包），
+   于是**凡是间接引到 logger 的入口在包里都起不来**。这一单给 `smoke-embed` 加了索引生命周期一节
+   → 引 `embed-index` → 引 logger，把这条老路第一次踩响。
+   **它躲过了所有别的闸门**：`verify` 16/16 绿、`verify-signing` 10 项绿、Gatekeeper 双 accepted——
+   只有"包内跑冒烟"这一条抓得到。第三单在 `embedder.ts` 里治过同样的症状，病根其实在 logger。
+   已改成惰性 require + 落临时目录兜底（`cda9079`），RELEASE.md §B 第 4 步写明这条不许省
+2. **走查假红：`fresh-install` 的 `ask` 时序假设**（`57c90e5`）。它按"消息数涨了 + `.streaming-body` 没了"
+   判上一轮结束，而那**不等于主进程能接下一条**——agent 任务没落终态时主进程会拒收，
+   草稿原样留在输入框里。表现是【8】报「产物生成了 ❌ null」，看着像 AI 不会做 Word，
+   **截图里那句话还躺在输入框中**。同一个包重跑一次全绿。
+   判据改成从任务层取 + 发完当场验草稿清空
 
 **这一单没做、留给下一步的**（用户 2026-09-06 叫停打包时的原话是"可能还有待优化的地方"）：
 1. **《2026年中复盘会议纪要》长表压排名**——§8 里 9 份"没摆到面前"的文件有 3 份栽在这一份上，
